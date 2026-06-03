@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>BaroWardrobeSwitcher</AssemblyName>
+    <RootNamespace>BaroWardrobeSwitcher</RootNamespace>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+    <OutputPath>../bin/Client/Windows/</OutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="obj/**" />
+    <Compile Remove="../bin.disabled-precompiled-20260603/**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="Barotrauma">
+      <HintPath>../../LuaCsForBarotrauma/Publicized/Barotrauma.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="BarotraumaCore">
+      <HintPath>../../LuaCsForBarotrauma/Publicized/BarotraumaCore.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>../../../0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="MoonSharp.Interpreter">
+      <HintPath>../../../MoonSharp.Interpreter.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="XNATypes">
+      <HintPath>../../../XNATypes.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>
