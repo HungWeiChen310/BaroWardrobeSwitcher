@@ -41,7 +41,7 @@ namespace BaroWardrobeSwitcher
 
     public static class VisualOverride
     {
-        public const string Version = "0.3.5";
+        public const string Version = "0.3.6";
 
         private static readonly Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>> FashionSpritesByCharacter =
             new Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>>();
@@ -94,6 +94,10 @@ namespace BaroWardrobeSwitcher
             AccessTools.Field(typeof(ItemComponent), "sounds");
         private static readonly FieldInfo ForcePlaySoundsField =
             AccessTools.Field(typeof(StatusEffect), "forcePlaySounds");
+        private static readonly FieldInfo LoopSoundField =
+            AccessTools.Field(typeof(StatusEffect), "loopSound");
+        private static readonly FieldInfo ItemSoundLoopField =
+            AccessTools.Field("Barotrauma.Items.Components.ItemSound:Loop");
         private static readonly MethodInfo MemberwiseCloneMethod = AccessTools.Method(typeof(object), "MemberwiseClone");
         private static readonly PropertyInfo CharacterRemovedProperty = AccessTools.Property(typeof(Character), "Removed");
         private const float DrawDepthStep = 0.000001f;
@@ -411,7 +415,7 @@ namespace BaroWardrobeSwitcher
                     spriteList = new List<WearableSprite>();
                     spritesBySlot[key] = spriteList;
                 }
-                spriteList.Add(CreateFashionSpriteClone(sprite));
+                spriteList.Add(CreateFashionSpriteClone(character, sprite));
                 count++;
             }
             drawOverrideLogCount = 0;
@@ -627,6 +631,7 @@ namespace BaroWardrobeSwitcher
         internal static void KeepFashionEffectsAlive(AnimController animController)
         {
             KeepFashionAnimationsAlive(animController);
+            KeepFashionSoundsAlive(animController);
         }
 
         private static void KeepFashionAnimationsAlive(AnimController animController)
@@ -649,6 +654,35 @@ namespace BaroWardrobeSwitcher
                 catch (Exception ex)
                 {
                     LogAnimationError($"Failed to refresh fashion animation: {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+        }
+
+        private static void KeepFashionSoundsAlive(AnimController animController)
+        {
+            Character character = animController?.Character;
+            if (character == null || !ActiveCharacters.Contains(character)) { return; }
+
+            if (FashionSoundsByCharacter.TryGetValue(character, out List<FashionSoundEffect> statusSounds))
+            {
+                foreach (FashionSoundEffect fashionSound in statusSounds)
+                {
+                    if (fashionSound?.StatusEffect == null || !HasLoopingSound(fashionSound.StatusEffect)) { continue; }
+                    TryPlaySpecificFashionSound(
+                        character,
+                        fashionSound.StatusEffect,
+                        character,
+                        character.CurrentHull,
+                        character.WorldPosition);
+                }
+            }
+
+            if (FashionComponentSoundsByCharacter.TryGetValue(character, out List<FashionComponentSound> componentSounds))
+            {
+                foreach (FashionComponentSound fashionSound in componentSounds)
+                {
+                    if (fashionSound?.Component == null || !HasLoopingComponentSound(fashionSound.Component, fashionSound.ActionType)) { continue; }
+                    TryPlaySpecificFashionComponentSound(character, fashionSound.Component, fashionSound.ActionType, character);
                 }
             }
         }
@@ -775,6 +809,7 @@ namespace BaroWardrobeSwitcher
                 foreach (StatusEffect statusEffect in statusEffects)
                 {
                     if (!HasSounds(statusEffect)) { continue; }
+                    if (IsFashionStatusSound(character, statusEffect)) { continue; }
                     suppressedSounds.Add(statusEffect);
                     SuppressedEquipmentSoundOwners[statusEffect] = character;
                 }
@@ -797,6 +832,7 @@ namespace BaroWardrobeSwitcher
             foreach (ItemComponent component in item.Components)
             {
                 if (component == null || !HasComponentSounds(component)) { continue; }
+                if (IsFashionComponentSound(character, component)) { continue; }
                 suppressedComponents.Add(component);
                 SuppressedEquipmentComponentSoundOwners[component] = character;
             }
@@ -890,6 +926,22 @@ namespace BaroWardrobeSwitcher
             return hasStatusSounds || hasComponentSounds;
         }
 
+        private static bool IsFashionStatusSound(Character character, StatusEffect statusEffect)
+        {
+            return character != null &&
+                   statusEffect != null &&
+                   FashionSoundsByCharacter.TryGetValue(character, out List<FashionSoundEffect> statusSounds) &&
+                   statusSounds.Any(sound => ReferenceEquals(sound.StatusEffect, statusEffect));
+        }
+
+        private static bool IsFashionComponentSound(Character character, ItemComponent component)
+        {
+            return character != null &&
+                   component != null &&
+                   FashionComponentSoundsByCharacter.TryGetValue(character, out List<FashionComponentSound> componentSounds) &&
+                   componentSounds.Any(sound => ReferenceEquals(sound.Component, component));
+        }
+
         private static bool TryPlayReplacementFashionSound(
             Character character,
             List<FashionSoundEffect> fashionSounds,
@@ -910,50 +962,69 @@ namespace BaroWardrobeSwitcher
                 if (fashionSound?.StatusEffect == null) { continue; }
 
                 FashionSoundCursorByCharacter[character] = (index + 1) % fashionSounds.Count;
-                bool originalForcePlay = false;
-                bool forcePlayChanged = false;
-                try
-                {
-                    if (ForcePlaySoundsField != null)
-                    {
-                        object originalValue = ForcePlaySoundsField.GetValue(fashionSound.StatusEffect);
-                        originalForcePlay = originalValue is bool boolValue && boolValue;
-                        ForcePlaySoundsField.SetValue(fashionSound.StatusEffect, true);
-                        forcePlayChanged = true;
-                    }
-
-                    PlaySoundMethod.Invoke(
-                        fashionSound.StatusEffect,
-                        new object[]
-                        {
-                            entity ?? character,
-                            hull ?? character.CurrentHull,
-                            worldPosition
-                        });
-                    return true;
-                }
-                catch (Exception ex)
-                {
-                    LogSoundError($"Failed to replace equipment sound with saved appearance sound: {ex.GetType().Name}: {ex.Message}");
-                    return false;
-                }
-                finally
-                {
-                    if (forcePlayChanged)
-                    {
-                        try
-                        {
-                            ForcePlaySoundsField.SetValue(fashionSound.StatusEffect, originalForcePlay);
-                        }
-                        catch (Exception ex)
-                        {
-                            LogSoundError($"Failed to restore sound force flag: {ex.GetType().Name}: {ex.Message}");
-                        }
-                    }
-                }
+                return TryPlaySpecificFashionSound(
+                    character,
+                    fashionSound.StatusEffect,
+                    entity,
+                    hull,
+                    worldPosition,
+                    forceRestart: true);
             }
 
             return false;
+        }
+
+        private static bool TryPlaySpecificFashionSound(
+            Character character,
+            StatusEffect statusEffect,
+            Entity entity,
+            Hull hull,
+            Vector2 worldPosition,
+            bool forceRestart = false)
+        {
+            if (character == null || statusEffect == null || PlaySoundMethod == null) { return false; }
+
+            bool originalForcePlay = false;
+            bool forcePlayChanged = false;
+            try
+            {
+                if (forceRestart && ForcePlaySoundsField != null)
+                {
+                    object originalValue = ForcePlaySoundsField.GetValue(statusEffect);
+                    originalForcePlay = originalValue is bool boolValue && boolValue;
+                    ForcePlaySoundsField.SetValue(statusEffect, true);
+                    forcePlayChanged = true;
+                }
+
+                PlaySoundMethod.Invoke(
+                    statusEffect,
+                    new object[]
+                    {
+                        entity ?? character,
+                        hull ?? character.CurrentHull,
+                        worldPosition
+                    });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogSoundError($"Failed to play saved appearance sound: {ex.GetType().Name}: {ex.Message}");
+                return false;
+            }
+            finally
+            {
+                if (forcePlayChanged)
+                {
+                    try
+                    {
+                        ForcePlaySoundsField.SetValue(statusEffect, originalForcePlay);
+                    }
+                    catch (Exception ex)
+                    {
+                        LogSoundError($"Failed to restore sound force flag: {ex.GetType().Name}: {ex.Message}");
+                    }
+                }
+            }
         }
 
         private static bool TryPlayReplacementFashionComponentSound(
@@ -975,20 +1046,34 @@ namespace BaroWardrobeSwitcher
                     if (pass == 0 && fashionSound.ActionType != actionType) { continue; }
 
                     FashionComponentSoundCursorByCharacter[character] = (index + 1) % fashionSounds.Count;
-                    try
-                    {
-                        fashionSound.Component.PlaySound(fashionSound.ActionType, user ?? character);
-                        return true;
-                    }
-                    catch (Exception ex)
-                    {
-                        LogSoundError($"Failed to replace equipment item sound with saved appearance item sound: {ex.GetType().Name}: {ex.Message}");
-                        return false;
-                    }
+                    return TryPlaySpecificFashionComponentSound(
+                        character,
+                        fashionSound.Component,
+                        fashionSound.ActionType,
+                        user ?? character);
                 }
             }
 
             return false;
+        }
+
+        private static bool TryPlaySpecificFashionComponentSound(
+            Character character,
+            ItemComponent component,
+            ActionType actionType,
+            Character user)
+        {
+            if (character == null || component == null) { return false; }
+            try
+            {
+                component.PlaySound(actionType, user ?? character);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogSoundError($"Failed to play saved appearance item sound: {ex.GetType().Name}: {ex.Message}");
+                return false;
+            }
         }
 
         private static bool HasSounds(StatusEffect statusEffect)
@@ -1023,6 +1108,42 @@ namespace BaroWardrobeSwitcher
                 LogSoundError($"Failed to inspect item component sounds: {ex.GetType().Name}: {ex.Message}");
                 return false;
             }
+        }
+
+        private static bool HasLoopingSound(StatusEffect statusEffect)
+        {
+            if (statusEffect == null || LoopSoundField == null) { return false; }
+            try
+            {
+                object loop = LoopSoundField.GetValue(statusEffect);
+                return loop is bool loopValue && loopValue;
+            }
+            catch (Exception ex)
+            {
+                LogSoundError($"Failed to inspect fashion loop sound: {ex.GetType().Name}: {ex.Message}");
+                return false;
+            }
+        }
+
+        private static bool HasLoopingComponentSound(ItemComponent component, ActionType actionType)
+        {
+            if (component == null || ComponentSoundsField == null || ItemSoundLoopField == null) { return false; }
+            try
+            {
+                if (!(ComponentSoundsField.GetValue(component) is System.Collections.IDictionary dictionary)) { return false; }
+                if (!dictionary.Contains(actionType)) { return false; }
+                if (!(dictionary[actionType] is IEnumerable sounds)) { return false; }
+                foreach (object sound in sounds)
+                {
+                    object loop = ItemSoundLoopField.GetValue(sound);
+                    if (loop is bool loopValue && loopValue) { return true; }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogSoundError($"Failed to inspect looping item component sounds: {ex.GetType().Name}: {ex.Message}");
+            }
+            return false;
         }
 
         private static IEnumerable<ActionType> GetComponentSoundTypes(ItemComponent component)
@@ -1193,7 +1314,7 @@ namespace BaroWardrobeSwitcher
             return sprite != null && sprite.Type == WearableType.Item;
         }
 
-        private static WearableSprite CreateFashionSpriteClone(WearableSprite original)
+        private static WearableSprite CreateFashionSpriteClone(Character character, WearableSprite original)
         {
             WearableSprite clone = original;
             try
@@ -1205,6 +1326,11 @@ namespace BaroWardrobeSwitcher
                 LuaCsLogger.Log($"[Baro Wardrobe Switcher] Failed to clone fashion sprite, using original: {ex.GetType().Name}: {ex.Message}");
             }
 
+            if (ReferenceEquals(clone, original))
+            {
+                SaveOriginalMask(character, clone);
+            }
+            ClearWearableAttachmentMask(clone);
             return clone;
         }
 
@@ -1236,6 +1362,14 @@ namespace BaroWardrobeSwitcher
         {
             if (sprite == null) { return; }
             sprite.HideLimb = false;
+            sprite.HideWearablesOfType = new List<WearableType>();
+            sprite.ObscureOtherWearables = WearableSprite.ObscuringMode.None;
+            sprite.CanBeHiddenByOtherWearables = false;
+        }
+
+        private static void ClearWearableAttachmentMask(WearableSprite sprite)
+        {
+            if (sprite == null) { return; }
             sprite.HideWearablesOfType = new List<WearableType>();
             sprite.ObscureOtherWearables = WearableSprite.ObscuringMode.None;
             sprite.CanBeHiddenByOtherWearables = false;
