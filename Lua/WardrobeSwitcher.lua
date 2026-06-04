@@ -1,4 +1,9 @@
 local MOD_NAME = "Baro Wardrobe Switcher"
+local NET_SAVE_REQUEST = "barowardrobeswitcher.save"
+local NET_APPLY_REQUEST = "barowardrobeswitcher.apply"
+local NET_CLEAR_REQUEST = "barowardrobeswitcher.clear"
+local NET_LOOK_APPLY = "barowardrobeswitcher.look.apply"
+local NET_LOOK_CLEAR = "barowardrobeswitcher.look.clear"
 
 if SERVER then return end
 
@@ -19,6 +24,10 @@ end)
 local CharacterInventory = nil
 pcall(function()
     CharacterInventory = LuaUserData.CreateStatic("Barotrauma.CharacterInventory", true)
+end)
+local Entity = nil
+pcall(function()
+    Entity = LuaUserData.CreateStatic("Barotrauma.Entity", true)
 end)
 local VisualOverride = nil
 local visualOverrideFailure = nil
@@ -209,6 +218,10 @@ local function controlled()
     return Character.Controlled
 end
 
+local function isMultiplayerClient()
+    return CLIENT == true and Game ~= nil and Game.IsMultiplayer == true
+end
+
 local function ensureOverlayRoot()
     if overlayRoot ~= nil then return overlayRoot end
 
@@ -260,6 +273,24 @@ end
 local function itemIdentifier(item)
     if item == nil or item.Prefab == nil or item.Prefab.Identifier == nil then return nil end
     return tostring(item.Prefab.Identifier)
+end
+
+local function itemEntityId(item)
+    if item == nil then return 0 end
+    local ok, id = pcall(function()
+        return item.ID
+    end)
+    if ok and id ~= nil then return id end
+    return 0
+end
+
+local function findEntityById(id)
+    if Entity == nil or id == nil or id <= 0 then return nil end
+    local ok, entity = pcall(function()
+        return Entity.FindEntityByID(id)
+    end)
+    if ok then return entity end
+    return nil
 end
 
 local function itemStableId(item)
@@ -469,6 +500,7 @@ local function visualSnapshot(character)
         if item ~= nil then
             data[entry.key] = {
                 identifier = itemIdentifier(item),
+                itemId = itemEntityId(item),
                 name = itemName(item),
                 slot = entry.key
             }
@@ -477,6 +509,112 @@ local function visualSnapshot(character)
         end
     end
     return data
+end
+
+local function requestServerSaveFashion()
+    if not isMultiplayerClient() or Networking == nil then return false end
+    local ok = pcall(function()
+        local message = Networking.Start(NET_SAVE_REQUEST)
+        Networking.Send(message)
+    end)
+    return ok == true
+end
+
+local function requestServerApplyFashion()
+    if not isMultiplayerClient() or Networking == nil then return false end
+    local ok = pcall(function()
+        local message = Networking.Start(NET_APPLY_REQUEST)
+        Networking.Send(message)
+    end)
+    return ok == true
+end
+
+local function requestServerClearFashion()
+    if not isMultiplayerClient() or Networking == nil then return false end
+    local ok = pcall(function()
+        local message = Networking.Start(NET_CLEAR_REQUEST)
+        Networking.Send(message)
+    end)
+    return ok == true
+end
+
+local function readNetworkLook(message)
+    local characterId = message.ReadUInt16()
+    local data = {}
+    for _, entry in ipairs(slots) do
+        if message.ReadBoolean() then
+            data[entry.key] = {
+                itemId = message.ReadUInt16(),
+                identifier = message.ReadString(),
+                name = message.ReadString(),
+                slot = entry.key
+            }
+        else
+            data[entry.key] = nil
+        end
+    end
+    return characterId, data
+end
+
+local function applyCapturedFashionToCharacterEquipment(character)
+    if character == nil then return false, 0 end
+
+    restoreItemVisuals(character)
+
+    local current = snapshot(character)
+    local equippedItems = {}
+    for _, entry in ipairs(slots) do
+        local equipped = current[entry.key]
+        if equipped ~= nil then
+            equippedItems[#equippedItems + 1] = {
+                item = equipped,
+                priority = visualCarrierPriority[entry.key] or 99
+            }
+        end
+    end
+
+    table.sort(equippedItems, function(a, b)
+        return a.priority < b.priority
+    end)
+
+    local visualItems = 0
+    for index, entry in ipairs(equippedItems) do
+        if applyVisualOverrideToItem(character, entry.item, index == 1) then
+            visualItems = visualItems + 1
+        end
+    end
+
+    return activateFashionVisual(character), visualItems
+end
+
+local function applyNetworkLook(character, networkLook)
+    if character == nil or networkLook == nil then return false end
+    if visualOverrideStatus() ~= nil then return false end
+
+    clearVisualOverride(character)
+
+    local expectedItems = 0
+    local capturedItems = 0
+    for _, entry in ipairs(slots) do
+        local data = networkLook[entry.key]
+        if data ~= nil and data.itemId ~= nil and data.itemId > 0 then
+            expectedItems = expectedItems + 1
+            local item = findEntityById(data.itemId)
+            if item ~= nil then
+                captureVisualOverride(character, item)
+                capturedItems = capturedItems + 1
+            end
+        end
+    end
+
+    if expectedItems == 0 then
+        captureEmptyVisualOverride(character)
+    elseif capturedItems == 0 then
+        return false
+    end
+
+    local activated = applyCapturedFashionToCharacterEquipment(character)
+    return activated == true
 end
 
 local function saveFashionAndUnequip()
@@ -505,6 +643,7 @@ local function saveFashionAndUnequip()
     local startingItemCount = 0
     local failedItems = {}
     local processedItems = {}
+    local serverRequested = isMultiplayerClient()
     for _, entry in ipairs(slots) do
         local item = startingItems[entry.key]
         if item ~= nil then
@@ -514,15 +653,19 @@ local function saveFashionAndUnequip()
             else
                 processedItems[item] = true
                 capturedSprites = capturedSprites + captureVisualOverride(character, item)
-                unequipItem(character, item)
-                local remainingSlots = wornSlotLabelsForItem(character, item)
-                if #remainingSlots > 0 then
-                    local result = "Still equipped in " .. table.concat(remainingSlots, ", ")
-                    slotResults[entry.key] = result
-                    failedItems[#failedItems + 1] = entry.label .. ": " .. itemName(item) .. " (" .. table.concat(remainingSlots, ", ") .. ")"
+                if serverRequested then
+                    slotResults[entry.key] = "Saved; server removal requested"
                 else
-                    removedItems = removedItems + 1
-                    slotResults[entry.key] = "Saved and removed"
+                    unequipItem(character, item)
+                    local remainingSlots = wornSlotLabelsForItem(character, item)
+                    if #remainingSlots > 0 then
+                        local result = "Still equipped in " .. table.concat(remainingSlots, ", ")
+                        slotResults[entry.key] = result
+                        failedItems[#failedItems + 1] = entry.label .. ": " .. itemName(item) .. " (" .. table.concat(remainingSlots, ", ") .. ")"
+                    else
+                        removedItems = removedItems + 1
+                        slotResults[entry.key] = "Saved and removed"
+                    end
                 end
             end
         else
@@ -539,13 +682,24 @@ local function saveFashionAndUnequip()
     if startingItemCount == 0 then
         message = message .. "empty outfit captured."
     else
-        message = message ..
-            tostring(capturedSprites) ..
-            " wearable sprites captured, " ..
-            tostring(removedItems) ..
-            " item" .. (removedItems == 1 and "" or "s") .. " removed."
+        message = message .. tostring(capturedSprites) .. " wearable sprites captured"
+        if serverRequested then
+            message = message .. "."
+        else
+            message = message ..
+                ", " ..
+                tostring(removedItems) ..
+                " item" .. (removedItems == 1 and "" or "s") .. " removed."
+        end
         if capturedSprites <= 0 then
             message = message .. " Saved as an empty visual look."
+        end
+    end
+    if serverRequested then
+        if requestServerSaveFashion() then
+            message = message .. " Server-side removal requested for multiplayer."
+        else
+            message = message .. " Server-side removal request failed; make sure the server has this mod enabled."
         end
     end
     if #failedItems > 0 then
@@ -576,31 +730,12 @@ local function applyFashionToCurrentEquipment(silent)
         return false
     end
 
-    restoreItemVisuals(character)
-
-    local current = snapshot(character)
-    local equippedItems = {}
-    for _, entry in ipairs(slots) do
-        local equipped = current[entry.key]
-        if equipped ~= nil then
-            equippedItems[#equippedItems + 1] = {
-                item = equipped,
-                priority = visualCarrierPriority[entry.key] or 99
-            }
-        end
+    if isMultiplayerClient() and requestServerApplyFashion() then
+        if not silent then log("Requested multiplayer wardrobe apply from the server.") end
+        return true
     end
 
-    table.sort(equippedItems, function(a, b)
-        return a.priority < b.priority
-    end)
-
-    local visualItems = 0
-    for index, entry in ipairs(equippedItems) do
-        if applyVisualOverrideToItem(character, entry.item, index == 1) then
-            visualItems = visualItems + 1
-        end
-    end
-    local activated = activateFashionVisual(character)
+    local activated, visualItems = applyCapturedFashionToCharacterEquipment(character)
 
     lastCharacter = character
     activeLook = activated == true
@@ -627,12 +762,17 @@ end
 
 local function clearActiveLook()
     local character = controlled()
+    local multiplayerClearRequested = requestServerClearFashion()
     if character ~= nil then
         restoreItemVisuals(character)
     end
     activeLook = false
     lastEquipmentSignature = nil
-    log("Look cleared. Real equipment visuals restored.")
+    if multiplayerClearRequested then
+        log("Look cleared. Multiplayer clear requested from the server.")
+    else
+        log("Look cleared. Real equipment visuals restored.")
+    end
 end
 
 local function refreshActiveLookIfNeeded(character)
@@ -672,6 +812,45 @@ local function clearSavedLook()
     slotResults = {}
     lastEquipmentSignature = nil
     log("Saved look cleared.")
+end
+
+if Networking ~= nil then
+    Networking.Receive(NET_LOOK_APPLY, function(message)
+        local characterId, networkLook = readNetworkLook(message)
+        local character = findEntityById(characterId)
+        if character == nil then return end
+
+        local applied = applyNetworkLook(character, networkLook)
+        if character == controlled() then
+            savedLook = networkLook
+            savedLookCaptured = true
+            activeLook = applied == true
+            lastCharacter = character
+            lastEquipmentSignature = equipmentSignature(character)
+            slotResults = {}
+            for _, entry in ipairs(slots) do
+                slotResults[entry.key] = networkLook[entry.key] ~= nil and "Synced from server" or "Empty"
+            end
+            if applied then
+                lastOperation = "Saved look applied from multiplayer sync."
+            else
+                lastOperation = "Multiplayer wardrobe sync failed; make sure every client has the fashion items and C# scripting enabled."
+            end
+        end
+    end)
+
+    Networking.Receive(NET_LOOK_CLEAR, function(message)
+        local characterId = message.ReadUInt16()
+        local character = findEntityById(characterId)
+        if character == nil then return end
+
+        clearVisualOverride(character)
+        if character == controlled() then
+            activeLook = false
+            lastEquipmentSignature = nil
+            lastOperation = "Look cleared from multiplayer sync."
+        end
+    end)
 end
 
 local function clearWindow()
