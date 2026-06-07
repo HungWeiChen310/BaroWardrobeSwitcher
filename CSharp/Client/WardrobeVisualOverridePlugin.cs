@@ -41,7 +41,7 @@ namespace BaroWardrobeSwitcher
 
     public static class VisualOverride
     {
-        public const string Version = "0.3.6";
+        public const string Version = "0.3.12";
 
         private static readonly Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>> FashionSpritesByCharacter =
             new Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>>();
@@ -64,6 +64,10 @@ namespace BaroWardrobeSwitcher
         private static readonly Dictionary<Character, int> FashionComponentSoundCursorByCharacter =
             new Dictionary<Character, int>();
         private static readonly HashSet<Character> EmptyFashionCharacters = new HashSet<Character>();
+        private static readonly Dictionary<Character, HashSet<InvSlotType>> EmptyFashionSlotsByCharacter =
+            new Dictionary<Character, HashSet<InvSlotType>>();
+        private static readonly Dictionary<Character, HashSet<InvSlotType>> SavedFashionSlotsByCharacter =
+            new Dictionary<Character, HashSet<InvSlotType>>();
         private static readonly HashSet<Character> ActiveCharacters = new HashSet<Character>();
         private static readonly Dictionary<Character, Dictionary<WearableSprite, SpriteMaskState>> OriginalSpriteMasksByCharacter =
             new Dictionary<Character, Dictionary<WearableSprite, SpriteMaskState>>();
@@ -107,6 +111,12 @@ namespace BaroWardrobeSwitcher
         private static int animationOverrideErrorLogCount;
         private static int soundOverrideErrorLogCount;
         private static int lastInjectedSpriteCount;
+        private static int drawOverrideHitCount;
+        private static int drawOverrideMissCount;
+        private static int drawOverrideHiddenAfterDrawCount;
+        private static int drawOverrideHiddenEmptySlotCount;
+        private static int drawOverrideHiddenSavedSlotCount;
+        private static int fallbackDrawnFashionSpriteCount;
 
         public static void ResetPatchStatus()
         {
@@ -283,7 +293,16 @@ namespace BaroWardrobeSwitcher
                    ", suppressedItemSounds=" + suppressedComponentSoundCount +
                    ", drawPatchTarget=" + (FindLimbDrawMethod() != null) +
                    ", drawWearableTarget=" + (DrawWearableMethod != null) +
-                   ", lastInjected=" + lastInjectedSpriteCount;
+                   ", lastInjected=" + lastInjectedSpriteCount +
+                   ", drawHits=" + drawOverrideHitCount +
+                   ", drawMisses=" + drawOverrideMissCount +
+                   ", hiddenAfterDraw=" + drawOverrideHiddenAfterDrawCount +
+                   ", hiddenEmptySlots=" + drawOverrideHiddenEmptySlotCount +
+                   ", hiddenSavedSlots=" + drawOverrideHiddenSavedSlotCount +
+                   ", fallbackDrawn=" + fallbackDrawnFashionSpriteCount +
+                   ", savedSlots=" + DescribeSavedSlots(character) +
+                   ", emptySlots=" + DescribeEmptySlots(character) +
+                   ", spriteSlots=" + DescribeFashionSprites(character);
         }
 
         public static void ClearAll()
@@ -300,6 +319,8 @@ namespace BaroWardrobeSwitcher
             FashionSoundCursorByCharacter.Clear();
             FashionComponentSoundCursorByCharacter.Clear();
             EmptyFashionCharacters.Clear();
+            EmptyFashionSlotsByCharacter.Clear();
+            SavedFashionSlotsByCharacter.Clear();
             ActiveCharacters.Clear();
             SuppressedEquipmentSoundsByCharacter.Clear();
             SuppressedEquipmentSoundOwners.Clear();
@@ -310,6 +331,8 @@ namespace BaroWardrobeSwitcher
             DrawnFashionSpritesByLimb.Clear();
             InjectedFashionSpritesByLimb.Clear();
             OriginalWearableOrderByLimb.Clear();
+            EmptyFashionSlotsByCharacter.Clear();
+            SavedFashionSlotsByCharacter.Clear();
         }
 
         public static void RestoreItemVisuals()
@@ -319,6 +342,8 @@ namespace BaroWardrobeSwitcher
             DrawnFashionSpritesByLimb.Clear();
             InjectedFashionSpritesByLimb.Clear();
             OriginalWearableOrderByLimb.Clear();
+            EmptyFashionSlotsByCharacter.Clear();
+            SavedFashionSlotsByCharacter.Clear();
         }
 
         public static void RestoreCharacterItemVisuals(Character character)
@@ -328,9 +353,12 @@ namespace BaroWardrobeSwitcher
             ClearSuppressedEquipmentSounds(character);
             ClearSuppressedEquipmentComponentSounds(character);
             ActiveCharacters.Remove(character);
+            EmptyFashionSlotsByCharacter.Remove(character);
+            SavedFashionSlotsByCharacter.Remove(character);
             DrawnFashionSpritesByLimb.Clear();
             InjectedFashionSpritesByLimb.Clear();
             OriginalWearableOrderByLimb.Clear();
+            fallbackDrawnFashionSpriteCount = 0;
             RefreshWearables(character);
         }
 
@@ -347,6 +375,8 @@ namespace BaroWardrobeSwitcher
             FashionSoundCursorByCharacter.Remove(character);
             FashionComponentSoundCursorByCharacter.Remove(character);
             EmptyFashionCharacters.Remove(character);
+            EmptyFashionSlotsByCharacter.Remove(character);
+            SavedFashionSlotsByCharacter.Remove(character);
             ActiveCharacters.Remove(character);
             DrawnFashionSpritesByLimb.Clear();
             InjectedFashionSpritesByLimb.Clear();
@@ -381,6 +411,8 @@ namespace BaroWardrobeSwitcher
                 FashionSoundCursorByCharacter.Remove(character);
                 FashionComponentSoundCursorByCharacter.Remove(character);
                 EmptyFashionCharacters.Remove(character);
+                EmptyFashionSlotsByCharacter.Remove(character);
+                SavedFashionSlotsByCharacter.Remove(character);
                 ActiveCharacters.Remove(character);
                 OriginalSpriteMasksByCharacter.Remove(character);
             }
@@ -431,6 +463,46 @@ namespace BaroWardrobeSwitcher
             return count;
         }
 
+        public static int CaptureFashionPrefab(Character character, string identifier)
+        {
+            if (character == null || string.IsNullOrWhiteSpace(identifier)) { return 0; }
+
+            try
+            {
+                Identifier prefabIdentifier = new Identifier(identifier);
+                if (!ItemPrefab.Prefabs.TryGet(prefabIdentifier, out ItemPrefab prefab) || prefab == null)
+                {
+                    LuaCsLogger.Log($"[Baro Wardrobe Switcher] Could not find fashion prefab by identifier: {identifier}.");
+                    return 0;
+                }
+
+                Item tempItem = null;
+                try
+                {
+                    tempItem = new Item(prefab, Vector2.Zero, null, 0, false);
+                    int captured = CaptureFashionItem(character, tempItem);
+                    LuaCsLogger.Log($"[Baro Wardrobe Switcher] Captured {captured} wearable sprite(s) from fashion prefab fallback: {identifier}.");
+                    return captured;
+                }
+                finally
+                {
+                    try
+                    {
+                        tempItem?.Remove();
+                    }
+                    catch (Exception ex)
+                    {
+                        LuaCsLogger.Log($"[Baro Wardrobe Switcher] Failed to remove temporary fashion prefab item {identifier}: {ex.GetType().Name}: {ex.Message}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LuaCsLogger.Log($"[Baro Wardrobe Switcher] Fashion prefab fallback failed for {identifier}: {ex.GetType().Name}: {ex.Message}");
+                return 0;
+            }
+        }
+
         public static bool CaptureEmptyFashion(Character character)
         {
             if (character == null) { return false; }
@@ -438,6 +510,20 @@ namespace BaroWardrobeSwitcher
             ActiveCharacters.Remove(character);
             drawOverrideLogCount = 0;
             LuaCsLogger.Log("[Baro Wardrobe Switcher] Captured empty fashion look.");
+            return true;
+        }
+
+        public static bool SetFashionSlots(Character character, string savedSlotsCsv, string emptySlotsCsv)
+        {
+            if (character == null) { return false; }
+            SavedFashionSlotsByCharacter[character] = ParseSlotCsv(savedSlotsCsv);
+            EmptyFashionSlotsByCharacter[character] = ParseSlotCsv(emptySlotsCsv);
+            LuaCsLogger.Log(
+                "[Baro Wardrobe Switcher] Fashion slot mask: saved=" +
+                DescribeSavedSlots(character) +
+                ", empty=" +
+                DescribeEmptySlots(character) +
+                ".");
             return true;
         }
 
@@ -480,6 +566,11 @@ namespace BaroWardrobeSwitcher
             animationOverrideErrorLogCount = 0;
             soundOverrideErrorLogCount = 0;
             lastInjectedSpriteCount = 0;
+            drawOverrideHitCount = 0;
+            drawOverrideMissCount = 0;
+            drawOverrideHiddenAfterDrawCount = 0;
+            drawOverrideHiddenEmptySlotCount = 0;
+            drawOverrideHiddenSavedSlotCount = 0;
             RefreshWearables(character);
             return true;
         }
@@ -498,16 +589,50 @@ namespace BaroWardrobeSwitcher
             }
             if (!TryGetFashionSprite(limb.character, original.Type, limb.type, drawnSprites, out WearableSprite fashionSprite))
             {
-                skipOriginal = true;
+                if (ShouldHideOriginalForEmptySavedSlot(limb.character, original))
+                {
+                    skipOriginal = true;
+                    drawOverrideHiddenEmptySlotCount++;
+                    if (drawOverrideLogCount < 12)
+                    {
+                        drawOverrideLogCount++;
+                        LuaCsLogger.Log($"[Baro Wardrobe Switcher] DrawWearable hidden original for empty saved slot: limb={limb.type}, type={original.Type}, slots={DescribeWearableSlots(original)}.");
+                    }
+                    return true;
+                }
+                if (ShouldHideOriginalForSavedSlot(limb.character, original))
+                {
+                    skipOriginal = true;
+                    drawOverrideHiddenSavedSlotCount++;
+                    if (drawOverrideLogCount < 12)
+                    {
+                        drawOverrideLogCount++;
+                        LuaCsLogger.Log($"[Baro Wardrobe Switcher] DrawWearable hidden original for saved slot override: limb={limb.type}, type={original.Type}, slots={DescribeWearableSlots(original)}.");
+                    }
+                    return true;
+                }
+                if (FashionSpriteAlreadyDrawn(limb.character, original.Type, limb.type, drawnSprites))
+                {
+                    skipOriginal = true;
+                    drawOverrideHiddenAfterDrawCount++;
+                    if (drawOverrideLogCount < 12)
+                    {
+                        drawOverrideLogCount++;
+                        LuaCsLogger.Log($"[Baro Wardrobe Switcher] DrawWearable hidden original after fashion draw: limb={limb.type}, type={original.Type}.");
+                    }
+                    return true;
+                }
+                drawOverrideMissCount++;
                 if (drawOverrideLogCount < 12)
                 {
                     drawOverrideLogCount++;
-                    LuaCsLogger.Log($"[Baro Wardrobe Switcher] DrawWearable hidden original: limb={limb.type}, type={original.Type}.");
+                    LuaCsLogger.Log($"[Baro Wardrobe Switcher] DrawWearable kept original; no fashion sprite matched: limb={limb.type}, type={original.Type}.");
                 }
-                return true;
+                return false;
             }
             drawnSprites.Add(fashionSprite);
             replacement = fashionSprite;
+            drawOverrideHitCount++;
             if (drawOverrideLogCount < 12)
             {
                 drawOverrideLogCount++;
@@ -623,6 +748,7 @@ namespace BaroWardrobeSwitcher
                     if (!ShouldFallbackDrawMissingFashionSprite(pair.Value, limb.type)) { continue; }
 
                     drawnSprites.Add(pair.Value);
+                    fallbackDrawnFashionSpriteCount++;
                     DrawFashionWearable(limb, pair.Value, depthIndex++, spriteBatch, overrideColor);
                 }
             }
@@ -632,6 +758,42 @@ namespace BaroWardrobeSwitcher
                 {
                     DrawnFashionSpritesByLimb.Remove(limb);
                 }
+            }
+        }
+
+        private static void DrawFashionWearable(Limb limb, WearableSprite wearable, int depthIndex, SpriteBatch spriteBatch, Color? overrideColor)
+        {
+            try
+            {
+                Color color = overrideColor.GetValueOrDefault(Color.White);
+                color *= limb.Alpha;
+                if (color.A <= 0) { return; }
+
+                SpriteEffects spriteEffect = limb.Dir > 0.0f ? SpriteEffects.None : SpriteEffects.FlipHorizontally;
+                if (limb.Params.MirrorHorizontally)
+                {
+                    spriteEffect = spriteEffect == SpriteEffects.None ? SpriteEffects.FlipHorizontally : SpriteEffects.None;
+                }
+                if (limb.Params.MirrorVertically)
+                {
+                    spriteEffect |= SpriteEffects.FlipVertically;
+                }
+
+                DrawWearableMethod.Invoke(
+                    limb,
+                    new object[]
+                    {
+                        wearable,
+                        DrawDepthStep * depthIndex,
+                        spriteBatch,
+                        color,
+                        color.A / 255.0f,
+                        spriteEffect
+                    });
+            }
+            catch (Exception ex)
+            {
+                LogVirtualDrawError($"Failed to draw stored fashion sprite: {ex.GetType().Name}: {ex.Message}");
             }
         }
 
@@ -1193,9 +1355,11 @@ namespace BaroWardrobeSwitcher
             LimbType limbType)
         {
             return spritesBySlot
-                .Where(pair => pair.Key.Item2 == limbType && pair.Value != null)
+                .Where(pair =>
+                    pair.Value != null &&
+                    (pair.Key.Item2 == limbType || pair.Key.Item2 == LimbType.None))
                 .SelectMany(pair => pair.Value
-                    .Where(sprite => sprite != null)
+                    .Where(sprite => SpriteBelongsToLimb(sprite, pair.Key.Item2, limbType))
                     .Select(sprite => new KeyValuePair<Tuple<WearableType, LimbType>, WearableSprite>(pair.Key, sprite)))
                 .OrderByDescending(pair => pair.Value.Sprite?.Depth ?? 0.0f);
         }
@@ -1221,8 +1385,38 @@ namespace BaroWardrobeSwitcher
 
         private static bool ShouldFallbackDrawMissingFashionSprite(WearableSprite sprite, LimbType limbType)
         {
-            if (sprite == null || limbType != LimbType.Head) { return false; }
-            return sprite.WearableComponent?.AllowedSlots?.Contains(InvSlotType.Head) == true;
+            if (sprite == null) { return false; }
+            if (sprite.Limb != LimbType.None)
+            {
+                return sprite.Limb == limbType;
+            }
+            return GetFallbackAnchorLimb(sprite) == limbType;
+        }
+
+        private static bool SpriteBelongsToLimb(WearableSprite sprite, LimbType spriteLimb, LimbType limbType)
+        {
+            if (sprite == null) { return false; }
+            if (spriteLimb != LimbType.None) { return spriteLimb == limbType; }
+            return GetFallbackAnchorLimb(sprite) == limbType;
+        }
+
+        private static LimbType GetFallbackAnchorLimb(WearableSprite sprite)
+        {
+            Wearable wearable = sprite?.WearableComponent;
+            if (wearable?.AllowedSlots == null) { return LimbType.None; }
+            if (wearable.AllowedSlots.Contains(InvSlotType.Head) ||
+                wearable.AllowedSlots.Contains(InvSlotType.Headset))
+            {
+                return LimbType.Head;
+            }
+            if (wearable.AllowedSlots.Contains(InvSlotType.InnerClothes) ||
+                wearable.AllowedSlots.Contains(InvSlotType.OuterClothes) ||
+                wearable.AllowedSlots.Contains(InvSlotType.Bag) ||
+                wearable.AllowedSlots.Contains(InvSlotType.HealthInterface))
+            {
+                return LimbType.Torso;
+            }
+            return LimbType.None;
         }
 
         private static object BoostFashionAnimationPriority(object animationInfo)
@@ -1284,42 +1478,6 @@ namespace BaroWardrobeSwitcher
             }
         }
 
-        private static void DrawFashionWearable(Limb limb, WearableSprite wearable, int depthIndex, SpriteBatch spriteBatch, Color? overrideColor)
-        {
-            try
-            {
-                Color color = overrideColor.GetValueOrDefault(Color.White);
-                color *= limb.Alpha;
-                if (color.A <= 0) { return; }
-
-                SpriteEffects spriteEffect = limb.Dir > 0.0f ? SpriteEffects.None : SpriteEffects.FlipHorizontally;
-                if (limb.Params.MirrorHorizontally)
-                {
-                    spriteEffect = spriteEffect == SpriteEffects.None ? SpriteEffects.FlipHorizontally : SpriteEffects.None;
-                }
-                if (limb.Params.MirrorVertically)
-                {
-                    spriteEffect |= SpriteEffects.FlipVertically;
-                }
-
-                DrawWearableMethod.Invoke(
-                    limb,
-                    new object[]
-                    {
-                        wearable,
-                        DrawDepthStep * depthIndex,
-                        spriteBatch,
-                        color,
-                        color.A / 255.0f,
-                        spriteEffect
-                    });
-            }
-            catch (Exception ex)
-            {
-                LogVirtualDrawError($"Failed to draw stored fashion sprite: {ex.GetType().Name}: {ex.Message}");
-            }
-        }
-
         private static void LogVirtualDrawError(string message)
         {
             if (virtualDrawErrorLogCount >= 6) { return; }
@@ -1357,6 +1515,72 @@ namespace BaroWardrobeSwitcher
         private static bool IsEquipmentSprite(WearableSprite sprite)
         {
             return sprite != null && sprite.Type == WearableType.Item;
+        }
+
+        private static HashSet<InvSlotType> ParseSlotCsv(string slotsCsv)
+        {
+            HashSet<InvSlotType> slots = new HashSet<InvSlotType>();
+            if (string.IsNullOrWhiteSpace(slotsCsv)) { return slots; }
+
+            foreach (string part in slotsCsv.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                string slotName = part.Trim();
+                if (Enum.TryParse(slotName, true, out InvSlotType slotType))
+                {
+                    slots.Add(slotType);
+                }
+            }
+            return slots;
+        }
+
+        private static bool ShouldHideOriginalForEmptySavedSlot(Character character, WearableSprite original)
+        {
+            if (character == null || original?.WearableComponent?.AllowedSlots == null) { return false; }
+            if (!EmptyFashionSlotsByCharacter.TryGetValue(character, out HashSet<InvSlotType> emptySlots) || emptySlots.Count == 0)
+            {
+                return false;
+            }
+
+            return original.WearableComponent.AllowedSlots.Any(slot => emptySlots.Contains(slot));
+        }
+
+        private static bool ShouldHideOriginalForSavedSlot(Character character, WearableSprite original)
+        {
+            if (character == null || original?.WearableComponent?.AllowedSlots == null) { return false; }
+            if (!SavedFashionSlotsByCharacter.TryGetValue(character, out HashSet<InvSlotType> savedSlots) || savedSlots.Count == 0)
+            {
+                return false;
+            }
+
+            return original.WearableComponent.AllowedSlots.Any(slot => savedSlots.Contains(slot));
+        }
+
+        private static string DescribeWearableSlots(WearableSprite sprite)
+        {
+            if (sprite?.WearableComponent?.AllowedSlots == null) { return "none"; }
+            return string.Join(",", sprite.WearableComponent.AllowedSlots.Select(slot => slot.ToString()).OrderBy(slot => slot));
+        }
+
+        private static string DescribeSavedSlots(Character character)
+        {
+            return DescribeSlotSet(SavedFashionSlotsByCharacter, character);
+        }
+
+        private static string DescribeEmptySlots(Character character)
+        {
+            return DescribeSlotSet(EmptyFashionSlotsByCharacter, character);
+        }
+
+        private static string DescribeSlotSet(Dictionary<Character, HashSet<InvSlotType>> slotsByCharacter, Character character)
+        {
+            if (character == null ||
+                !slotsByCharacter.TryGetValue(character, out HashSet<InvSlotType> slots) ||
+                slots == null ||
+                slots.Count == 0)
+            {
+                return "none";
+            }
+            return string.Join(",", slots.Select(slot => slot.ToString()).OrderBy(slot => slot));
         }
 
         private static WearableSprite CreateFashionSpriteClone(Character character, WearableSprite original)
@@ -1484,12 +1708,7 @@ namespace BaroWardrobeSwitcher
             {
                 return false;
             }
-            if (!spritesBySlot.TryGetValue(Tuple.Create(type, limbType), out List<WearableSprite> spriteList) || spriteList == null)
-            {
-                return false;
-            }
-
-            foreach (WearableSprite candidate in spriteList)
+            foreach (WearableSprite candidate in EnumerateFashionSpriteCandidates(spritesBySlot, type, limbType))
             {
                 if (candidate == null) { continue; }
                 if (drawnSprites != null && drawnSprites.Contains(candidate)) { continue; }
@@ -1497,6 +1716,62 @@ namespace BaroWardrobeSwitcher
                 return true;
             }
             return false;
+        }
+
+        private static bool FashionSpriteAlreadyDrawn(
+            Character character,
+            WearableType type,
+            LimbType limbType,
+            HashSet<WearableSprite> drawnSprites)
+        {
+            if (character == null || drawnSprites == null || drawnSprites.Count == 0) { return false; }
+            if (!FashionSpritesByCharacter.TryGetValue(character, out Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot))
+            {
+                return false;
+            }
+            return EnumerateFashionSpriteCandidates(spritesBySlot, type, limbType)
+                .Any(sprite => sprite != null && drawnSprites.Contains(sprite));
+        }
+
+        private static IEnumerable<WearableSprite> EnumerateFashionSpriteCandidates(
+            Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot,
+            WearableType type,
+            LimbType limbType)
+        {
+            if (spritesBySlot == null) { yield break; }
+
+            if (spritesBySlot.TryGetValue(Tuple.Create(type, limbType), out List<WearableSprite> exactSprites) && exactSprites != null)
+            {
+                foreach (WearableSprite sprite in exactSprites)
+                {
+                    yield return sprite;
+                }
+            }
+
+            if (limbType == LimbType.None) { yield break; }
+            if (!spritesBySlot.TryGetValue(Tuple.Create(type, LimbType.None), out List<WearableSprite> wildcardSprites) || wildcardSprites == null)
+            {
+                yield break;
+            }
+            foreach (WearableSprite sprite in wildcardSprites)
+            {
+                yield return sprite;
+            }
+        }
+
+        private static string DescribeFashionSprites(Character character)
+        {
+            if (character == null) { return "character=nil"; }
+            if (!FashionSpritesByCharacter.TryGetValue(character, out Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot) ||
+                spritesBySlot.Count == 0)
+            {
+                return "none";
+            }
+            return string.Join(";",
+                spritesBySlot
+                    .OrderBy(pair => pair.Key.Item2.ToString())
+                    .ThenBy(pair => pair.Key.Item1.ToString())
+                    .Select(pair => pair.Key.Item2 + "/" + pair.Key.Item1 + "=" + (pair.Value?.Count ?? 0)));
         }
 
         private sealed class FashionSoundEffect

@@ -52,5 +52,9 @@
       <HintPath>$(BarotraumaInstallDir)\MonoGame.Framework.Windows.NetStandard.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="MonoGame.Framework.Windows.NetStandard" Condition="'$(BarotraumaInstallDir)' != '' And Exists('$(BarotraumaInstallDir)/MonoGame.Framework.Windows.NetStandard.dll')">
+      <HintPath>$(BarotraumaInstallDir)/MonoGame.Framework.Windows.NetStandard.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 </Project>

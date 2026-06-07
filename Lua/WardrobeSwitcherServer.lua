@@ -4,12 +4,17 @@ local NET_APPLY_REQUEST = "barowardrobeswitcher.apply"
 local NET_CLEAR_REQUEST = "barowardrobeswitcher.clear"
 local NET_LOOK_APPLY = "barowardrobeswitcher.look.apply"
 local NET_LOOK_CLEAR = "barowardrobeswitcher.look.clear"
+local PERSIST_PATH = "LocalMods/BaroWardrobeSwitcher/PersistentLooks.txt"
 
 if not SERVER then return end
 
 local CharacterInventory = nil
 pcall(function()
     CharacterInventory = LuaUserData.CreateStatic("Barotrauma.CharacterInventory", true)
+end)
+local Client = nil
+pcall(function()
+    Client = LuaUserData.CreateStatic("Barotrauma.Networking.Client", true)
 end)
 
 local slots = {
@@ -23,6 +28,10 @@ local slots = {
 
 local savedLooksByCharacterId = {}
 local activeLooksByCharacterId = {}
+local savedLooksByClientKey = {}
+local activeLooksByClientKey = {}
+local lastSyncedCharacterByClientKey = {}
+local clientCharacter
 
 local function log(message)
     local line = "[" .. MOD_NAME .. "] " .. tostring(message)
@@ -68,6 +77,24 @@ local function characterEntityId(character)
     end)
     if ok and id ~= nil then return id end
     return 0
+end
+
+local function clientKey(client)
+    if client == nil then return nil end
+    local candidates = {
+        function() return client.SteamID end,
+        function() return client.AccountId end,
+        function() return client.AccountID end,
+        function() return client.AccountInfo ~= nil and client.AccountInfo.AccountId or nil end,
+        function() return client.Name end
+    }
+    for _, getter in ipairs(candidates) do
+        local ok, value = pcall(getter)
+        if ok and value ~= nil and tostring(value) ~= "" then
+            return tostring(value)
+        end
+    end
+    return nil
 end
 
 local function getSlotItem(character, slot)
@@ -168,6 +195,88 @@ local function buildLookState(character)
     return state
 end
 
+local function escape(value)
+    local text = tostring(value or "")
+    text = text:gsub("%%", "%%25"):gsub("|", "%%7C"):gsub("=", "%%3D"):gsub("\n", "%%0A"):gsub("\r", "%%0D")
+    return text
+end
+
+local function unescape(value)
+    local text = tostring(value or "")
+    text = text:gsub("%%0D", "\r"):gsub("%%0A", "\n"):gsub("%%3D", "="):gsub("%%7C", "|"):gsub("%%25", "%%")
+    return text
+end
+
+local function cloneStateForCharacter(state, character)
+    local cloned = {
+        characterId = characterEntityId(character),
+        slots = {}
+    }
+    for _, entry in ipairs(slots) do
+        local slotState = state ~= nil and state.slots ~= nil and state.slots[entry.key] or nil
+        if slotState ~= nil then
+            local item = getSlotItem(character, entry.slot)
+            cloned.slots[entry.key] = {
+                itemId = item ~= nil and itemIdentifier(item) == slotState.identifier and itemEntityId(item) or (slotState.itemId or 0),
+                identifier = slotState.identifier or "",
+                name = slotState.name or ""
+            }
+        end
+    end
+    return cloned
+end
+
+local function persistLooks()
+    local file = io.open(PERSIST_PATH, "w")
+    if file == nil then
+        log("Could not write persistent wardrobe data.")
+        return
+    end
+    for key, state in pairs(savedLooksByClientKey) do
+        local parts = { "key=" .. escape(key), "active=" .. tostring(activeLooksByClientKey[key] == true) }
+        for _, entry in ipairs(slots) do
+            local slotState = state.slots[entry.key]
+            if slotState ~= nil then
+                parts[#parts + 1] = entry.key .. "=" .. escape(slotState.identifier or "") .. "," .. escape(slotState.name or "")
+            end
+        end
+        file:write(table.concat(parts, "|") .. "\n")
+    end
+    file:close()
+end
+
+local function loadPersistentLooks()
+    local file = io.open(PERSIST_PATH, "r")
+    if file == nil then return end
+    for line in file:lines() do
+        local key = nil
+        local state = { characterId = 0, slots = {} }
+        local active = false
+        for part in tostring(line):gmatch("[^|]+") do
+            local name, value = part:match("^([^=]+)=(.*)$")
+            if name == "key" then
+                key = unescape(value)
+            elseif name == "active" then
+                active = value == "true"
+            elseif name ~= nil then
+                local identifier, displayName = tostring(value):match("^([^,]*),(.*)$")
+                if identifier ~= nil then
+                    state.slots[name] = {
+                        itemId = 0,
+                        identifier = unescape(identifier),
+                        name = unescape(displayName or "")
+                    }
+                end
+            end
+        end
+        if key ~= nil and key ~= "" then
+            savedLooksByClientKey[key] = state
+            activeLooksByClientKey[key] = active
+        end
+    end
+    file:close()
+end
+
 local function writeLookState(message, state)
     message.WriteUInt16(state.characterId or 0)
     for _, entry in ipairs(slots) do
@@ -194,13 +303,30 @@ local function sendLookState(client, state)
     Networking.Send(message, client.Connection)
 end
 
+local function syncActiveClientLook(client)
+    local character = clientCharacter(client)
+    local key = clientKey(client)
+    if character == nil or key == nil then return end
+    local state = savedLooksByClientKey[key]
+    if state == nil or activeLooksByClientKey[key] ~= true then return end
+
+    local characterId = characterEntityId(character)
+    if characterId <= 0 or lastSyncedCharacterByClientKey[key] == characterId then return end
+
+    local characterState = cloneStateForCharacter(state, character)
+    savedLooksByCharacterId[characterId] = characterState
+    activeLooksByCharacterId[characterId] = true
+    lastSyncedCharacterByClientKey[key] = characterId
+    sendLookState(client, characterState)
+end
+
 local function broadcastClear(characterId)
     local message = Networking.Start(NET_LOOK_CLEAR)
     message.WriteUInt16(characterId or 0)
     Networking.Send(message, nil)
 end
 
-local function clientCharacter(client)
+clientCharacter = function(client)
     if client == nil then return nil end
     local ok, character = pcall(function()
         return client.Character
@@ -215,9 +341,14 @@ Networking.Receive(NET_SAVE_REQUEST, function(_, client)
 
     local state = buildLookState(character)
     if state.characterId <= 0 then return end
+    local key = clientKey(client)
 
     savedLooksByCharacterId[state.characterId] = state
     activeLooksByCharacterId[state.characterId] = false
+    if key ~= nil then
+        savedLooksByClientKey[key] = cloneStateForCharacter(state, character)
+        activeLooksByClientKey[key] = false
+    end
 
     local processedItems = {}
     local removedItems = 0
@@ -232,6 +363,7 @@ Networking.Receive(NET_SAVE_REQUEST, function(_, client)
     end
 
     log("Saved multiplayer wardrobe for " .. tostring(character.Name) .. "; server removed " .. tostring(removedItems) .. " item(s).")
+    persistLooks()
 end)
 
 Networking.Receive(NET_APPLY_REQUEST, function(_, client)
@@ -239,11 +371,22 @@ Networking.Receive(NET_APPLY_REQUEST, function(_, client)
     if character == nil then return end
 
     local characterId = characterEntityId(character)
+    local key = clientKey(client)
     local state = savedLooksByCharacterId[characterId]
+    if state == nil and key ~= nil then
+        state = savedLooksByClientKey[key]
+    end
     if state == nil then return end
 
+    local characterState = cloneStateForCharacter(state, character)
+    savedLooksByCharacterId[characterId] = characterState
     activeLooksByCharacterId[characterId] = true
-    broadcastLookState(state)
+    if key ~= nil then
+        savedLooksByClientKey[key] = state
+        activeLooksByClientKey[key] = true
+    end
+    broadcastLookState(characterState)
+    persistLooks()
 end)
 
 Networking.Receive(NET_CLEAR_REQUEST, function(_, client)
@@ -251,11 +394,25 @@ Networking.Receive(NET_CLEAR_REQUEST, function(_, client)
     if character == nil then return end
 
     local characterId = characterEntityId(character)
+    local key = clientKey(client)
     activeLooksByCharacterId[characterId] = false
+    if key ~= nil then
+        activeLooksByClientKey[key] = false
+    end
     broadcastClear(characterId)
+    persistLooks()
 end)
 
 Hook.Add("client.connected", "barowardrobeswitcher.sync-connected", function(connectedClient)
+    local connectedCharacter = clientCharacter(connectedClient)
+    local key = clientKey(connectedClient)
+    if connectedCharacter ~= nil and key ~= nil and savedLooksByClientKey[key] ~= nil and activeLooksByClientKey[key] == true then
+        local state = cloneStateForCharacter(savedLooksByClientKey[key], connectedCharacter)
+        savedLooksByCharacterId[state.characterId] = state
+        activeLooksByCharacterId[state.characterId] = true
+        lastSyncedCharacterByClientKey[key] = state.characterId
+        sendLookState(connectedClient, state)
+    end
     for characterId, state in pairs(savedLooksByCharacterId) do
         if activeLooksByCharacterId[characterId] == true then
             sendLookState(connectedClient, state)
@@ -266,6 +423,23 @@ end)
 Hook.Add("roundEnd", "barowardrobeswitcher.server-cleanup", function()
     savedLooksByCharacterId = {}
     activeLooksByCharacterId = {}
+    lastSyncedCharacterByClientKey = {}
 end)
 
+Hook.Add("think", "barowardrobeswitcher.persistent-sync", function()
+    if Client == nil or Client.ClientList == nil then return end
+    local ok = pcall(function()
+        for client in Client.ClientList do
+            syncActiveClientLook(client)
+        end
+    end)
+    if ok then return end
+    pcall(function()
+        for _, client in pairs(Client.ClientList) do
+            syncActiveClientLook(client)
+        end
+    end)
+end)
+
+loadPersistentLooks()
 log("Server sync loaded.")

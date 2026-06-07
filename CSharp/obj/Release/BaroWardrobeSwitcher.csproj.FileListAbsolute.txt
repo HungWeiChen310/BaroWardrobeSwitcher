@@ -27,3 +27,16 @@ C:/Users/Hyman/OneDrive/桌面/BaroWardrobeSwitcher-main/bin/Client/Windows/Baro
 C:/Users/Hyman/OneDrive/桌面/BaroWardrobeSwitcher-main/CSharp/obj/Release/ref/BaroWardrobeSwitcher.dll
 C:/Users/Hyman/OneDrive/桌面/BaroWardrobeSwitcher-main/CSharp/obj/Release/BaroWardrobeSwitcher.sourcelink.json
 /mnt/d/SteamLibrary/steamapps/common/Barotrauma/LocalMods/BaroWardrobeSwitcher/CSharp/obj/Release/BaroWardrobeSwitcher.sourcelink.json
+/tmp/BaroWardrobeSwitcher-rollback-0.4.10/CSharp/obj/Release/BaroWardrobeSwitcher.csproj.AssemblyReference.cache
+/tmp/BaroWardrobeSwitcher-rollback-0.4.10/CSharp/obj/Release/BaroWardrobeSwitcher.GeneratedMSBuildEditorConfig.editorconfig
+/tmp/BaroWardrobeSwitcher-rollback-0.4.10/CSharp/obj/Release/BaroWardrobeSwitcher.AssemblyInfoInputs.cache
+/tmp/BaroWardrobeSwitcher-rollback-0.4.10/CSharp/obj/Release/BaroWardrobeSwitcher.AssemblyInfo.cs
+/tmp/BaroWardrobeSwitcher-rollback-0.4.10/CSharp/obj/Release/BaroWardrobeSwitcher.csproj.CoreCompileInputs.cache
+/tmp/BaroWardrobeSwitcher-rollback-0.4.10/CSharp/obj/Release/BaroWardrobeSwitcher.sourcelink.json
+/tmp/BaroWardrobeSwitcher-rollback-0.4.10/CSharp/obj/Release/BaroWardrobeSwitcher.dll
+/tmp/BaroWardrobeSwitcher-rollback-0.4.10/CSharp/obj/Release/refint/BaroWardrobeSwitcher.dll
+/tmp/BaroWardrobeSwitcher-rollback-0.4.10/CSharp/obj/Release/BaroWardrobeSwitcher.pdb
+/tmp/BaroWardrobeSwitcher-rollback-0.4.10/bin/Client/Windows/BaroWardrobeSwitcher.deps.json
+/tmp/BaroWardrobeSwitcher-rollback-0.4.10/bin/Client/Windows/BaroWardrobeSwitcher.dll
+/tmp/BaroWardrobeSwitcher-rollback-0.4.10/bin/Client/Windows/BaroWardrobeSwitcher.pdb
+/tmp/BaroWardrobeSwitcher-rollback-0.4.10/CSharp/obj/Release/ref/BaroWardrobeSwitcher.dll

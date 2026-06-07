@@ -29,6 +29,10 @@ local Entity = nil
 pcall(function()
     Entity = LuaUserData.CreateStatic("Barotrauma.Entity", true)
 end)
+local Item = nil
+pcall(function()
+    Item = LuaUserData.CreateStatic("Barotrauma.Item", true)
+end)
 local TextManager = TextManager
 pcall(function()
     TextManager = LuaUserData.CreateStatic("Barotrauma.TextManager", true)
@@ -60,6 +64,7 @@ local translations = {
         ["button.clear"] = "Clear Look",
         ["button.diagnostics"] = "Diagnostics",
         ["button.hide_diagnostics"] = "Hide Diagnostics",
+        ["button.dump_debug"] = "Dump Debug Log",
         ["button.close"] = "Close",
         ["slot.head"] = "Head",
         ["slot.headset"] = "Headset",
@@ -78,11 +83,13 @@ local translations = {
         ["status.saved_removed"] = "Saved and removed",
         ["status.synced_server"] = "Synced from server",
         ["status.saved_applied_sync"] = "Saved look applied from multiplayer sync.",
+        ["status.auto_applied"] = "Saved look auto-applied.",
         ["status.multiplayer_sync_failed"] = "Multiplayer wardrobe sync failed; make sure every client has the fashion items and C# scripting enabled.",
         ["status.still_equipped_in"] = "Still equipped in ",
         ["status.look_cleared_sync"] = "Look cleared from multiplayer sync.",
         ["status.round_ended"] = "Round ended. Saved look cleared.",
         ["status.refreshed"] = "Saved look refreshed for changed equipment.",
+        ["status.restored_character"] = "Saved look restored for this character.",
         ["status.apply_again"] = "Saved look needs to be applied again.",
         ["status.character_changed"] = "Controlled character changed. Save a new outfit for this character.",
         ["status.saved_cleared"] = "Saved look cleared.",
@@ -106,6 +113,7 @@ local translations = {
         ["button.clear"] = "清除外观",
         ["button.diagnostics"] = "诊断",
         ["button.hide_diagnostics"] = "隐藏诊断",
+        ["button.dump_debug"] = "输出诊断到日志",
         ["button.close"] = "关闭",
         ["slot.head"] = "头部",
         ["slot.headset"] = "耳机",
@@ -124,11 +132,13 @@ local translations = {
         ["status.saved_removed"] = "已保存并移除",
         ["status.synced_server"] = "已从服务器同步",
         ["status.saved_applied_sync"] = "已从多人同步套用保存的外观。",
+        ["status.auto_applied"] = "已自动套用保存的外观。",
         ["status.multiplayer_sync_failed"] = "多人衣柜同步失败；请确认每位客户端都有这些时装物品并已启用 C# 脚本。",
         ["status.still_equipped_in"] = "仍装备于 ",
         ["status.look_cleared_sync"] = "外观已由多人同步清除。",
         ["status.round_ended"] = "回合结束。已清除保存的外观。",
         ["status.refreshed"] = "装备改变，已刷新保存的外观。",
+        ["status.restored_character"] = "已恢复此角色保存的外观。",
         ["status.apply_again"] = "保存的外观需要重新套用。",
         ["status.character_changed"] = "控制角色已改变。请为此角色保存新的服装。",
         ["status.saved_cleared"] = "已清除保存的外观。",
@@ -152,6 +162,7 @@ local translations = {
         ["button.clear"] = "清除外觀",
         ["button.diagnostics"] = "診斷",
         ["button.hide_diagnostics"] = "隱藏診斷",
+        ["button.dump_debug"] = "輸出診斷到日誌",
         ["button.close"] = "關閉",
         ["slot.head"] = "頭部",
         ["slot.headset"] = "耳機",
@@ -170,11 +181,13 @@ local translations = {
         ["status.saved_removed"] = "已儲存並移除",
         ["status.synced_server"] = "已從伺服器同步",
         ["status.saved_applied_sync"] = "已從多人同步套用儲存外觀。",
+        ["status.auto_applied"] = "已自動套用儲存外觀。",
         ["status.multiplayer_sync_failed"] = "多人衣櫃同步失敗；請確認每位客戶端都有這些時裝物品並已啟用 C# 腳本。",
         ["status.still_equipped_in"] = "仍裝備於 ",
         ["status.look_cleared_sync"] = "外觀已由多人同步清除。",
         ["status.round_ended"] = "回合結束。已清除儲存的外觀。",
         ["status.refreshed"] = "裝備改變，已重新套用儲存外觀。",
+        ["status.restored_character"] = "已恢復此角色儲存外觀。",
         ["status.apply_again"] = "儲存外觀需要重新套用。",
         ["status.character_changed"] = "控制角色已改變。請為此角色儲存新的服裝。",
         ["status.saved_cleared"] = "已清除儲存的外觀。",
@@ -190,10 +203,12 @@ local statusKeys = {
     ["Saved and removed"] = "status.saved_removed",
     ["Synced from server"] = "status.synced_server",
     ["Saved look applied from multiplayer sync."] = "status.saved_applied_sync",
+    ["Saved look auto-applied."] = "status.auto_applied",
     ["Multiplayer wardrobe sync failed; make sure every client has the fashion items and C# scripting enabled."] = "status.multiplayer_sync_failed",
     ["Look cleared from multiplayer sync."] = "status.look_cleared_sync",
     ["Round ended. Saved look cleared."] = "status.round_ended",
     ["Saved look refreshed for changed equipment."] = "status.refreshed",
+    ["Saved look restored for this character."] = "status.restored_character",
     ["Saved look needs to be applied again."] = "status.apply_again",
     ["Controlled character changed. Save a new outfit for this character."] = "status.character_changed",
     ["Saved look cleared."] = "status.saved_cleared"
@@ -291,10 +306,13 @@ local visualCarrierPriority = {
 local savedLook = {}
 local savedLookCaptured = false
 local activeLook = false
+local autoApplyLook = false
+local characterStates = {}
 local lastOperation = "Ready."
 local diagnosticsVisible = false
 local lastEquipmentSignature = nil
 local slotResults = {}
+local lastNetworkApplyDiagnostics = {}
 local window = nil
 local overlayRoot = nil
 local lastCharacter = nil
@@ -303,11 +321,93 @@ local toggleWindow
 local fullPanelOpen = false
 local unequipItem
 local isInSlot
+local getSlotItem
+local isInAnyWearableSlot
 local roundStartNoticeSent = false
+local lastServerAutoApplySignature = nil
+local globalTick = 0
+local initialEquipGateActive = false
+local initialEquipGateStartedTick = 0
+local initialEquipGateLastEquipTick = 0
+local initialEquipGateSeenEquip = false
+local initialEquipGateSignature = nil
+local initialEquipGateStableTicks = 0
+local initialEquipGateCharacterKey = nil
+local initialEquipGateLastStatusTick = 0
+local pendingRoundStartNetworkLook = nil
+local pendingRoundStartNetworkCharacterKey = nil
+
+local InitialEquipStableTicks = 12
+local InitialEquipFallbackTicks = 120
+
+local function characterStateKey(character)
+    if character == nil then return nil end
+    local ok, id = pcall(function()
+        return character.ID
+    end)
+    if ok and id ~= nil and tonumber(id) ~= nil and tonumber(id) > 0 then
+        return tostring(id)
+    end
+    ok, id = pcall(function()
+        return character.Name
+    end)
+    if ok and id ~= nil and tostring(id) ~= "" then
+        return tostring(id)
+    end
+    return tostring(character)
+end
+
+local function saveCharacterState(character)
+    local key = characterStateKey(character)
+    if key == nil then return end
+    characterStates[key] = {
+        savedLook = savedLook,
+        savedLookCaptured = savedLookCaptured,
+        activeLook = activeLook,
+        autoApplyLook = autoApplyLook,
+        lastEquipmentSignature = lastEquipmentSignature,
+        slotResults = slotResults,
+        lastNetworkApplyDiagnostics = lastNetworkApplyDiagnostics
+    }
+end
+
+local function loadCharacterState(character)
+    local key = characterStateKey(character)
+    local state = key ~= nil and characterStates[key] or nil
+    if state == nil then
+        if not savedLookCaptured and next(savedLook) == nil then
+            savedLook = {}
+            savedLookCaptured = false
+            autoApplyLook = false
+        end
+        activeLook = false
+        lastEquipmentSignature = nil
+        slotResults = {}
+        lastNetworkApplyDiagnostics = {}
+        return false
+    end
+    savedLook = state.savedLook or {}
+    savedLookCaptured = state.savedLookCaptured == true
+    activeLook = state.activeLook == true
+    autoApplyLook = state.autoApplyLook == true
+    lastEquipmentSignature = state.lastEquipmentSignature
+    slotResults = state.slotResults or {}
+    lastNetworkApplyDiagnostics = state.lastNetworkApplyDiagnostics or {}
+    return true
+end
 
 local function log(message)
     local line = "[" .. MOD_NAME .. "] " .. tostring(message)
     lastOperation = tostring(message)
+    if LuaCsLogger ~= nil and LuaCsLogger.Log ~= nil then
+        LuaCsLogger.Log(line)
+    else
+        print(line)
+    end
+end
+
+local function debugLog(message)
+    local line = "[" .. MOD_NAME .. " DEBUG] " .. tostring(message)
     if LuaCsLogger ~= nil and LuaCsLogger.Log ~= nil then
         LuaCsLogger.Log(line)
     else
@@ -535,6 +635,73 @@ local function findEntityById(id)
     return nil
 end
 
+local function collectionContains(collection, value)
+    if collection == nil or value == nil then return false end
+    local ok, result = pcall(function()
+        return collection.Contains(value)
+    end)
+    if ok then return result == true end
+    pcall(function()
+        for entry in collection do
+            if entry == value then result = true end
+        end
+    end)
+    return result == true
+end
+
+local function itemBelongsToCharacter(character, item)
+    if character == nil or item == nil then return false end
+    if isInAnyWearableSlot(character, item) then return true end
+    if character.Inventory ~= nil then
+        local ok, allItems = pcall(function()
+            return character.Inventory.AllItems
+        end)
+        if ok and collectionContains(allItems, item) then return true end
+        local parentOk, parentInventory = pcall(function()
+            return item.ParentInventory
+        end)
+        if parentOk and parentInventory == character.Inventory then return true end
+    end
+    return false
+end
+
+local function findItemByIdentifier(character, identifier)
+    if character == nil or identifier == nil or identifier == "" then return nil end
+    for _, entry in ipairs(slots) do
+        local item = getSlotItem(character, entry.slot)
+        if item ~= nil and itemIdentifier(item) == identifier then return item end
+    end
+    if character.Inventory ~= nil then
+        local ok, allItems = pcall(function()
+            return character.Inventory.AllItems
+        end)
+        if ok and allItems ~= nil then
+            pcall(function()
+                for item in allItems do
+                    if itemIdentifier(item) == identifier then
+                        ok = item
+                        return
+                    end
+                end
+            end)
+            if ok ~= true and ok ~= false and ok ~= nil then return ok end
+        end
+    end
+    if Item ~= nil and Item.ItemList ~= nil then
+        local found = nil
+        pcall(function()
+            for item in Item.ItemList do
+                if itemIdentifier(item) == identifier and itemBelongsToCharacter(character, item) then
+                    found = item
+                    return
+                end
+            end
+        end)
+        if found ~= nil then return found end
+    end
+    return nil
+end
+
 local function itemStableId(item)
     if item == nil then return "-" end
     local id = itemIdentifier(item) or itemName(item)
@@ -572,7 +739,7 @@ local function savedLookSummary()
     return tostring(count) .. " " .. tr(slotKey)
 end
 
-local function getSlotItem(character, slot)
+getSlotItem = function(character, slot)
     if character == nil or character.Inventory == nil then return nil end
     local ok, result = pcall(function()
         return character.Inventory.GetItemInLimbSlot(slot)
@@ -618,7 +785,7 @@ local function wornSlotLabelsForItem(character, item)
     return labels
 end
 
-local function isInAnyWearableSlot(character, item)
+isInAnyWearableSlot = function(character, item)
     return #wornSlotLabelsForItem(character, item) > 0
 end
 
@@ -629,6 +796,96 @@ local function equipmentSignature(character)
         parts[#parts + 1] = entry.key .. "=" .. itemStableId(getSlotItem(character, entry.slot))
     end
     return table.concat(parts, ";")
+end
+
+local function equippedWearableCount(character)
+    if character == nil then return 0 end
+    local count = 0
+    for _, entry in ipairs(slots) do
+        local item = getSlotItem(character, entry.slot)
+        if item ~= nil and not isIgnoredWardrobeItem(item) then
+            count = count + 1
+        end
+    end
+    return count
+end
+
+local function resetInitialEquipGate()
+    initialEquipGateActive = false
+    initialEquipGateStartedTick = 0
+    initialEquipGateLastEquipTick = 0
+    initialEquipGateSeenEquip = false
+    initialEquipGateSignature = nil
+    initialEquipGateStableTicks = 0
+    initialEquipGateCharacterKey = nil
+    initialEquipGateLastStatusTick = 0
+end
+
+local function startInitialEquipGate()
+    initialEquipGateActive = true
+    initialEquipGateStartedTick = globalTick
+    initialEquipGateLastEquipTick = 0
+    initialEquipGateSeenEquip = false
+    initialEquipGateSignature = nil
+    initialEquipGateStableTicks = 0
+    initialEquipGateCharacterKey = nil
+    initialEquipGateLastStatusTick = 0
+end
+
+local function currentSessionRunning()
+    if GameMain == nil then return false end
+    local ok, session = pcall(function()
+        return GameMain.GameSession
+    end)
+    if not ok or session == nil then return false end
+    local runningOk, running = pcall(function()
+        return session.IsRunning
+    end)
+    if runningOk and running ~= true then return false end
+    local endingOk, ending = pcall(function()
+        return session.RoundEnding
+    end)
+    if endingOk and ending == true then return false end
+    return true
+end
+
+local function initialEquipGateReady(character)
+    if not initialEquipGateActive then return true end
+    if character == nil or not currentSessionRunning() then return false end
+
+    local key = characterStateKey(character)
+    if initialEquipGateCharacterKey ~= key then
+        initialEquipGateCharacterKey = key
+        initialEquipGateSignature = nil
+        initialEquipGateStableTicks = 0
+        initialEquipGateSeenEquip = false
+        initialEquipGateLastEquipTick = 0
+    end
+
+    local signature = equipmentSignature(character)
+    if signature == initialEquipGateSignature then
+        initialEquipGateStableTicks = initialEquipGateStableTicks + 1
+    else
+        initialEquipGateSignature = signature
+        initialEquipGateStableTicks = 0
+    end
+
+    local equippedCount = equippedWearableCount(character)
+    local waitedTicks = globalTick - initialEquipGateStartedTick
+    local quietAfterEquip = initialEquipGateSeenEquip and (globalTick - initialEquipGateLastEquipTick >= InitialEquipStableTicks)
+    local stable = initialEquipGateStableTicks >= InitialEquipStableTicks
+    local fallbackStable = waitedTicks >= InitialEquipFallbackTicks and stable and equippedCount > 0
+
+    if (quietAfterEquip and stable) or fallbackStable then
+        resetInitialEquipGate()
+        return true
+    end
+
+    if globalTick - initialEquipGateLastStatusTick >= 60 then
+        initialEquipGateLastStatusTick = globalTick
+        lastOperation = "Waiting for initial equipment to finish equipping before applying saved look."
+    end
+    return false
 end
 
 unequipItem = function(character, item)
@@ -716,10 +973,37 @@ local function captureVisualOverride(character, item)
     return 0
 end
 
+local function captureVisualOverridePrefab(character, identifier)
+    if ensureVisualOverride() == nil or character == nil or identifier == nil or identifier == "" then return 0 end
+    local ok, count = pcall(function()
+        return VisualOverride.CaptureFashionPrefab(character, tostring(identifier))
+    end)
+    if ok and count ~= nil then return count end
+    return 0
+end
+
 local function captureEmptyVisualOverride(character)
     if ensureVisualOverride() == nil or character == nil then return false end
     local ok, result = pcall(function()
         return VisualOverride.CaptureEmptyFashion(character)
+    end)
+    return ok and result == true
+end
+
+local function setFashionSlotMask(character, lookData)
+    if ensureVisualOverride() == nil or character == nil then return false end
+    local savedSlots = {}
+    local emptySlots = {}
+    lookData = lookData or savedLook
+    for _, entry in ipairs(slots) do
+        if lookData[entry.key] ~= nil then
+            savedSlots[#savedSlots + 1] = entry.key
+        else
+            emptySlots[#emptySlots + 1] = entry.key
+        end
+    end
+    local ok, result = pcall(function()
+        return VisualOverride.SetFashionSlots(character, table.concat(savedSlots, ","), table.concat(emptySlots, ","))
     end)
     return ok and result == true
 end
@@ -803,10 +1087,11 @@ local function readNetworkLook(message)
     return characterId, data
 end
 
-local function applyCapturedFashionToCharacterEquipment(character)
+local function applyCapturedFashionToCharacterEquipment(character, lookData)
     if character == nil then return false, 0 end
 
     restoreItemVisuals(character)
+    setFashionSlotMask(character, lookData or savedLook)
 
     local current = snapshot(character)
     local equippedItems = {}
@@ -835,8 +1120,13 @@ local function applyCapturedFashionToCharacterEquipment(character)
 end
 
 local function applyNetworkLook(character, networkLook)
-    if character == nil or networkLook == nil then return false end
-    if visualOverrideStatus() ~= nil then return false end
+    local diagnostics = {}
+    if character == nil or networkLook == nil then return false, diagnostics end
+    local visualStatus = visualOverrideStatus()
+    if visualStatus ~= nil then
+        diagnostics[#diagnostics + 1] = "visual override not ready: " .. tostring(visualStatus)
+        return false, diagnostics
+    end
 
     clearVisualOverride(character)
 
@@ -844,24 +1134,51 @@ local function applyNetworkLook(character, networkLook)
     local capturedItems = 0
     for _, entry in ipairs(slots) do
         local data = networkLook[entry.key]
-        if data ~= nil and data.itemId ~= nil and data.itemId > 0 then
+        if data ~= nil and ((data.itemId ~= nil and data.itemId > 0) or (data.identifier ~= nil and data.identifier ~= "")) then
             expectedItems = expectedItems + 1
             local item = findEntityById(data.itemId)
+            local foundBy = item ~= nil and "entity id" or "none"
+            if item == nil or itemIdentifier(item) ~= data.identifier then
+                item = findItemByIdentifier(character, data.identifier)
+                foundBy = item ~= nil and "character inventory identifier" or "none"
+            end
             if item ~= nil then
-                captureVisualOverride(character, item)
-                capturedItems = capturedItems + 1
+                local captured = captureVisualOverride(character, item)
+                if captured > 0 then
+                    capturedItems = capturedItems + 1
+                end
+                diagnostics[#diagnostics + 1] =
+                    entry.key .. ": identifier=" .. tostring(data.identifier) ..
+                    ", itemId=" .. tostring(data.itemId) ..
+                    ", savedName=" .. tostring(data.name) ..
+                    ", found=" .. foundBy ..
+                    ", capturedSprites=" .. tostring(captured)
+            else
+                local captured = captureVisualOverridePrefab(character, data.identifier)
+                if captured > 0 then
+                    capturedItems = capturedItems + 1
+                end
+                diagnostics[#diagnostics + 1] =
+                    entry.key .. ": identifier=" .. tostring(data.identifier) ..
+                    ", itemId=" .. tostring(data.itemId) ..
+                    ", savedName=" .. tostring(data.name) ..
+                    ", found=missing item instance" ..
+                    ", prefabCapturedSprites=" .. tostring(captured)
             end
         end
     end
 
     if expectedItems == 0 then
         captureEmptyVisualOverride(character)
+        diagnostics[#diagnostics + 1] = "network look had no saved slots; captured empty look"
     elseif capturedItems == 0 then
-        return false
+        diagnostics[#diagnostics + 1] = "no saved fashion sprites could be captured"
+        return false, diagnostics
     end
 
-    local activated = applyCapturedFashionToCharacterEquipment(character)
-    return activated == true
+    local activated = applyCapturedFashionToCharacterEquipment(character, networkLook)
+    diagnostics[#diagnostics + 1] = "activated=" .. tostring(activated == true) .. ", expectedItems=" .. tostring(expectedItems) .. ", capturedItems=" .. tostring(capturedItems)
+    return activated == true, diagnostics
 end
 
 local function saveFashionAndUnequip()
@@ -882,6 +1199,8 @@ local function saveFashionAndUnequip()
     savedLookCaptured = true
     slotResults = {}
     activeLook = false
+    autoApplyLook = true
+    lastServerAutoApplySignature = nil
     lastEquipmentSignature = nil
     clearVisualOverride(character)
 
@@ -952,6 +1271,7 @@ local function saveFashionAndUnequip()
     if #failedItems > 0 then
         message = message .. " Still equipped: " .. table.concat(failedItems, "; ") .. "."
     end
+    saveCharacterState(character)
     log(message)
 end
 
@@ -978,15 +1298,21 @@ local function applyFashionToCurrentEquipment(silent)
     end
 
     if isMultiplayerClient() and requestServerApplyFashion() then
+        lastCharacter = character
+        autoApplyLook = true
+        lastServerAutoApplySignature = equipmentSignature(character)
+        saveCharacterState(character)
         if not silent then log("Requested multiplayer wardrobe apply from the server.") end
         return true
     end
 
-    local activated, visualItems = applyCapturedFashionToCharacterEquipment(character)
+    local activated, visualItems = applyCapturedFashionToCharacterEquipment(character, savedLook)
 
     lastCharacter = character
     activeLook = activated == true
+    autoApplyLook = activated == true
     lastEquipmentSignature = equipmentSignature(character)
+    saveCharacterState(character)
 
     if not activated then
         if not silent then
@@ -1014,7 +1340,10 @@ local function clearActiveLook()
         restoreItemVisuals(character)
     end
     activeLook = false
+    autoApplyLook = false
+    lastServerAutoApplySignature = nil
     lastEquipmentSignature = nil
+    saveCharacterState(character)
     if multiplayerClearRequested then
         log("Look cleared. Multiplayer clear requested from the server.")
     else
@@ -1028,23 +1357,48 @@ local function refreshActiveLookIfNeeded(character)
     if lastEquipmentSignature == signature then return end
     if applyFashionToCurrentEquipment(true) then
         lastOperation = "Saved look refreshed for changed equipment."
+        saveCharacterState(character)
     else
         activeLook = false
         lastEquipmentSignature = nil
         lastOperation = "Saved look needs to be applied again."
+        saveCharacterState(character)
+    end
+end
+
+local function autoApplySavedLookIfNeeded(character)
+    if character == nil or activeLook or not autoApplyLook or not hasSavedLook() then return end
+    if isMultiplayerClient() then
+        local signature = equipmentSignature(character)
+        if lastServerAutoApplySignature == signature then return end
+        if requestServerApplyFashion() then
+            lastServerAutoApplySignature = signature
+            lastOperation = "Saved look needs to be applied again."
+            saveCharacterState(character)
+        end
+        return
+    end
+    if applyFashionToCurrentEquipment(true) then
+        lastOperation = "Saved look auto-applied."
+        saveCharacterState(character)
     end
 end
 
 local function handleControlledCharacterChange(character)
     if lastCharacter == nil or character == lastCharacter then return end
-    restoreItemVisuals(lastCharacter)
-    clearVisualOverride(lastCharacter)
-    activeLook = false
-    savedLook = {}
-    savedLookCaptured = false
-    slotResults = {}
-    lastEquipmentSignature = nil
-    lastOperation = "Controlled character changed. Save a new outfit for this character."
+    saveCharacterState(lastCharacter)
+    local hadState = loadCharacterState(character)
+    if hadState then
+        lastOperation = hasSavedLook() and "Saved look restored for this character." or "Controlled character changed."
+    else
+        lastServerAutoApplySignature = nil
+        if hasSavedLook() then
+            autoApplyLook = true
+            lastOperation = "Saved look needs to be applied again."
+        else
+            lastOperation = "Controlled character changed. Save a new outfit for this character."
+        end
+    end
     pruneVisualOverrides()
 end
 
@@ -1056,9 +1410,61 @@ local function clearSavedLook()
     savedLook = {}
     savedLookCaptured = false
     activeLook = false
+    autoApplyLook = false
+    lastServerAutoApplySignature = nil
     slotResults = {}
     lastEquipmentSignature = nil
+    saveCharacterState(character)
     log("Saved look cleared.")
+end
+
+local function deferRoundStartNetworkLook(character, networkLook)
+    savedLook = networkLook
+    savedLookCaptured = true
+    activeLook = false
+    autoApplyLook = true
+    lastServerAutoApplySignature = nil
+    lastCharacter = character
+    lastEquipmentSignature = nil
+    pendingRoundStartNetworkLook = networkLook
+    pendingRoundStartNetworkCharacterKey = characterStateKey(character)
+    slotResults = {}
+    lastNetworkApplyDiagnostics = { "waiting for initial equipment to finish equipping" }
+    for _, entry in ipairs(slots) do
+        slotResults[entry.key] = networkLook[entry.key] ~= nil and "Waiting for initial equipment" or "Empty"
+    end
+    lastOperation = "Multiplayer wardrobe sync is waiting for initial equipment."
+    saveCharacterState(character)
+end
+
+local function applyPendingRoundStartNetworkLook(character)
+    if character == nil or pendingRoundStartNetworkLook == nil then return false end
+    if pendingRoundStartNetworkCharacterKey ~= characterStateKey(character) then return false end
+
+    local networkLook = pendingRoundStartNetworkLook
+    pendingRoundStartNetworkLook = nil
+    pendingRoundStartNetworkCharacterKey = nil
+
+    local applied, diagnostics = applyNetworkLook(character, networkLook)
+    savedLook = networkLook
+    savedLookCaptured = true
+    activeLook = applied == true
+    autoApplyLook = true
+    lastServerAutoApplySignature = nil
+    lastCharacter = character
+    lastEquipmentSignature = equipmentSignature(character)
+    slotResults = {}
+    lastNetworkApplyDiagnostics = diagnostics or {}
+    for _, entry in ipairs(slots) do
+        slotResults[entry.key] = networkLook[entry.key] ~= nil and (applied and "Synced from server" or "Sync failed; dump debug log") or "Empty"
+    end
+    if applied then
+        lastOperation = "Saved look applied from multiplayer sync after initial equipment."
+    else
+        lastOperation = "Multiplayer wardrobe sync failed after initial equipment; dump debug log."
+    end
+    saveCharacterState(character)
+    return true
 end
 
 if Networking ~= nil then
@@ -1067,22 +1473,31 @@ if Networking ~= nil then
         local character = findEntityById(characterId)
         if character == nil then return end
 
-        local applied = applyNetworkLook(character, networkLook)
+        if character == controlled() and initialEquipGateActive and not initialEquipGateReady(character) then
+            deferRoundStartNetworkLook(character, networkLook)
+            return
+        end
+
+        local applied, diagnostics = applyNetworkLook(character, networkLook)
         if character == controlled() then
             savedLook = networkLook
             savedLookCaptured = true
             activeLook = applied == true
+            autoApplyLook = true
+            lastServerAutoApplySignature = nil
             lastCharacter = character
             lastEquipmentSignature = equipmentSignature(character)
             slotResults = {}
+            lastNetworkApplyDiagnostics = diagnostics or {}
             for _, entry in ipairs(slots) do
-                slotResults[entry.key] = networkLook[entry.key] ~= nil and "Synced from server" or "Empty"
+                slotResults[entry.key] = networkLook[entry.key] ~= nil and (applied and "Synced from server" or "Sync failed; dump debug log") or "Empty"
             end
             if applied then
                 lastOperation = "Saved look applied from multiplayer sync."
             else
                 lastOperation = "Multiplayer wardrobe sync failed; make sure every client has the fashion items and C# scripting enabled."
             end
+            saveCharacterState(character)
         end
     end)
 
@@ -1094,10 +1509,54 @@ if Networking ~= nil then
         clearVisualOverride(character)
         if character == controlled() then
             activeLook = false
+            lastServerAutoApplySignature = nil
             lastEquipmentSignature = nil
+            pendingRoundStartNetworkLook = nil
+            pendingRoundStartNetworkCharacterKey = nil
             lastOperation = "Look cleared from multiplayer sync."
+            saveCharacterState(character)
         end
     end)
+end
+
+local function dumpDebugLog()
+    local character = controlled()
+    local overrideState = visualOverrideState()
+    local lines = {}
+    local function emit(line)
+        lines[#lines + 1] = tostring(line)
+        debugLog(line)
+    end
+    emit("---- wardrobe diagnostic dump begin ----")
+    emit("lastOperation=" .. tostring(lastOperation))
+    emit("savedLookCaptured=" .. tostring(savedLookCaptured) .. ", activeLook=" .. tostring(activeLook) .. ", autoApplyLook=" .. tostring(autoApplyLook))
+    emit("overrideLabel=" .. tostring(overrideState.label) .. ", overrideDetails=" .. tostring(overrideState.details))
+    emit("character=" .. tostring(character) .. ", equipmentSignature=" .. tostring(character ~= nil and equipmentSignature(character) or "no-character"))
+    for _, entry in ipairs(slots) do
+        local current = character ~= nil and getSlotItem(character, entry.slot) or nil
+        local saved = savedLook[entry.key]
+        emit(
+            entry.key ..
+            " currentIdentifier=" .. tostring(itemIdentifier(current)) ..
+            ", currentName=" .. tostring(itemName(current)) ..
+            ", currentId=" .. tostring(itemEntityId(current)) ..
+            ", savedIdentifier=" .. tostring(saved ~= nil and saved.identifier or nil) ..
+            ", savedName=" .. tostring(saved ~= nil and saved.name or nil) ..
+            ", savedItemId=" .. tostring(saved ~= nil and saved.itemId or nil) ..
+            ", result=" .. tostring(slotResults[entry.key])
+        )
+    end
+    if #lastNetworkApplyDiagnostics > 0 then
+        for index, line in ipairs(lastNetworkApplyDiagnostics) do
+            emit("networkApply[" .. tostring(index) .. "] " .. tostring(line))
+        end
+    else
+        emit("networkApply=<none>")
+    end
+    local debugStatus = visualOverrideDebugStatus(character)
+    emit("visualOverrideCharacter=" .. tostring(debugStatus))
+    emit("---- wardrobe diagnostic dump end ----")
+    lastOperation = "Debug diagnostics dumped to LuaCs log."
 end
 
 local function clearWindow()
@@ -1166,6 +1625,7 @@ buildWindow = function()
     addButton(list, diagnosticsVisible and tr("button.hide_diagnostics") or tr("button.diagnostics"), function()
         diagnosticsVisible = not diagnosticsVisible
     end)
+    addButton(list, tr("button.dump_debug"), function() dumpDebugLog() end, true)
     addButton(list, tr("button.close"), function() fullPanelOpen = false; resetOverlay() end, false)
 
     for _, entry in ipairs(slots) do
@@ -1208,16 +1668,18 @@ local function f8Hit()
 end
 
 Hook.Add("think", "barowardrobeswitcher.panel", function()
+    globalTick = globalTick + 1
+
     if f8Hit() then
         toggleWindow()
     end
 
     local character = controlled()
     if character == nil then
-        if lastCharacter ~= nil and activeLook then
-            restoreItemVisuals(lastCharacter)
+        if lastCharacter ~= nil then
+            saveCharacterState(lastCharacter)
         end
-        activeLook = false
+        loadCharacterState(nil)
         lastEquipmentSignature = nil
         lastCharacter = nil
         if fullPanelOpen and window == nil then
@@ -1233,7 +1695,13 @@ Hook.Add("think", "barowardrobeswitcher.panel", function()
 
     handleControlledCharacterChange(character)
     lastCharacter = character
-    refreshActiveLookIfNeeded(character)
+    if initialEquipGateActive and not initialEquipGateReady(character) then
+        -- Wait until Barotrauma has finished its own initial equipment burst.
+    else
+        applyPendingRoundStartNetworkLook(character)
+        autoApplySavedLookIfNeeded(character)
+        refreshActiveLookIfNeeded(character)
+    end
 
     if fullPanelOpen and window == nil then
         buildWindow()
@@ -1245,22 +1713,42 @@ Hook.Add("think", "barowardrobeswitcher.panel", function()
 end)
 
 Hook.Add("roundStart", "barowardrobeswitcher.notice", function()
+    startInitialEquipGate()
     sendRoundStartNotice()
 end)
 
+Hook.Add("item.equip", "barowardrobeswitcher.initial-equip", function(item, character)
+    if not initialEquipGateActive or character == nil then return end
+    local controlledCharacter = controlled()
+    if controlledCharacter == nil or character ~= controlledCharacter then return end
+    initialEquipGateSeenEquip = true
+    initialEquipGateLastEquipTick = globalTick
+    initialEquipGateStableTicks = 0
+end)
+
 Hook.Add("roundEnd", "barowardrobeswitcher.cleanup", function()
+    if lastCharacter ~= nil then
+        saveCharacterState(lastCharacter)
+    end
+    resetInitialEquipGate()
+    pendingRoundStartNetworkLook = nil
+    pendingRoundStartNetworkCharacterKey = nil
     fullPanelOpen = false
     resetOverlay()
-    savedLook = {}
-    savedLookCaptured = false
     slotResults = {}
+    lastNetworkApplyDiagnostics = {}
     activeLook = false
     diagnosticsVisible = false
+    lastServerAutoApplySignature = nil
     lastEquipmentSignature = nil
     clearAllVisualOverrides()
+    for _, state in pairs(characterStates) do
+        state.activeLook = false
+        state.lastEquipmentSignature = nil
+    end
     lastCharacter = nil
     roundStartNoticeSent = false
-    lastOperation = "Round ended. Saved look cleared."
+    lastOperation = hasSavedLook() and "Saved look needs to be applied again." or "Round ended. Saved look cleared."
 end)
 
 log("Loaded. Press F8 to open the wardrobe panel.")
