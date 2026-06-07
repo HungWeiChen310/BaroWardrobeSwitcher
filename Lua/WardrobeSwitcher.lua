@@ -352,6 +352,7 @@ local initialEquipGateLastStatusTick = 0
 local pendingRoundStartNetworkLook = nil
 local pendingRoundStartNetworkCharacterKey = nil
 local clientPersistPathCache = nil
+local lastSessionKey = nil
 local persistentClientLookLoaded = false
 local persistClientLook
 local clearPersistentClientLook
@@ -506,12 +507,59 @@ local function unescapePersistentValue(value)
         :gsub("%%25", "%%")
 end
 
+local function userDataMember(object, name)
+    if object == nil or name == nil then return nil end
+    local ok, value = pcall(function()
+        return object[name]
+    end)
+    if ok then return value end
+    return nil
+end
+
+local function normalizedSessionValue(value)
+    if value == nil then return nil end
+    local text = tostring(value):gsub("\\", "/")
+    if text == "" or text == "nil" or text == "null" then return nil end
+    return text
+end
+
+local function firstSessionValue(object, names)
+    for _, name in ipairs(names) do
+        local value = normalizedSessionValue(userDataMember(object, name))
+        if value ~= nil then return value end
+    end
+    return nil
+end
+
+local function currentSessionKey()
+    if GameMain == nil then return nil end
+    local session = userDataMember(GameMain, "GameSession")
+    if session == nil then return nil end
+
+    local direct = firstSessionValue(session, { "SavePath", "SaveFilePath", "SaveFile", "FilePath" })
+    if direct ~= nil then return "session:" .. direct end
+
+    local gameMode = userDataMember(session, "GameMode")
+    local fromGameMode = firstSessionValue(gameMode, { "SavePath", "SaveFilePath", "SaveFile", "FilePath" })
+    if fromGameMode ~= nil then return "gamemode:" .. fromGameMode end
+
+    local campaign = userDataMember(session, "Campaign") or userDataMember(gameMode, "Campaign")
+    local fromCampaign = firstSessionValue(campaign, { "SavePath", "SaveFilePath", "SaveFile", "FilePath", "CampaignID", "Identifier" })
+    if fromCampaign ~= nil then return "campaign:" .. fromCampaign end
+
+    return nil
+end
+
 local function encodePersistentClientLook()
     local parts = {
         "captured=" .. tostring(savedLookCaptured == true),
         "active=" .. tostring(activeLook == true),
         "auto=" .. tostring(autoApplyLook == true)
     }
+    local sessionKey = currentSessionKey()
+    if sessionKey ~= nil then
+        parts[#parts + 1] = "session=" .. escapePersistentValue(sessionKey)
+    end
     for _, entry in ipairs(slots) do
         local slotState = savedLook[entry.key]
         if slotState ~= nil then
@@ -542,6 +590,7 @@ local function restorePersistentClientLookLine(line, source)
     local captured = false
     local active = false
     local auto = false
+    local restoredSessionKey = nil
     for part in tostring(line):gmatch("[^|]+") do
         local name, value = part:match("^([^=]+)=(.*)$")
         if name == "captured" then
@@ -550,6 +599,8 @@ local function restorePersistentClientLookLine(line, source)
             active = value == "true"
         elseif name == "auto" then
             auto = value == "true"
+        elseif name == "session" then
+            restoredSessionKey = unescapePersistentValue(value)
         elseif name ~= nil then
             local identifier, displayName = tostring(value):match("^([^,]*),(.*)$")
             if identifier ~= nil then
@@ -561,6 +612,21 @@ local function restorePersistentClientLookLine(line, source)
                 }
             end
         end
+    end
+
+    local sessionKey = currentSessionKey()
+    if sessionKey == nil then
+        return false
+    end
+    if restoredSessionKey == nil or restoredSessionKey == "" then
+        persistentClientLookLoaded = true
+        debugLog("Ignored persistent client wardrobe look without a session key from " .. tostring(source or "C# persistence") .. ".")
+        return false
+    end
+    if restoredSessionKey ~= sessionKey then
+        persistentClientLookLoaded = true
+        debugLog("Ignored persistent client wardrobe look for another session from " .. tostring(source or "C# persistence") .. ".")
+        return false
     end
 
     if not lookDataHasSavedLook(restoredLook, captured) then return false end
@@ -582,6 +648,10 @@ end
 
 persistClientLook = function()
     if not lookDataHasSavedLook(savedLook, savedLookCaptured) then
+        return false
+    end
+    if currentSessionKey() == nil then
+        debugLog("Skipped persistent client wardrobe write because no game session key is available.")
         return false
     end
 
@@ -613,6 +683,10 @@ clearPersistentClientLook = function()
 end
 
 local function loadPersistentClientLook()
+    if currentSessionKey() == nil then
+        return false
+    end
+
     local persistence = ensureWardrobePersistence()
     if persistence ~= nil then
         local ok, line = pcall(function()
@@ -1889,6 +1963,7 @@ local function dumpDebugLog()
     emit("---- wardrobe diagnostic dump begin ----")
     emit("lastOperation=" .. tostring(lastOperation))
     emit("savedLookCaptured=" .. tostring(savedLookCaptured) .. ", activeLook=" .. tostring(activeLook) .. ", autoApplyLook=" .. tostring(autoApplyLook))
+    emit("sessionKey=" .. tostring(currentSessionKey()))
     emit("overrideLabel=" .. tostring(overrideState.label) .. ", overrideDetails=" .. tostring(overrideState.details))
     emit("persistence=" .. tostring(clientLookStoragePath()))
     emit("character=" .. tostring(character) .. ", equipmentSignature=" .. tostring(character ~= nil and equipmentSignature(character) or "no-character"))
@@ -2030,9 +2105,41 @@ local function f8Hit()
     return ok and result == true
 end
 
+local function resetSavedLookForNewSession()
+    clearAllVisualOverrides()
+    savedLook = {}
+    savedLookCaptured = false
+    activeLook = false
+    autoApplyLook = false
+    characterStates = {}
+    slotResults = {}
+    lastNetworkApplyDiagnostics = {}
+    lastEquipmentSignature = nil
+    lastServerAutoApplySignature = nil
+    pendingRoundStartNetworkLook = nil
+    pendingRoundStartNetworkCharacterKey = nil
+    persistentClientLookLoaded = false
+    lastOperation = "Ready."
+end
+
+local function handleSessionChange()
+    local sessionKey = currentSessionKey()
+    if sessionKey == nil then return end
+    if lastSessionKey == nil then
+        lastSessionKey = sessionKey
+        return
+    end
+    if sessionKey == lastSessionKey then return end
+
+    lastSessionKey = sessionKey
+    resetSavedLookForNewSession()
+    debugLog("Detected a new game session; cleared in-memory saved wardrobe look.")
+end
+
 Hook.Add("think", "barowardrobeswitcher.panel", function()
     globalTick = globalTick + 1
 
+    handleSessionChange()
     if not persistentClientLookLoaded then
         loadPersistentClientLook()
     end
