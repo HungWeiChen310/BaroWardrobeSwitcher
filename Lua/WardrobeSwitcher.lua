@@ -90,7 +90,7 @@ local translations = {
         ["status.multiplayer_sync_failed"] = "Multiplayer wardrobe sync failed; make sure every client has the fashion items and C# scripting enabled.",
         ["status.still_equipped_in"] = "Still equipped in ",
         ["status.look_cleared_sync"] = "Look cleared from multiplayer sync.",
-        ["status.round_ended"] = "Round ended. Saved look cleared.",
+        ["status.round_ended"] = "Round ended.",
         ["status.next_scene_preserved"] = "Saved look will be reapplied in the next scene.",
         ["status.refreshed"] = "Saved look refreshed for changed equipment.",
         ["status.restored_character"] = "Saved look restored for this character.",
@@ -141,7 +141,7 @@ local translations = {
         ["status.multiplayer_sync_failed"] = "多人衣柜同步失败；请确认每位客户端都有这些时装物品并已启用 C# 脚本。",
         ["status.still_equipped_in"] = "仍装备于 ",
         ["status.look_cleared_sync"] = "外观已由多人同步清除。",
-        ["status.round_ended"] = "回合结束。已清除保存的外观。",
+        ["status.round_ended"] = "回合结束。",
         ["status.next_scene_preserved"] = "保存的外观会在下一个场景重新套用。",
         ["status.refreshed"] = "装备改变，已刷新保存的外观。",
         ["status.restored_character"] = "已恢复此角色保存的外观。",
@@ -192,7 +192,7 @@ local translations = {
         ["status.multiplayer_sync_failed"] = "多人衣櫃同步失敗；請確認每位客戶端都有這些時裝物品並已啟用 C# 腳本。",
         ["status.still_equipped_in"] = "仍裝備於 ",
         ["status.look_cleared_sync"] = "外觀已由多人同步清除。",
-        ["status.round_ended"] = "回合結束。已清除儲存的外觀。",
+        ["status.round_ended"] = "回合結束。",
         ["status.next_scene_preserved"] = "儲存外觀會在下一個場景重新套用。",
         ["status.refreshed"] = "裝備改變，已重新套用儲存外觀。",
         ["status.restored_character"] = "已恢復此角色儲存外觀。",
@@ -214,7 +214,7 @@ local statusKeys = {
     ["Saved look auto-applied."] = "status.auto_applied",
     ["Multiplayer wardrobe sync failed; make sure every client has the fashion items and C# scripting enabled."] = "status.multiplayer_sync_failed",
     ["Look cleared from multiplayer sync."] = "status.look_cleared_sync",
-    ["Round ended. Saved look cleared."] = "status.round_ended",
+    ["Round ended."] = "status.round_ended",
     ["Saved look will be reapplied in the next scene."] = "status.next_scene_preserved",
     ["Saved look refreshed for changed equipment."] = "status.refreshed",
     ["Saved look restored for this character."] = "status.restored_character",
@@ -414,16 +414,17 @@ end
 local function loadCharacterState(character)
     local key = characterStateKey(character)
     local state = key ~= nil and characterStates[key] or nil
-    if state == nil then
-        if not savedLookCaptured and next(savedLook) == nil then
-            savedLook = {}
-            savedLookCaptured = false
-            autoApplyLook = false
-        end
+    if state == nil or not lookDataHasSavedLook(state.savedLook, state.savedLookCaptured) then
         activeLook = false
         lastEquipmentSignature = nil
-        slotResults = {}
         lastNetworkApplyDiagnostics = {}
+        if lookDataHasSavedLook(savedLook, savedLookCaptured) then
+            return false
+        end
+        savedLook = {}
+        savedLookCaptured = false
+        autoApplyLook = false
+        slotResults = {}
         return false
     end
     savedLook = copyLookData(state.savedLook)
@@ -575,7 +576,6 @@ end
 
 persistClientLook = function()
     if not lookDataHasSavedLook(savedLook, savedLookCaptured) then
-        clearPersistentClientLook()
         return false
     end
 
@@ -998,8 +998,6 @@ local function preserveSceneTransitionLookIntent()
 
     if hasSavedLook() then
         persistClientLook()
-    else
-        clearPersistentClientLook()
     end
 
     return shouldReapplyCurrentLook
@@ -1693,6 +1691,33 @@ local function autoApplySavedLookIfNeeded(character)
     end
 end
 
+local function handleNoControlledCharacter()
+    if lastCharacter ~= nil then
+        saveCharacterState(lastCharacter)
+    end
+
+    local shouldReapplySavedLook = hasSavedLook() and (activeLook or autoApplyLook)
+    activeLook = false
+    lastEquipmentSignature = nil
+    lastServerAutoApplySignature = nil
+    lastCharacter = nil
+
+    if hasSavedLook() then
+        if shouldReapplySavedLook then
+            autoApplyLook = true
+            lastOperation = "Saved look will be reapplied in the next scene."
+        end
+        if next(slotResults) == nil then
+            for _, entry in ipairs(slots) do
+                slotResults[entry.key] = savedLook[entry.key] ~= nil and "Saved look needs to be applied again." or "Empty"
+            end
+        end
+    else
+        slotResults = {}
+        lastNetworkApplyDiagnostics = {}
+    end
+end
+
 local function handleControlledCharacterChange(character)
     if lastCharacter == nil or character == lastCharacter then return end
     saveCharacterState(lastCharacter)
@@ -2005,12 +2030,7 @@ Hook.Add("think", "barowardrobeswitcher.panel", function()
 
     local character = controlled()
     if character == nil then
-        if lastCharacter ~= nil then
-            saveCharacterState(lastCharacter)
-        end
-        loadCharacterState(nil)
-        lastEquipmentSignature = nil
-        lastCharacter = nil
+        handleNoControlledCharacter()
         if fullPanelOpen and window == nil then
             buildWindow()
         end
@@ -2082,12 +2102,10 @@ Hook.Add("roundEnd", "barowardrobeswitcher.cleanup", function()
     if preservedForNextScene then
         lastOperation = "Saved look will be reapplied in the next scene."
     else
-        lastOperation = hasSavedLook() and "Saved look needs to be applied again." or "Round ended. Saved look cleared."
+        lastOperation = hasSavedLook() and "Saved look needs to be applied again." or "Round ended."
     end
     if hasSavedLook() then
         persistClientLook()
-    else
-        clearPersistentClientLook()
     end
 end)
 
