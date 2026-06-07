@@ -1111,11 +1111,84 @@ local function readNetworkLook(message)
     return characterId, data
 end
 
-local function applyCapturedFashionToCharacterEquipment(character, lookData)
+local function captureFashionPayloadFromLook(character, lookData, diagnostics)
+    if character == nil or lookData == nil then return false, 0, 0 end
+
+    local expectedItems = 0
+    local capturedItems = 0
+    for _, entry in ipairs(slots) do
+        local data = lookData[entry.key]
+        local itemId = data ~= nil and tonumber(data.itemId) or 0
+        local identifier = data ~= nil and tostring(data.identifier or "") or ""
+        if data ~= nil and (itemId > 0 or identifier ~= "") then
+            expectedItems = expectedItems + 1
+            local item = findEntityById(itemId)
+            local foundBy = item ~= nil and "entity id" or "none"
+            if item == nil or itemIdentifier(item) ~= identifier then
+                item = findItemByIdentifier(character, identifier)
+                foundBy = item ~= nil and "character inventory identifier" or "none"
+            end
+            if item ~= nil then
+                local captured = captureVisualOverride(character, item)
+                if captured > 0 then
+                    capturedItems = capturedItems + 1
+                end
+                if diagnostics ~= nil then
+                    diagnostics[#diagnostics + 1] =
+                        entry.key .. ": identifier=" .. tostring(identifier) ..
+                        ", itemId=" .. tostring(itemId) ..
+                        ", savedName=" .. tostring(data.name) ..
+                        ", found=" .. foundBy ..
+                        ", capturedSprites=" .. tostring(captured)
+                end
+            else
+                local captured = captureVisualOverridePrefab(character, identifier)
+                if captured > 0 then
+                    capturedItems = capturedItems + 1
+                end
+                if diagnostics ~= nil then
+                    diagnostics[#diagnostics + 1] =
+                        entry.key .. ": identifier=" .. tostring(identifier) ..
+                        ", itemId=" .. tostring(itemId) ..
+                        ", savedName=" .. tostring(data.name) ..
+                        ", found=missing item instance" ..
+                        ", prefabCapturedSprites=" .. tostring(captured)
+                end
+            end
+        end
+    end
+
+    if expectedItems == 0 then
+        captureEmptyVisualOverride(character)
+        if diagnostics ~= nil then
+            diagnostics[#diagnostics + 1] = "look had no saved slots; captured empty look"
+        end
+        return true, expectedItems, capturedItems
+    end
+
+    if capturedItems == 0 then
+        if diagnostics ~= nil then
+            diagnostics[#diagnostics + 1] = "no saved fashion sprites could be captured"
+        end
+        return false, expectedItems, capturedItems
+    end
+
+    return true, expectedItems, capturedItems
+end
+
+local function applyCapturedFashionToCharacterEquipment(character, lookData, recapturePayload)
     if character == nil then return false, 0 end
 
-    restoreItemVisuals(character)
-    setFashionSlotMask(character, lookData or savedLook)
+    local look = lookData or savedLook
+    if recapturePayload ~= false then
+        clearVisualOverride(character)
+        if not captureFashionPayloadFromLook(character, look) then
+            return false, 0
+        end
+    else
+        restoreItemVisuals(character)
+    end
+    setFashionSlotMask(character, look)
 
     local current = snapshot(character)
     local equippedItems = {}
@@ -1154,53 +1227,12 @@ local function applyNetworkLook(character, networkLook)
 
     clearVisualOverride(character)
 
-    local expectedItems = 0
-    local capturedItems = 0
-    for _, entry in ipairs(slots) do
-        local data = networkLook[entry.key]
-        if data ~= nil and ((data.itemId ~= nil and data.itemId > 0) or (data.identifier ~= nil and data.identifier ~= "")) then
-            expectedItems = expectedItems + 1
-            local item = findEntityById(data.itemId)
-            local foundBy = item ~= nil and "entity id" or "none"
-            if item == nil or itemIdentifier(item) ~= data.identifier then
-                item = findItemByIdentifier(character, data.identifier)
-                foundBy = item ~= nil and "character inventory identifier" or "none"
-            end
-            if item ~= nil then
-                local captured = captureVisualOverride(character, item)
-                if captured > 0 then
-                    capturedItems = capturedItems + 1
-                end
-                diagnostics[#diagnostics + 1] =
-                    entry.key .. ": identifier=" .. tostring(data.identifier) ..
-                    ", itemId=" .. tostring(data.itemId) ..
-                    ", savedName=" .. tostring(data.name) ..
-                    ", found=" .. foundBy ..
-                    ", capturedSprites=" .. tostring(captured)
-            else
-                local captured = captureVisualOverridePrefab(character, data.identifier)
-                if captured > 0 then
-                    capturedItems = capturedItems + 1
-                end
-                diagnostics[#diagnostics + 1] =
-                    entry.key .. ": identifier=" .. tostring(data.identifier) ..
-                    ", itemId=" .. tostring(data.itemId) ..
-                    ", savedName=" .. tostring(data.name) ..
-                    ", found=missing item instance" ..
-                    ", prefabCapturedSprites=" .. tostring(captured)
-            end
-        end
-    end
-
-    if expectedItems == 0 then
-        captureEmptyVisualOverride(character)
-        diagnostics[#diagnostics + 1] = "network look had no saved slots; captured empty look"
-    elseif capturedItems == 0 then
-        diagnostics[#diagnostics + 1] = "no saved fashion sprites could be captured"
+    local capturedPayload, expectedItems, capturedItems = captureFashionPayloadFromLook(character, networkLook, diagnostics)
+    if not capturedPayload then
         return false, diagnostics
     end
 
-    local activated = applyCapturedFashionToCharacterEquipment(character, networkLook)
+    local activated = applyCapturedFashionToCharacterEquipment(character, networkLook, false)
     diagnostics[#diagnostics + 1] = "activated=" .. tostring(activated == true) .. ", expectedItems=" .. tostring(expectedItems) .. ", capturedItems=" .. tostring(capturedItems)
     return activated == true, diagnostics
 end
