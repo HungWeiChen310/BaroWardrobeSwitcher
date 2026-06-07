@@ -340,9 +340,38 @@ local initialEquipGateCharacterKey = nil
 local initialEquipGateLastStatusTick = 0
 local pendingRoundStartNetworkLook = nil
 local pendingRoundStartNetworkCharacterKey = nil
+local clientPersistPathCache = nil
+local persistClientLook
+local clearPersistentClientLook
 
 local InitialEquipStableTicks = 12
 local InitialEquipFallbackTicks = 120
+
+local function copyLookData(lookData)
+    local copy = {}
+    lookData = lookData or {}
+    for _, entry in ipairs(slots) do
+        local slotState = lookData[entry.key]
+        if slotState ~= nil then
+            copy[entry.key] = {
+                identifier = tostring(slotState.identifier or ""),
+                itemId = tonumber(slotState.itemId) or 0,
+                name = tostring(slotState.name or ""),
+                slot = entry.key
+            }
+        end
+    end
+    return copy
+end
+
+local function lookDataHasSavedLook(lookData, captured)
+    if captured == true then return true end
+    lookData = lookData or {}
+    for _, entry in ipairs(slots) do
+        if lookData[entry.key] ~= nil then return true end
+    end
+    return false
+end
 
 local function characterStateKey(character)
     if character == nil then return nil end
@@ -365,7 +394,7 @@ local function saveCharacterState(character)
     local key = characterStateKey(character)
     if key == nil then return end
     characterStates[key] = {
-        savedLook = savedLook,
+        savedLook = copyLookData(savedLook),
         savedLookCaptured = savedLookCaptured,
         activeLook = activeLook,
         autoApplyLook = autoApplyLook,
@@ -390,7 +419,7 @@ local function loadCharacterState(character)
         lastNetworkApplyDiagnostics = {}
         return false
     end
-    savedLook = state.savedLook or {}
+    savedLook = copyLookData(state.savedLook)
     savedLookCaptured = state.savedLookCaptured == true
     activeLook = state.activeLook == true
     autoApplyLook = state.autoApplyLook == true
@@ -417,6 +446,141 @@ local function debugLog(message)
     else
         print(line)
     end
+end
+
+local function clientPersistPath()
+    if clientPersistPathCache ~= nil then return clientPersistPathCache end
+
+    local source = nil
+    pcall(function()
+        if debug ~= nil and debug.getinfo ~= nil then
+            local info = debug.getinfo(1, "S")
+            source = info ~= nil and info.source or nil
+        end
+    end)
+
+    if source ~= nil then
+        source = tostring(source):gsub("^@", ""):gsub("\\", "/")
+        local root = source:match("^(.*)/Lua/WardrobeSwitcher%.lua$")
+        if root ~= nil and root ~= "" then
+            clientPersistPathCache = root .. "/PersistentClientLook.txt"
+            return clientPersistPathCache
+        end
+    end
+
+    clientPersistPathCache = "PersistentClientLook.txt"
+    return clientPersistPathCache
+end
+
+local function escapePersistentValue(value)
+    return tostring(value or "")
+        :gsub("%%", "%%25")
+        :gsub("|", "%%7C")
+        :gsub(",", "%%2C")
+        :gsub("=", "%%3D")
+        :gsub("\r", "%%0D")
+        :gsub("\n", "%%0A")
+end
+
+local function unescapePersistentValue(value)
+    return tostring(value or "")
+        :gsub("%%0A", "\n")
+        :gsub("%%0D", "\r")
+        :gsub("%%3D", "=")
+        :gsub("%%2C", ",")
+        :gsub("%%7C", "|")
+        :gsub("%%25", "%%")
+end
+
+persistClientLook = function()
+    local path = clientPersistPath()
+    if not lookDataHasSavedLook(savedLook, savedLookCaptured) then
+        clearPersistentClientLook()
+        return false
+    end
+
+    local file = io.open(path, "w")
+    if file == nil then
+        debugLog("Could not write persistent client wardrobe data to " .. tostring(path) .. ".")
+        return false
+    end
+
+    local parts = {
+        "captured=" .. tostring(savedLookCaptured == true),
+        "active=" .. tostring(activeLook == true),
+        "auto=" .. tostring(autoApplyLook == true)
+    }
+    for _, entry in ipairs(slots) do
+        local slotState = savedLook[entry.key]
+        if slotState ~= nil then
+            parts[#parts + 1] =
+                entry.key ..
+                "=" ..
+                escapePersistentValue(slotState.identifier or "") ..
+                "," ..
+                escapePersistentValue(slotState.name or "")
+        end
+    end
+    file:write(table.concat(parts, "|") .. "\n")
+    file:close()
+    return true
+end
+
+clearPersistentClientLook = function()
+    local file = io.open(clientPersistPath(), "w")
+    if file == nil then return false end
+    file:close()
+    return true
+end
+
+local function loadPersistentClientLook()
+    local path = clientPersistPath()
+    local file = io.open(path, "r")
+    if file == nil then return false end
+
+    local line = file:read("*l")
+    file:close()
+    if line == nil or tostring(line) == "" then return false end
+
+    local restoredLook = {}
+    local captured = false
+    local active = false
+    local auto = false
+    for part in tostring(line):gmatch("[^|]+") do
+        local name, value = part:match("^([^=]+)=(.*)$")
+        if name == "captured" then
+            captured = value == "true"
+        elseif name == "active" then
+            active = value == "true"
+        elseif name == "auto" then
+            auto = value == "true"
+        elseif name ~= nil then
+            local identifier, displayName = tostring(value):match("^([^,]*),(.*)$")
+            if identifier ~= nil then
+                restoredLook[name] = {
+                    identifier = unescapePersistentValue(identifier),
+                    itemId = 0,
+                    name = unescapePersistentValue(displayName or ""),
+                    slot = name
+                }
+            end
+        end
+    end
+
+    if not lookDataHasSavedLook(restoredLook, captured) then return false end
+    savedLook = copyLookData(restoredLook)
+    savedLookCaptured = true
+    activeLook = false
+    autoApplyLook = active == true or auto == true
+    lastEquipmentSignature = nil
+    lastServerAutoApplySignature = nil
+    slotResults = {}
+    for _, entry in ipairs(slots) do
+        slotResults[entry.key] = savedLook[entry.key] ~= nil and "Saved look needs to be applied again." or "Empty"
+    end
+    lastOperation = autoApplyLook and "Saved look will be reapplied in the next scene." or "Saved look needs to be applied again."
+    debugLog("Loaded persistent client wardrobe look from " .. tostring(path) .. ".")
+    return true
 end
 
 local function addChatLine(text)
@@ -720,21 +884,12 @@ local function itemStableId(item)
 end
 
 local function hasSavedLook()
-    if savedLookCaptured then return true end
-    for _, entry in ipairs(slots) do
-        if savedLook[entry.key] ~= nil then return true end
-    end
-    return false
+    return lookDataHasSavedLook(savedLook, savedLookCaptured)
 end
 
 local function stateHasSavedLook(state)
     if state == nil then return false end
-    if state.savedLookCaptured == true then return true end
-    local look = state.savedLook or {}
-    for _, entry in ipairs(slots) do
-        if look[entry.key] ~= nil then return true end
-    end
-    return false
+    return lookDataHasSavedLook(state.savedLook, state.savedLookCaptured)
 end
 
 local function preserveSceneTransitionLookIntent()
@@ -755,6 +910,12 @@ local function preserveSceneTransitionLookIntent()
             state.activeLook = false
             state.lastEquipmentSignature = nil
         end
+    end
+
+    if hasSavedLook() then
+        persistClientLook()
+    else
+        clearPersistentClientLook()
     end
 
     return shouldReapplyCurrentLook
@@ -1328,6 +1489,7 @@ local function saveFashionAndUnequip()
         message = message .. " Still equipped: " .. table.concat(failedItems, "; ") .. "."
     end
     saveCharacterState(character)
+    persistClientLook()
     log(message)
 end
 
@@ -1358,6 +1520,7 @@ local function applyFashionToCurrentEquipment(silent)
         autoApplyLook = true
         lastServerAutoApplySignature = equipmentSignature(character)
         saveCharacterState(character)
+        persistClientLook()
         if not silent then log("Requested multiplayer wardrobe apply from the server.") end
         return true
     end
@@ -1369,6 +1532,7 @@ local function applyFashionToCurrentEquipment(silent)
     autoApplyLook = activated == true
     lastEquipmentSignature = equipmentSignature(character)
     saveCharacterState(character)
+    persistClientLook()
 
     if not activated then
         if not silent then
@@ -1400,6 +1564,7 @@ local function clearActiveLook()
     lastServerAutoApplySignature = nil
     lastEquipmentSignature = nil
     saveCharacterState(character)
+    persistClientLook()
     if multiplayerClearRequested then
         log("Look cleared. Multiplayer clear requested from the server.")
     else
@@ -1414,11 +1579,13 @@ local function refreshActiveLookIfNeeded(character)
     if applyFashionToCurrentEquipment(true) then
         lastOperation = "Saved look refreshed for changed equipment."
         saveCharacterState(character)
+        persistClientLook()
     else
         activeLook = false
         lastEquipmentSignature = nil
         lastOperation = "Saved look needs to be applied again."
         saveCharacterState(character)
+        persistClientLook()
     end
 end
 
@@ -1431,12 +1598,14 @@ local function autoApplySavedLookIfNeeded(character)
             lastServerAutoApplySignature = signature
             lastOperation = "Saved look needs to be applied again."
             saveCharacterState(character)
+            persistClientLook()
         end
         return
     end
     if applyFashionToCurrentEquipment(true) then
         lastOperation = "Saved look auto-applied."
         saveCharacterState(character)
+        persistClientLook()
     end
 end
 
@@ -1471,38 +1640,40 @@ local function clearSavedLook()
     slotResults = {}
     lastEquipmentSignature = nil
     saveCharacterState(character)
+    clearPersistentClientLook()
     log("Saved look cleared.")
 end
 
 local function deferRoundStartNetworkLook(character, networkLook)
-    savedLook = networkLook
+    savedLook = copyLookData(networkLook)
     savedLookCaptured = true
     activeLook = false
     autoApplyLook = true
     lastServerAutoApplySignature = nil
     lastCharacter = character
     lastEquipmentSignature = nil
-    pendingRoundStartNetworkLook = networkLook
+    pendingRoundStartNetworkLook = copyLookData(networkLook)
     pendingRoundStartNetworkCharacterKey = characterStateKey(character)
     slotResults = {}
     lastNetworkApplyDiagnostics = { "waiting for initial equipment to finish equipping" }
     for _, entry in ipairs(slots) do
-        slotResults[entry.key] = networkLook[entry.key] ~= nil and "Waiting for initial equipment" or "Empty"
+        slotResults[entry.key] = savedLook[entry.key] ~= nil and "Waiting for initial equipment" or "Empty"
     end
     lastOperation = "Multiplayer wardrobe sync is waiting for initial equipment."
     saveCharacterState(character)
+    persistClientLook()
 end
 
 local function applyPendingRoundStartNetworkLook(character)
     if character == nil or pendingRoundStartNetworkLook == nil then return false end
     if pendingRoundStartNetworkCharacterKey ~= characterStateKey(character) then return false end
 
-    local networkLook = pendingRoundStartNetworkLook
+    local networkLook = copyLookData(pendingRoundStartNetworkLook)
     pendingRoundStartNetworkLook = nil
     pendingRoundStartNetworkCharacterKey = nil
 
     local applied, diagnostics = applyNetworkLook(character, networkLook)
-    savedLook = networkLook
+    savedLook = copyLookData(networkLook)
     savedLookCaptured = true
     activeLook = applied == true
     autoApplyLook = true
@@ -1520,6 +1691,7 @@ local function applyPendingRoundStartNetworkLook(character)
         lastOperation = "Multiplayer wardrobe sync failed after initial equipment; dump debug log."
     end
     saveCharacterState(character)
+    persistClientLook()
     return true
 end
 
@@ -1536,7 +1708,7 @@ if Networking ~= nil then
 
         local applied, diagnostics = applyNetworkLook(character, networkLook)
         if character == controlled() then
-            savedLook = networkLook
+            savedLook = copyLookData(networkLook)
             savedLookCaptured = true
             activeLook = applied == true
             autoApplyLook = true
@@ -1554,6 +1726,7 @@ if Networking ~= nil then
                 lastOperation = "Multiplayer wardrobe sync failed; make sure every client has the fashion items and C# scripting enabled."
             end
             saveCharacterState(character)
+            persistClientLook()
         end
     end)
 
@@ -1565,12 +1738,14 @@ if Networking ~= nil then
         clearVisualOverride(character)
         if character == controlled() then
             activeLook = false
+            autoApplyLook = false
             lastServerAutoApplySignature = nil
             lastEquipmentSignature = nil
             pendingRoundStartNetworkLook = nil
             pendingRoundStartNetworkCharacterKey = nil
             lastOperation = "Look cleared from multiplayer sync."
             saveCharacterState(character)
+            persistClientLook()
         end
     end)
 end
@@ -1811,6 +1986,12 @@ Hook.Add("roundEnd", "barowardrobeswitcher.cleanup", function()
     else
         lastOperation = hasSavedLook() and "Saved look needs to be applied again." or "Round ended. Saved look cleared."
     end
+    if hasSavedLook() then
+        persistClientLook()
+    else
+        clearPersistentClientLook()
+    end
 end)
 
+loadPersistentClientLook()
 log("Loaded. Press F8 to open the wardrobe panel.")
