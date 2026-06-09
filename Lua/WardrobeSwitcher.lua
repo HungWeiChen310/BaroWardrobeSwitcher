@@ -2,6 +2,7 @@ local MOD_NAME = "Baro Wardrobe Switcher"
 local NET_SAVE_REQUEST = "barowardrobeswitcher.save"
 local NET_APPLY_REQUEST = "barowardrobeswitcher.apply"
 local NET_CLEAR_REQUEST = "barowardrobeswitcher.clear"
+local NET_FORGET_REQUEST = "barowardrobeswitcher.forget"
 local NET_LOOK_APPLY = "barowardrobeswitcher.look.apply"
 local NET_LOOK_CLEAR = "barowardrobeswitcher.look.clear"
 
@@ -354,6 +355,9 @@ local initialEquipGateCharacterKey = nil
 local initialEquipGateLastStatusTick = 0
 local pendingRoundStartNetworkLook = nil
 local pendingRoundStartNetworkCharacterKey = nil
+local pendingNetworkAppliesByCharacterId = {}
+local pendingNetworkClearsByCharacterId = {}
+local lastAppliedNetworkLookSignatureByCharacterKey = {}
 local clientPersistPathCache = nil
 local lastSessionKey = nil
 local persistentClientLookLoaded = false
@@ -365,6 +369,7 @@ local InitialEquipStableTicks = 12
 local InitialEquipFallbackTicks = 120
 local ServerApplyRetryTicks = 30
 local ServerApplyMaxAttempts = 10
+local PendingNetworkMessageMaxTicks = 300
 
 local function copyLookData(lookData)
     local copy = {}
@@ -390,6 +395,25 @@ local function lookDataHasSavedLook(lookData, captured)
         if lookData[entry.key] ~= nil then return true end
     end
     return false
+end
+
+local function lookDataSignature(lookData, captured)
+    local parts = { "captured=" .. tostring(captured == true) }
+    lookData = lookData or {}
+    for _, entry in ipairs(slots) do
+        local slotState = lookData[entry.key]
+        if slotState ~= nil then
+            parts[#parts + 1] =
+                entry.key ..
+                "=" ..
+                tostring(slotState.identifier or "") ..
+                "#" ..
+                tostring(tonumber(slotState.itemId) or 0)
+        else
+            parts[#parts + 1] = entry.key .. "=-"
+        end
+    end
+    return table.concat(parts, ";")
 end
 
 local function characterStateKey(character)
@@ -1462,6 +1486,15 @@ local function requestServerClearFashion()
     return ok == true
 end
 
+local function requestServerForgetFashion()
+    if not isMultiplayerClient() or Networking == nil then return false end
+    local ok = pcall(function()
+        local message = Networking.Start(NET_FORGET_REQUEST)
+        Networking.Send(message)
+    end)
+    return ok == true
+end
+
 local function readNetworkLook(message)
     local characterId = message.ReadUInt16()
     local data = {}
@@ -1787,6 +1820,26 @@ local function refreshActiveLookIfNeeded(character)
     if character == nil or not activeLook or not hasSavedLook() then return end
     local signature = equipmentSignature(character)
     if lastEquipmentSignature == signature then return end
+    if isMultiplayerClient() then
+        local requestKey = serverAutoApplyRequestKey(character)
+        local retryDue =
+            pendingServerApplyRequestKey == requestKey and
+            pendingServerApplyAttempts < ServerApplyMaxAttempts and
+            globalTick - pendingServerApplyLastRequestTick >= ServerApplyRetryTicks
+        if lastServerAutoApplySignature == requestKey and not retryDue then return end
+        if requestServerApplyForCharacter(character) then
+            lastOperation = "Saved look needs to be applied again."
+            saveCharacterState(character)
+            persistClientLook()
+        else
+            activeLook = false
+            lastEquipmentSignature = nil
+            lastOperation = "Saved look needs to be applied again."
+            saveCharacterState(character)
+            persistClientLook()
+        end
+        return
+    end
     if applyFashionToCurrentEquipment(true) then
         lastOperation = "Saved look refreshed for changed equipment."
         saveCharacterState(character)
@@ -1872,8 +1925,13 @@ end
 
 local function clearSavedLook()
     local character = controlled()
+    local multiplayerForgetRequested = requestServerForgetFashion()
     if character ~= nil then
         clearVisualOverride(character)
+        local key = characterStateKey(character)
+        if key ~= nil then
+            lastAppliedNetworkLookSignatureByCharacterKey[key] = nil
+        end
     end
     savedLook = {}
     savedLookCaptured = false
@@ -1883,9 +1941,17 @@ local function clearSavedLook()
     clearPendingServerApplyRequest()
     slotResults = {}
     lastEquipmentSignature = nil
+    pendingRoundStartNetworkLook = nil
+    pendingRoundStartNetworkCharacterKey = nil
+    pendingNetworkAppliesByCharacterId = {}
+    pendingNetworkClearsByCharacterId = {}
     saveCharacterState(character)
     clearPersistentClientLook()
-    log("Saved look cleared.")
+    if multiplayerForgetRequested then
+        log("Saved look cleared. Server saved look deletion requested.")
+    else
+        log("Saved look cleared.")
+    end
 end
 
 local function deferRoundStartNetworkLook(character, networkLook)
@@ -1930,6 +1996,11 @@ local function applyPendingRoundStartNetworkLook(character)
         slotResults[entry.key] = networkLook[entry.key] ~= nil and (applied and "Synced from server" or "Sync failed; dump debug log") or "Empty"
     end
     if applied then
+        local key = characterStateKey(character)
+        if key ~= nil then
+            lastAppliedNetworkLookSignatureByCharacterKey[key] =
+                key .. "|" .. lookDataSignature(networkLook, true) .. "|" .. equipmentSignature(character)
+        end
         clearPendingServerApplyRequest()
         lastOperation = "Saved look applied from multiplayer sync after initial equipment."
     else
@@ -1940,60 +2011,154 @@ local function applyPendingRoundStartNetworkLook(character)
     return true
 end
 
-if Networking ~= nil then
-    Networking.Receive(NET_LOOK_APPLY, function(message)
-        local characterId, networkLook = readNetworkLook(message)
-        local character = findEntityById(characterId)
-        if character == nil then return end
+local function networkApplySignature(character, networkLook)
+    local key = characterStateKey(character)
+    if key == nil then return nil end
+    return key .. "|" .. lookDataSignature(networkLook, true) .. "|" .. equipmentSignature(character)
+end
 
-        if character == controlled() and initialEquipGateActive and not initialEquipGateReady(character) then
-            deferRoundStartNetworkLook(character, networkLook)
-            return
-        end
+local function rememberNetworkLookApplied(character, networkLook)
+    local key = characterStateKey(character)
+    local signature = networkApplySignature(character, networkLook)
+    if key == nil or signature == nil then return end
+    lastAppliedNetworkLookSignatureByCharacterKey[key] = signature
+end
 
-        local applied, diagnostics = applyNetworkLook(character, networkLook)
+local function networkLookAlreadyApplied(character, networkLook)
+    local key = characterStateKey(character)
+    local signature = networkApplySignature(character, networkLook)
+    return key ~= nil and signature ~= nil and lastAppliedNetworkLookSignatureByCharacterKey[key] == signature
+end
+
+local function storePendingNetworkApply(characterId, networkLook)
+    pendingNetworkAppliesByCharacterId[characterId] = {
+        look = copyLookData(networkLook),
+        receivedTick = globalTick
+    }
+end
+
+local function storePendingNetworkClear(characterId)
+    pendingNetworkAppliesByCharacterId[characterId] = nil
+    pendingNetworkClearsByCharacterId[characterId] = {
+        receivedTick = globalTick
+    }
+end
+
+local function handleNetworkLookApply(characterId, networkLook)
+    local character = findEntityById(characterId)
+    if character == nil then
+        storePendingNetworkApply(characterId, networkLook)
+        return false
+    end
+
+    pendingNetworkAppliesByCharacterId[characterId] = nil
+
+    if networkLookAlreadyApplied(character, networkLook) then
         if character == controlled() then
             savedLook = copyLookData(networkLook)
             savedLookCaptured = true
-            activeLook = applied == true
+            activeLook = true
             autoApplyLook = true
             lastServerAutoApplySignature = nil
             lastCharacter = character
             lastEquipmentSignature = equipmentSignature(character)
-            slotResults = {}
-            lastNetworkApplyDiagnostics = diagnostics or {}
-            for _, entry in ipairs(slots) do
-                slotResults[entry.key] = networkLook[entry.key] ~= nil and (applied and "Synced from server" or "Sync failed; dump debug log") or "Empty"
-            end
-            if applied then
-                clearPendingServerApplyRequest()
-                lastOperation = "Saved look applied from multiplayer sync."
-            else
-                lastOperation = "Multiplayer wardrobe sync failed; make sure every client has the fashion items and C# scripting enabled."
-            end
+            clearPendingServerApplyRequest()
             saveCharacterState(character)
             persistClientLook()
         end
+        return true
+    end
+
+    if character == controlled() and initialEquipGateActive and not initialEquipGateReady(character) then
+        deferRoundStartNetworkLook(character, networkLook)
+        return true
+    end
+
+    local applied, diagnostics = applyNetworkLook(character, networkLook)
+    if applied then
+        rememberNetworkLookApplied(character, networkLook)
+    end
+    if character == controlled() then
+        savedLook = copyLookData(networkLook)
+        savedLookCaptured = true
+        activeLook = applied == true
+        autoApplyLook = true
+        lastServerAutoApplySignature = nil
+        lastCharacter = character
+        lastEquipmentSignature = equipmentSignature(character)
+        slotResults = {}
+        lastNetworkApplyDiagnostics = diagnostics or {}
+        for _, entry in ipairs(slots) do
+            slotResults[entry.key] = networkLook[entry.key] ~= nil and (applied and "Synced from server" or "Sync failed; dump debug log") or "Empty"
+        end
+        if applied then
+            clearPendingServerApplyRequest()
+            lastOperation = "Saved look applied from multiplayer sync."
+        else
+            lastOperation = "Multiplayer wardrobe sync failed; make sure every client has the fashion items and C# scripting enabled."
+        end
+        saveCharacterState(character)
+        persistClientLook()
+    end
+    return true
+end
+
+local function handleNetworkLookClear(characterId)
+    pendingNetworkAppliesByCharacterId[characterId] = nil
+    local character = findEntityById(characterId)
+    if character == nil then
+        storePendingNetworkClear(characterId)
+        return false
+    end
+
+    pendingNetworkClearsByCharacterId[characterId] = nil
+    clearVisualOverride(character)
+    local key = characterStateKey(character)
+    if key ~= nil then
+        lastAppliedNetworkLookSignatureByCharacterKey[key] = nil
+    end
+    if character == controlled() then
+        activeLook = false
+        autoApplyLook = false
+        lastServerAutoApplySignature = nil
+        clearPendingServerApplyRequest()
+        lastEquipmentSignature = nil
+        pendingRoundStartNetworkLook = nil
+        pendingRoundStartNetworkCharacterKey = nil
+        lastOperation = "Look cleared from multiplayer sync."
+        saveCharacterState(character)
+        persistClientLook()
+    end
+    return true
+end
+
+local function processPendingNetworkMessages()
+    for characterId, pending in pairs(pendingNetworkClearsByCharacterId) do
+        if globalTick - pending.receivedTick > PendingNetworkMessageMaxTicks then
+            pendingNetworkClearsByCharacterId[characterId] = nil
+        elseif findEntityById(characterId) ~= nil then
+            handleNetworkLookClear(characterId)
+        end
+    end
+
+    for characterId, pending in pairs(pendingNetworkAppliesByCharacterId) do
+        if globalTick - pending.receivedTick > PendingNetworkMessageMaxTicks then
+            pendingNetworkAppliesByCharacterId[characterId] = nil
+        elseif findEntityById(characterId) ~= nil then
+            handleNetworkLookApply(characterId, pending.look)
+        end
+    end
+end
+
+if Networking ~= nil then
+    Networking.Receive(NET_LOOK_APPLY, function(message)
+        local characterId, networkLook = readNetworkLook(message)
+        handleNetworkLookApply(characterId, networkLook)
     end)
 
     Networking.Receive(NET_LOOK_CLEAR, function(message)
         local characterId = message.ReadUInt16()
-        local character = findEntityById(characterId)
-        if character == nil then return end
-
-        clearVisualOverride(character)
-        if character == controlled() then
-            activeLook = false
-            autoApplyLook = false
-            lastServerAutoApplySignature = nil
-            clearPendingServerApplyRequest()
-            lastEquipmentSignature = nil
-            pendingRoundStartNetworkLook = nil
-            pendingRoundStartNetworkCharacterKey = nil
-            lastOperation = "Look cleared from multiplayer sync."
-            saveCharacterState(character)
-            persistClientLook()
-        end
+        handleNetworkLookClear(characterId)
     end)
 end
 
@@ -2177,6 +2342,9 @@ local function resetSavedLookForNewSession()
     clearPendingServerApplyRequest()
     pendingRoundStartNetworkLook = nil
     pendingRoundStartNetworkCharacterKey = nil
+    pendingNetworkAppliesByCharacterId = {}
+    pendingNetworkClearsByCharacterId = {}
+    lastAppliedNetworkLookSignatureByCharacterKey = {}
     persistentClientLookLoaded = false
     lastOperation = "Ready."
 end
@@ -2202,6 +2370,7 @@ Hook.Add("think", "barowardrobeswitcher.panel", function()
     if not persistentClientLookLoaded then
         loadPersistentClientLook()
     end
+    processPendingNetworkMessages()
 
     if f8Hit() then
         toggleWindow()
@@ -2268,6 +2437,9 @@ Hook.Add("roundEnd", "barowardrobeswitcher.cleanup", function()
     resetInitialEquipGate()
     pendingRoundStartNetworkLook = nil
     pendingRoundStartNetworkCharacterKey = nil
+    pendingNetworkAppliesByCharacterId = {}
+    pendingNetworkClearsByCharacterId = {}
+    lastAppliedNetworkLookSignatureByCharacterKey = {}
     fullPanelOpen = false
     resetOverlay()
     slotResults = {}
