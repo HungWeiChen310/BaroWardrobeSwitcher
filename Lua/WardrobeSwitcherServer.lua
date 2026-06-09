@@ -2,6 +2,7 @@ local MOD_NAME = "Baro Wardrobe Switcher"
 local NET_SAVE_REQUEST = "barowardrobeswitcher.save"
 local NET_APPLY_REQUEST = "barowardrobeswitcher.apply"
 local NET_CLEAR_REQUEST = "barowardrobeswitcher.clear"
+local NET_FORGET_REQUEST = "barowardrobeswitcher.forget"
 local NET_LOOK_APPLY = "barowardrobeswitcher.look.apply"
 local NET_LOOK_CLEAR = "barowardrobeswitcher.look.clear"
 
@@ -42,7 +43,15 @@ local activeLooksByCharacterId = {}
 local savedLooksByClientKey = {}
 local activeLooksByClientKey = {}
 local lastSyncedCharacterByClientKey = {}
+local lastSyncedLookSignatureByClientKey = {}
+local lastSyncAttemptTickByClientKey = {}
+local syncAttemptsByClientKey = {}
 local clientCharacter
+local serverTick = 0
+
+local ServerSyncRetryTicks = 30
+local ServerSyncMaxAttempts = 10
+local ServerSyncHeartbeatTicks = 300
 
 local function log(message)
     local line = "[" .. MOD_NAME .. "] " .. tostring(message)
@@ -279,6 +288,24 @@ local function cloneStateForCharacter(state, character)
     return cloned
 end
 
+local function lookStateSignature(state)
+    local parts = { "character=" .. tostring(state ~= nil and state.characterId or 0) }
+    for _, entry in ipairs(slots) do
+        local slotState = state ~= nil and state.slots ~= nil and state.slots[entry.key] or nil
+        if slotState ~= nil then
+            parts[#parts + 1] =
+                entry.key ..
+                "=" ..
+                tostring(slotState.identifier or "") ..
+                "#" ..
+                tostring(tonumber(slotState.itemId) or 0)
+        else
+            parts[#parts + 1] = entry.key .. "=-"
+        end
+    end
+    return table.concat(parts, ";")
+end
+
 local function persistLooks()
     ensurePersistentDirectory()
     local path = persistentPath()
@@ -436,7 +463,31 @@ local function connectedClients()
     return clients
 end
 
-local function syncActiveClientLook(client)
+local function recordSyncAttempt(key, state, resetAttempts)
+    if key == nil or state == nil then return end
+    lastSyncedCharacterByClientKey[key] = state.characterId
+    lastSyncedLookSignatureByClientKey[key] = lookStateSignature(state)
+    lastSyncAttemptTickByClientKey[key] = serverTick
+    if resetAttempts then
+        syncAttemptsByClientKey[key] = 0
+    end
+    syncAttemptsByClientKey[key] = (syncAttemptsByClientKey[key] or 0) + 1
+end
+
+local function clearClientSyncState(key)
+    if key == nil then return end
+    lastSyncedCharacterByClientKey[key] = nil
+    lastSyncedLookSignatureByClientKey[key] = nil
+    lastSyncAttemptTickByClientKey[key] = nil
+    syncAttemptsByClientKey[key] = nil
+end
+
+local function broadcastSyncedLookState(key, state, resetAttempts)
+    broadcastLookState(state)
+    recordSyncAttempt(key, state, resetAttempts)
+end
+
+local function syncActiveClientLook(client, force)
     local character = clientCharacter(client)
     local key = clientKey(client)
     if character == nil or key == nil then return end
@@ -444,25 +495,57 @@ local function syncActiveClientLook(client)
     if state == nil or activeLooksByClientKey[key] ~= true then return end
 
     local characterId = characterEntityId(character)
-    if characterId <= 0 or lastSyncedCharacterByClientKey[key] == characterId then return end
+    if characterId <= 0 then return end
 
     local characterState = cloneStateForCharacter(state, character)
     savedLooksByCharacterId[characterId] = characterState
     activeLooksByCharacterId[characterId] = true
-    lastSyncedCharacterByClientKey[key] = characterId
-    broadcastLookState(characterState)
+
+    local signature = lookStateSignature(characterState)
+    local sameState =
+        lastSyncedCharacterByClientKey[key] == characterId and
+        lastSyncedLookSignatureByClientKey[key] == signature
+    local lastAttemptTick = lastSyncAttemptTickByClientKey[key] or 0
+    local attempts = syncAttemptsByClientKey[key] or 0
+    local retryDue =
+        sameState and
+        attempts < ServerSyncMaxAttempts and
+        serverTick - lastAttemptTick >= ServerSyncRetryTicks
+    local heartbeatDue =
+        sameState and
+        serverTick - lastAttemptTick >= ServerSyncHeartbeatTicks
+
+    if sameState and not force and not retryDue and not heartbeatDue then return end
+
+    broadcastSyncedLookState(key, characterState, force or not sameState or heartbeatDue)
 end
 
-local function syncAllActiveClientLooks()
+local function syncAllActiveClientLooks(force)
     for _, client in ipairs(connectedClients()) do
-        syncActiveClientLook(client)
+        syncActiveClientLook(client, force == true)
     end
 end
 
-local function broadcastClear(characterId)
+local function sendClearState(client, characterId)
+    if client == nil or client.Connection == nil then return end
     local message = Networking.Start(NET_LOOK_CLEAR)
     message.WriteUInt16(characterId or 0)
-    Networking.Send(message, nil)
+    Networking.Send(message, client.Connection)
+end
+
+local function broadcastClear(characterId, excludedClient)
+    if excludedClient == nil then
+        local message = Networking.Start(NET_LOOK_CLEAR)
+        message.WriteUInt16(characterId or 0)
+        Networking.Send(message, nil)
+        return
+    end
+
+    for _, client in ipairs(connectedClients()) do
+        if client ~= excludedClient then
+            sendClearState(client, characterId)
+        end
+    end
 end
 
 clientCharacter = function(client)
@@ -474,6 +557,43 @@ clientCharacter = function(client)
     return nil
 end
 
+local function deactivateClientLook(client, deleteSaved, excludedClient)
+    local character = clientCharacter(client)
+    local characterId = characterEntityId(character)
+    local key = clientKey(client)
+    local clientWasActive = key ~= nil and activeLooksByClientKey[key] == true
+    local previousCharacterId = key ~= nil and lastSyncedCharacterByClientKey[key] or nil
+    local characterIds = {}
+
+    if previousCharacterId ~= nil and tonumber(previousCharacterId) ~= nil and tonumber(previousCharacterId) > 0 then
+        characterIds[tonumber(previousCharacterId)] = true
+    end
+    if characterId > 0 then
+        characterIds[characterId] = true
+    end
+
+    if key ~= nil then
+        activeLooksByClientKey[key] = false
+        clearClientSyncState(key)
+        if deleteSaved then
+            savedLooksByClientKey[key] = nil
+        end
+    end
+
+    for id in pairs(characterIds) do
+        local wasActive = activeLooksByCharacterId[id] == true
+        activeLooksByCharacterId[id] = false
+        if deleteSaved then
+            savedLooksByCharacterId[id] = nil
+        end
+        if wasActive or clientWasActive or deleteSaved then
+            broadcastClear(id, excludedClient)
+        end
+    end
+
+    return characterId, key
+end
+
 Networking.Receive(NET_SAVE_REQUEST, function(_, client)
     local character = clientCharacter(client)
     if character == nil then return end
@@ -481,6 +601,8 @@ Networking.Receive(NET_SAVE_REQUEST, function(_, client)
     local state = buildLookState(character)
     if state.characterId <= 0 then return end
     local key = clientKey(client)
+
+    deactivateClientLook(client, false, client)
 
     savedLooksByCharacterId[state.characterId] = state
     activeLooksByCharacterId[state.characterId] = false
@@ -523,23 +645,18 @@ Networking.Receive(NET_APPLY_REQUEST, function(_, client)
     if key ~= nil then
         savedLooksByClientKey[key] = state
         activeLooksByClientKey[key] = true
-        lastSyncedCharacterByClientKey[key] = characterId
     end
-    broadcastLookState(characterState)
+    broadcastSyncedLookState(key, characterState, true)
     persistLooks()
 end)
 
 Networking.Receive(NET_CLEAR_REQUEST, function(_, client)
-    local character = clientCharacter(client)
-    if character == nil then return end
+    deactivateClientLook(client, false, nil)
+    persistLooks()
+end)
 
-    local characterId = characterEntityId(character)
-    local key = clientKey(client)
-    activeLooksByCharacterId[characterId] = false
-    if key ~= nil then
-        activeLooksByClientKey[key] = false
-    end
-    broadcastClear(characterId)
+Networking.Receive(NET_FORGET_REQUEST, function(_, client)
+    deactivateClientLook(client, true, nil)
     persistLooks()
 end)
 
@@ -547,8 +664,8 @@ Hook.Add("client.connected", "barowardrobeswitcher.sync-connected", function(con
     local connectedCharacter = clientCharacter(connectedClient)
     local syncedCharacterId = connectedCharacter ~= nil and characterEntityId(connectedCharacter) or nil
 
-    syncActiveClientLook(connectedClient)
-    syncAllActiveClientLooks()
+    syncActiveClientLook(connectedClient, true)
+    syncAllActiveClientLooks(true)
 
     for characterId, state in pairs(savedLooksByCharacterId) do
         if activeLooksByCharacterId[characterId] == true and characterId ~= syncedCharacterId then
@@ -558,17 +675,21 @@ Hook.Add("client.connected", "barowardrobeswitcher.sync-connected", function(con
 end)
 
 Hook.Add("roundStart", "barowardrobeswitcher.sync-round-start", function()
-    syncAllActiveClientLooks()
+    syncAllActiveClientLooks(true)
 end)
 
 Hook.Add("roundEnd", "barowardrobeswitcher.server-cleanup", function()
     savedLooksByCharacterId = {}
     activeLooksByCharacterId = {}
     lastSyncedCharacterByClientKey = {}
+    lastSyncedLookSignatureByClientKey = {}
+    lastSyncAttemptTickByClientKey = {}
+    syncAttemptsByClientKey = {}
 end)
 
 Hook.Add("think", "barowardrobeswitcher.persistent-sync", function()
-    syncAllActiveClientLooks()
+    serverTick = serverTick + 1
+    syncAllActiveClientLooks(false)
 end)
 
 loadPersistentLooks()
