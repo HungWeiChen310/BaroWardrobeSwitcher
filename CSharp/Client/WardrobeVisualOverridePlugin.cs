@@ -437,7 +437,7 @@ namespace BaroWardrobeSwitcher
     public static class VisualOverride
     {
 
-        public const string Version = "0.3.17";
+        public const string Version = "0.3.18";
 
         private static readonly Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>> FashionSpritesByCharacter =
             new Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>>();
@@ -501,6 +501,8 @@ namespace BaroWardrobeSwitcher
         private static readonly MethodInfo MemberwiseCloneMethod = AccessTools.Method(typeof(object), "MemberwiseClone");
         private static readonly PropertyInfo CharacterRemovedProperty = AccessTools.Property(typeof(Character), "Removed");
         private const float DrawDepthStep = 0.000001f;
+        private const int DefaultFallbackDepthPadding = 8;
+        private const int RecessedFallbackDepthStart = -32;
         private const float FashionAnimationPriorityBoost = 10000.0f;
         private static int drawOverrideLogCount;
         private static int virtualDrawErrorLogCount;
@@ -747,7 +749,8 @@ namespace BaroWardrobeSwitcher
                    ", fallbackDrawn=" + fallbackDrawnFashionSpriteCount +
                    ", savedSlots=" + DescribeSavedSlots(character) +
                    ", emptySlots=" + DescribeEmptySlots(character) +
-                   ", spriteSlots=" + DescribeFashionSprites(character);
+                   ", spriteSlots=" + DescribeFashionSprites(character) +
+                   ", spriteLayers=" + DescribeFashionSpriteLayers(character);
         }
 
         public static void ClearAll()
@@ -1272,7 +1275,8 @@ namespace BaroWardrobeSwitcher
                     drawnSprites = new HashSet<WearableSprite>();
                 }
 
-                int depthIndex = Math.Max((limb.WearingItems?.Count ?? 0) + 8, 8);
+                int defaultDepthIndex = Math.Max((limb.WearingItems?.Count ?? 0) + DefaultFallbackDepthPadding, DefaultFallbackDepthPadding);
+                int recessedDepthIndex = RecessedFallbackDepthStart;
                 foreach (KeyValuePair<Tuple<WearableType, LimbType>, WearableSprite> pair in EnumerateFashionSpritesForLimb(spritesBySlot, limb.type))
                 {
                     if (drawnSprites.Contains(pair.Value)) { continue; }
@@ -1280,7 +1284,8 @@ namespace BaroWardrobeSwitcher
 
                     drawnSprites.Add(pair.Value);
                     fallbackDrawnFashionSpriteCount++;
-                    DrawFashionWearable(limb, pair.Value, depthIndex++, spriteBatch, overrideColor);
+                    int depthIndex = UsesRecessedFashionLayer(pair.Value) ? recessedDepthIndex++ : defaultDepthIndex++;
+                    DrawFashionWearable(limb, pair.Value, depthIndex, spriteBatch, overrideColor);
                 }
             }
             catch (Exception ex)
@@ -1904,30 +1909,70 @@ namespace BaroWardrobeSwitcher
                 .SelectMany(pair => pair.Value
                     .Where(sprite => SpriteBelongsToLimb(sprite, pair.Key.Item2, limbType))
                     .Select(sprite => new KeyValuePair<Tuple<WearableType, LimbType>, WearableSprite>(pair.Key, sprite)))
-                .OrderByDescending(pair => pair.Value.Sprite?.Depth ?? 0.0f);
+                .OrderBy(pair => GetFashionLayerSortKey(pair.Value))
+                .ThenByDescending(pair => pair.Value.Sprite?.Depth ?? 0.0f);
         }
 
         private static void SortWearablesForDraw(List<WearableSprite> wearingItems)
         {
             if (wearingItems == null) { return; }
-            wearingItems.Sort((wearable, nextWearable) =>
-            {
-                float depth = wearable?.Sprite?.Depth ?? 0;
-                float nextDepth = nextWearable?.Sprite?.Depth ?? 0;
-                return nextDepth.CompareTo(depth);
-            });
-            wearingItems.Sort((wearable, nextWearable) =>
-            {
-                Wearable wearableComponent = wearable?.WearableComponent;
-                Wearable nextWearableComponent = nextWearable?.WearableComponent;
-                if (wearableComponent == null && nextWearableComponent == null) { return 0; }
-                if (wearableComponent == null) { return -1; }
-                if (nextWearableComponent == null) { return 1; }
-                if (wearableComponent.AllowedSlots == null && nextWearableComponent.AllowedSlots == null) { return 0; }
-                if (wearableComponent.AllowedSlots == null) { return -1; }
-                if (nextWearableComponent.AllowedSlots == null) { return 1; }
-                return wearableComponent.AllowedSlots.Contains(InvSlotType.OuterClothes).CompareTo(nextWearableComponent.AllowedSlots.Contains(InvSlotType.OuterClothes));
-            });
+            List<WearableSprite> sortedWearables = wearingItems
+                .Select((wearable, index) => new { Wearable = wearable, Index = index })
+                .OrderBy(entry => GetFashionLayerSortKey(entry.Wearable))
+                .ThenByDescending(entry => entry.Wearable?.Sprite?.Depth ?? 0.0f)
+                .ThenBy(entry => entry.Index)
+                .Select(entry => entry.Wearable)
+                .ToList();
+
+            wearingItems.Clear();
+            wearingItems.AddRange(sortedWearables);
+        }
+
+        private static int GetFashionLayerSortKey(WearableSprite sprite)
+        {
+            if (sprite == null) { return 0; }
+            if (sprite.WearableComponent?.AllowedSlots == null) { return 1; }
+            if (SlotContains(sprite, InvSlotType.Bag)) { return 2; }
+            if (SlotContains(sprite, InvSlotType.HealthInterface)) { return 3; }
+            if (SlotContains(sprite, InvSlotType.InnerClothes)) { return 4; }
+            if (IsHeadSlotSprite(sprite)) { return 5; }
+            if (SlotContains(sprite, InvSlotType.OuterClothes)) { return 6; }
+            return 5;
+        }
+
+        private static bool UsesRecessedFashionLayer(WearableSprite sprite)
+        {
+            return SlotContains(sprite, InvSlotType.Bag) ||
+                   SlotContains(sprite, InvSlotType.HealthInterface);
+        }
+
+        private static string GetFashionLayerName(WearableSprite sprite)
+        {
+            if (sprite == null) { return "nil"; }
+            if (SlotContains(sprite, InvSlotType.Bag)) { return "bag-recessed"; }
+            if (SlotContains(sprite, InvSlotType.HealthInterface)) { return "health-recessed"; }
+            if (SlotContains(sprite, InvSlotType.InnerClothes)) { return "inner"; }
+            if (IsHeadSlotSprite(sprite)) { return "head"; }
+            if (SlotContains(sprite, InvSlotType.OuterClothes)) { return "outer"; }
+            return "default";
+        }
+
+        private static bool IsHeadSlotSprite(WearableSprite sprite)
+        {
+            return SlotContains(sprite, InvSlotType.Head) ||
+                   SlotContains(sprite, InvSlotType.Headset);
+        }
+
+        private static bool IsHeadVisualSprite(WearableSprite sprite)
+        {
+            return IsHeadSlotSprite(sprite) ||
+                   sprite?.Limb == LimbType.Head;
+        }
+
+        private static bool SlotContains(WearableSprite sprite, InvSlotType slot)
+        {
+            return sprite?.WearableComponent?.AllowedSlots != null &&
+                   sprite.WearableComponent.AllowedSlots.Contains(slot);
         }
 
         private static bool ShouldFallbackDrawMissingFashionSprite(WearableSprite sprite, LimbType limbType)
@@ -2154,6 +2199,10 @@ namespace BaroWardrobeSwitcher
                 SaveOriginalMask(character, clone);
             }
             ClearWearableAttachmentMask(clone);
+            if (IsHeadVisualSprite(clone))
+            {
+                ClearHeadWearableMask(clone);
+            }
             return clone;
         }
 
@@ -2196,6 +2245,12 @@ namespace BaroWardrobeSwitcher
             sprite.HideWearablesOfType = new List<WearableType>();
             sprite.ObscureOtherWearables = WearableSprite.ObscuringMode.None;
             sprite.CanBeHiddenByOtherWearables = false;
+        }
+
+        private static void ClearHeadWearableMask(WearableSprite sprite)
+        {
+            if (sprite == null) { return; }
+            sprite.HideLimb = false;
         }
 
         private static void RestoreAllSpriteMasks()
@@ -2326,6 +2381,23 @@ namespace BaroWardrobeSwitcher
                     .OrderBy(pair => pair.Key.Item2.ToString())
                     .ThenBy(pair => pair.Key.Item1.ToString())
                     .Select(pair => pair.Key.Item2 + "/" + pair.Key.Item1 + "=" + (pair.Value?.Count ?? 0)));
+        }
+
+        private static string DescribeFashionSpriteLayers(Character character)
+        {
+            if (character == null) { return "character=nil"; }
+            if (!FashionSpritesByCharacter.TryGetValue(character, out Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot) ||
+                spritesBySlot.Count == 0)
+            {
+                return "none";
+            }
+            return string.Join(";",
+                spritesBySlot.Values
+                    .Where(spriteList => spriteList != null)
+                    .SelectMany(spriteList => spriteList.Where(sprite => sprite != null).Select(GetFashionLayerName))
+                    .GroupBy(layer => layer)
+                    .OrderBy(group => group.Key)
+                    .Select(group => group.Key + "=" + group.Count()));
         }
 
         private sealed class FashionSoundEffect
