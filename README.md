@@ -30,18 +30,20 @@ LuaCsForBarotrauma client-side wardrobe switcher for real equipment plus stored 
 - The C# plugin is loaded by LuaCs from `CSharp/Client/WardrobeVisualOverridePlugin.cs`.
 - At the start of each round, the mod posts an English in-game notice that the wardrobe control panel opens with `F8`.
 - A successful C# load prints:
-  - `[Baro Wardrobe Switcher] C# visual override v0.3.15 initializing.`
+  - `[Baro Wardrobe Switcher] C# visual override v0.3.18 initializing.`
   - `[Baro Wardrobe Switcher] C# visual override loaded: ready.`
 - If the panel says `C#: unavailable` or `C#: missing required hooks`, enable C# scripting in LuaCs, accept this mod's C# prompt, and reload before saving or applying a look.
 - Client saved looks are stored outside the mod folder under the user's Barotrauma local app data, then migrated from the old `PersistentClientLook.txt` file when present.
 - This version is intentionally conservative: it avoids a permanent extra UI column.
 - The visual override is draw-only. It explicitly patches `Limb.DrawWearable` and `Limb.Draw` when those targets are available, and does not mutate `Wearable.wearableSprites`, because changing those arrays can break unequip/swap logic.
 - Real combat equipment masking flags are cleared while the look is active, and captured fashion sprites no longer hide hair/face attachments. Hats that normally suppress hair will not leave the character bald when used as a saved look.
+- Saved bag and health-interface/exosuit sprites are drawn on a recessed wardrobe layer so they do not float over arm movement or hair after the look is applied.
 - Only `WearableType.Item` sprites are replaced. Character hair, beard, moustache, and face attachments are left to the original character renderer.
 - Masking flags on the real equipped item sprites are temporarily cleared for the active character while the override is active, then restored on clear/reload. This keeps gloves, shoes, sleeves, and similar partial gear from hiding the original body parts underneath the visual override.
 - Fashion item `<TriggerAnimation>` effects from `OnWearing` status effects are replayed after the real outfit updates while the look is active, so decorative movement takes priority over the real combat outfit.
 - Fashion item sounds replace matching real-equipment sounds while the look is active. The C# hook covers both `OnWearing <Sound>` status effects and item component `<sound type="...">` playback, can replace across those two sound sources when mods define the fashion and real gear differently, and keeps looping saved-fashion sounds alive even when the real equipment has no matching sound.
 - Multiplayer uses a small server-side Lua sync helper. The server persists saved wardrobe item identifiers by client key, performs the server-authoritative removal, and broadcasts apply/clear events so other clients with LuaCs and C# scripting enabled can see the active look.
+- Server persistence only uses stable SteamID or account identifiers. Clients without a stable nonzero identifier can still sync the current character during the current round, but their server-side wardrobe state is not persisted or restored across reconnect/session boundaries.
 - In multiplayer, `Clear Look` only deactivates the current visual look while keeping the saved look. `Forget Saved Look` also asks the server to delete the saved look for that client, so it will not be restored by later round-start or reconnect sync.
 - Saving a new outfit while an old multiplayer look is active clears the old server-side active look before storing the new saved identifiers, preventing other clients from keeping stale visuals.
 - Server sync retries active looks during scene startup and sends a low-frequency heartbeat, while clients keep early apply/clear messages briefly if the target character entity has not spawned yet.

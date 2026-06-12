@@ -358,6 +358,7 @@ local pendingRoundStartNetworkCharacterKey = nil
 local pendingNetworkAppliesByCharacterId = {}
 local pendingNetworkClearsByCharacterId = {}
 local lastAppliedNetworkLookSignatureByCharacterKey = {}
+local suppressedNetworkAppliesByCharacterKey = {}
 local clientPersistPathCache = nil
 local lastSessionKey = nil
 local persistentClientLookLoaded = false
@@ -370,6 +371,7 @@ local InitialEquipFallbackTicks = 120
 local ServerApplyRetryTicks = 30
 local ServerApplyMaxAttempts = 10
 local PendingNetworkMessageMaxTicks = 300
+local NetworkApplySuppressTicks = PendingNetworkMessageMaxTicks
 
 local function copyLookData(lookData)
     local copy = {}
@@ -437,8 +439,6 @@ local function saveCharacterState(character)
     local key = characterStateKey(character)
     if key == nil then return end
     characterStates[key] = {
-        savedLook = copyLookData(savedLook),
-        savedLookCaptured = savedLookCaptured,
         activeLook = activeLook,
         autoApplyLook = autoApplyLook,
         lastEquipmentSignature = lastEquipmentSignature,
@@ -450,7 +450,7 @@ end
 local function loadCharacterState(character)
     local key = characterStateKey(character)
     local state = key ~= nil and characterStates[key] or nil
-    if state == nil or not lookDataHasSavedLook(state.savedLook, state.savedLookCaptured) then
+    if state == nil then
         activeLook = false
         lastEquipmentSignature = nil
         lastNetworkApplyDiagnostics = {}
@@ -463,8 +463,14 @@ local function loadCharacterState(character)
         slotResults = {}
         return false
     end
-    savedLook = copyLookData(state.savedLook)
-    savedLookCaptured = state.savedLookCaptured == true
+    if not lookDataHasSavedLook(savedLook, savedLookCaptured) then
+        activeLook = false
+        autoApplyLook = false
+        lastEquipmentSignature = nil
+        slotResults = {}
+        lastNetworkApplyDiagnostics = {}
+        return false
+    end
     activeLook = state.activeLook == true
     autoApplyLook = state.autoApplyLook == true
     lastEquipmentSignature = state.lastEquipmentSignature
@@ -987,6 +993,15 @@ local function itemEntityId(item)
     return 0
 end
 
+local function characterEntityId(character)
+    if character == nil then return 0 end
+    local ok, id = pcall(function()
+        return character.ID
+    end)
+    if ok and id ~= nil then return id end
+    return 0
+end
+
 local function findEntityById(id)
     if Entity == nil or id == nil or id <= 0 then return nil end
     local ok, entity = pcall(function()
@@ -1082,7 +1097,93 @@ end
 
 local function stateHasSavedLook(state)
     if state == nil then return false end
-    return lookDataHasSavedLook(state.savedLook, state.savedLookCaptured)
+    return hasSavedLook()
+end
+
+local function deactivateCachedCharacterStates()
+    for _, state in pairs(characterStates) do
+        state.activeLook = false
+        state.autoApplyLook = false
+        state.lastEquipmentSignature = nil
+    end
+end
+
+local function clearPendingNetworkApplyForCharacterId(characterId)
+    local id = tonumber(characterId) or 0
+    if id <= 0 then return end
+    pendingNetworkAppliesByCharacterId[id] = nil
+end
+
+local function clearLocalPendingNetworkState(character)
+    local key = characterStateKey(character)
+    if key ~= nil then
+        lastAppliedNetworkLookSignatureByCharacterKey[key] = nil
+        if pendingRoundStartNetworkCharacterKey == key then
+            pendingRoundStartNetworkLook = nil
+            pendingRoundStartNetworkCharacterKey = nil
+        end
+        clearPendingNetworkApplyForCharacterId(key)
+    end
+    clearPendingNetworkApplyForCharacterId(characterEntityId(character))
+end
+
+local function clearCachedLocalNetworkState()
+    for key in pairs(characterStates) do
+        lastAppliedNetworkLookSignatureByCharacterKey[key] = nil
+        clearPendingNetworkApplyForCharacterId(key)
+    end
+end
+
+local function suppressNetworkApplyForKey(key)
+    if key == nil then return end
+    suppressedNetworkAppliesByCharacterKey[tostring(key)] = globalTick + NetworkApplySuppressTicks
+end
+
+local function clearNetworkApplySuppressionForKey(key)
+    if key == nil then return end
+    suppressedNetworkAppliesByCharacterKey[tostring(key)] = nil
+end
+
+local function suppressNetworkAppliesForCharacter(character)
+    if character == nil then return end
+    local key = characterStateKey(character)
+    if key ~= nil then
+        suppressNetworkApplyForKey(key)
+    end
+    local id = characterEntityId(character)
+    if id > 0 then
+        suppressNetworkApplyForKey(id)
+    end
+end
+
+local function clearNetworkApplySuppressionForCharacter(character)
+    if character == nil then return end
+    local key = characterStateKey(character)
+    if key ~= nil then
+        clearNetworkApplySuppressionForKey(key)
+    end
+    local id = characterEntityId(character)
+    if id > 0 then
+        clearNetworkApplySuppressionForKey(id)
+    end
+end
+
+local function pruneNetworkApplySuppressions()
+    for key, suppressUntilTick in pairs(suppressedNetworkAppliesByCharacterKey) do
+        if suppressUntilTick == nil or globalTick > suppressUntilTick then
+            suppressedNetworkAppliesByCharacterKey[key] = nil
+        end
+    end
+end
+
+local function networkApplySuppressedForCharacter(characterId, character)
+    pruneNetworkApplySuppressions()
+    local id = tonumber(characterId) or 0
+    if id > 0 and suppressedNetworkAppliesByCharacterKey[tostring(id)] ~= nil then
+        return true
+    end
+    local key = characterStateKey(character)
+    return key ~= nil and suppressedNetworkAppliesByCharacterKey[tostring(key)] ~= nil
 end
 
 local function preserveSceneTransitionLookIntent()
@@ -1652,6 +1753,8 @@ local function saveFashionAndUnequip()
         return
     end
 
+    clearNetworkApplySuppressionForCharacter(character)
+
     local startingItems = snapshot(character)
     savedLook = visualSnapshot(character)
     savedLookCaptured = true
@@ -1759,6 +1862,10 @@ local function applyFashionToCurrentEquipment(silent)
         return false
     end
 
+    if not silent then
+        clearNetworkApplySuppressionForCharacter(character)
+    end
+
     if isMultiplayerClient() and requestServerApplyForCharacter(character) then
         lastCharacter = character
         autoApplyLook = true
@@ -1802,11 +1909,16 @@ local function clearActiveLook()
     if character ~= nil then
         restoreItemVisuals(character)
     end
+    deactivateCachedCharacterStates()
+    clearLocalPendingNetworkState(character)
+    suppressNetworkAppliesForCharacter(character)
     activeLook = false
     autoApplyLook = false
     lastServerAutoApplySignature = nil
     clearPendingServerApplyRequest()
     lastEquipmentSignature = nil
+    pendingRoundStartNetworkLook = nil
+    pendingRoundStartNetworkCharacterKey = nil
     saveCharacterState(character)
     persistClientLook()
     if multiplayerClearRequested then
@@ -1928,23 +2040,21 @@ local function clearSavedLook()
     local multiplayerForgetRequested = requestServerForgetFashion()
     if character ~= nil then
         clearVisualOverride(character)
-        local key = characterStateKey(character)
-        if key ~= nil then
-            lastAppliedNetworkLookSignatureByCharacterKey[key] = nil
-        end
     end
+    clearLocalPendingNetworkState(character)
+    clearCachedLocalNetworkState()
+    suppressNetworkAppliesForCharacter(character)
     savedLook = {}
     savedLookCaptured = false
     activeLook = false
     autoApplyLook = false
+    characterStates = {}
     lastServerAutoApplySignature = nil
     clearPendingServerApplyRequest()
     slotResults = {}
     lastEquipmentSignature = nil
     pendingRoundStartNetworkLook = nil
     pendingRoundStartNetworkCharacterKey = nil
-    pendingNetworkAppliesByCharacterId = {}
-    pendingNetworkClearsByCharacterId = {}
     saveCharacterState(character)
     clearPersistentClientLook()
     if multiplayerForgetRequested then
@@ -2045,6 +2155,12 @@ local function storePendingNetworkClear(characterId)
 end
 
 local function handleNetworkLookApply(characterId, networkLook)
+    if networkApplySuppressedForCharacter(characterId, nil) then
+        pendingNetworkAppliesByCharacterId[characterId] = nil
+        debugLog("Ignored suppressed multiplayer wardrobe apply for characterId=" .. tostring(characterId) .. ".")
+        return false
+    end
+
     local character = findEntityById(characterId)
     if character == nil then
         storePendingNetworkApply(characterId, networkLook)
@@ -2052,6 +2168,11 @@ local function handleNetworkLookApply(characterId, networkLook)
     end
 
     pendingNetworkAppliesByCharacterId[characterId] = nil
+
+    if networkApplySuppressedForCharacter(characterId, character) then
+        debugLog("Ignored suppressed multiplayer wardrobe apply for characterId=" .. tostring(characterId) .. ".")
+        return false
+    end
 
     if networkLookAlreadyApplied(character, networkLook) then
         if character == controlled() then
@@ -2133,6 +2254,8 @@ local function handleNetworkLookClear(characterId)
 end
 
 local function processPendingNetworkMessages()
+    pruneNetworkApplySuppressions()
+
     for characterId, pending in pairs(pendingNetworkClearsByCharacterId) do
         if globalTick - pending.receivedTick > PendingNetworkMessageMaxTicks then
             pendingNetworkClearsByCharacterId[characterId] = nil
@@ -2345,6 +2468,7 @@ local function resetSavedLookForNewSession()
     pendingNetworkAppliesByCharacterId = {}
     pendingNetworkClearsByCharacterId = {}
     lastAppliedNetworkLookSignatureByCharacterKey = {}
+    suppressedNetworkAppliesByCharacterKey = {}
     persistentClientLookLoaded = false
     lastOperation = "Ready."
 end
@@ -2440,6 +2564,7 @@ Hook.Add("roundEnd", "barowardrobeswitcher.cleanup", function()
     pendingNetworkAppliesByCharacterId = {}
     pendingNetworkClearsByCharacterId = {}
     lastAppliedNetworkLookSignatureByCharacterKey = {}
+    suppressedNetworkAppliesByCharacterKey = {}
     fullPanelOpen = false
     resetOverlay()
     slotResults = {}

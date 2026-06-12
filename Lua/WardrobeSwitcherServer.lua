@@ -42,12 +42,18 @@ local savedLooksByCharacterId = {}
 local activeLooksByCharacterId = {}
 local savedLooksByClientKey = {}
 local activeLooksByClientKey = {}
+local savedLookSessionByClientKey = {}
+local legacySavedLookByClientKey = {}
+local activeCharacterIdByClientKey = {}
+local ownerKeyByCharacterId = {}
 local lastSyncedCharacterByClientKey = {}
 local lastSyncedLookSignatureByClientKey = {}
 local lastSyncAttemptTickByClientKey = {}
 local syncAttemptsByClientKey = {}
 local clientCharacter
+local broadcastClear
 local serverTick = 0
+local lastServerSessionKey = nil
 
 local ServerSyncRetryTicks = 30
 local ServerSyncMaxAttempts = 10
@@ -104,6 +110,91 @@ local function ensurePersistentDirectory()
     return ok == true
 end
 
+local function userDataMember(object, name)
+    if object == nil or name == nil then return nil end
+    local ok, value = pcall(function()
+        return object[name]
+    end)
+    if ok then return value end
+    return nil
+end
+
+local function trimIdentityValue(value)
+    if value == nil then return nil end
+    local text = tostring(value):match("^%s*(.-)%s*$")
+    local lowered = text ~= nil and text:lower() or nil
+    if text == nil or text == "" or lowered == "nil" or lowered == "null" then return nil end
+    return text
+end
+
+local function stableIdentityValue(value)
+    local text = trimIdentityValue(value)
+    if text == nil then return nil end
+    if text:match("^0+$") then return nil end
+    return text
+end
+
+local function prefixedClientKey(prefix, value)
+    local text = stableIdentityValue(value)
+    if text == nil then return nil end
+    return prefix .. ":" .. text
+end
+
+local function normalizePersistentClientKey(rawKey)
+    local text = stableIdentityValue(rawKey)
+    if text == nil then return nil, true end
+
+    local prefix, value = text:match("^([%a_][%w_%-]*):(.*)$")
+    if prefix ~= nil then
+        prefix = prefix:lower()
+        value = stableIdentityValue(value)
+        if value == nil then return nil, true end
+        if prefix == "steam" or prefix == "account" then
+            return prefix .. ":" .. value, false
+        end
+        return nil, true
+    end
+
+    if text:match("^%d+$") then
+        return "steam:" .. text, true
+    end
+
+    return nil, true
+end
+
+local function normalizedSessionValue(value)
+    local text = trimIdentityValue(value)
+    if text == nil then return nil end
+    return text:gsub("\\", "/")
+end
+
+local function firstSessionValue(object, names)
+    for _, name in ipairs(names) do
+        local value = normalizedSessionValue(userDataMember(object, name))
+        if value ~= nil then return value end
+    end
+    return nil
+end
+
+local function currentServerSessionKey()
+    if GameMain == nil then return nil end
+    local session = userDataMember(GameMain, "GameSession")
+    if session == nil then return nil end
+
+    local direct = firstSessionValue(session, { "SavePath", "SaveFilePath", "SaveFile", "FilePath" })
+    if direct ~= nil then return "session:" .. direct end
+
+    local gameMode = userDataMember(session, "GameMode")
+    local fromGameMode = firstSessionValue(gameMode, { "SavePath", "SaveFilePath", "SaveFile", "FilePath" })
+    if fromGameMode ~= nil then return "gamemode:" .. fromGameMode end
+
+    local campaign = userDataMember(session, "Campaign") or userDataMember(gameMode, "Campaign")
+    local fromCampaign = firstSessionValue(campaign, { "SavePath", "SaveFilePath", "SaveFile", "FilePath", "CampaignID", "Identifier" })
+    if fromCampaign ~= nil then return "campaign:" .. fromCampaign end
+
+    return nil
+end
+
 local function itemName(item)
     if item == nil then return "" end
     local prefab = item.Prefab
@@ -144,16 +235,16 @@ end
 local function clientKey(client)
     if client == nil then return nil end
     local candidates = {
-        function() return client.SteamID end,
-        function() return client.AccountId end,
-        function() return client.AccountID end,
-        function() return client.AccountInfo ~= nil and client.AccountInfo.AccountId or nil end,
-        function() return client.Name end
+        { prefix = "steam", getter = function() return client.SteamID end },
+        { prefix = "account", getter = function() return client.AccountId end },
+        { prefix = "account", getter = function() return client.AccountID end },
+        { prefix = "account", getter = function() return client.AccountInfo ~= nil and client.AccountInfo.AccountId or nil end }
     }
-    for _, getter in ipairs(candidates) do
-        local ok, value = pcall(getter)
-        if ok and value ~= nil and tostring(value) ~= "" then
-            return tostring(value)
+    for _, candidate in ipairs(candidates) do
+        local ok, value = pcall(candidate.getter)
+        if ok then
+            local key = prefixedClientKey(candidate.prefix, value)
+            if key ~= nil then return key end
         end
     end
     return nil
@@ -306,6 +397,15 @@ local function lookStateSignature(state)
     return table.concat(parts, ";")
 end
 
+local function savedLookBelongsToCurrentSession(key)
+    if key == nil then return false end
+    if legacySavedLookByClientKey[key] == true then return false end
+    local savedSessionKey = savedLookSessionByClientKey[key]
+    if savedSessionKey == nil then return true end
+    local sessionKey = currentServerSessionKey()
+    return sessionKey ~= nil and savedSessionKey == sessionKey
+end
+
 local function persistLooks()
     ensurePersistentDirectory()
     local path = persistentPath()
@@ -315,7 +415,13 @@ local function persistLooks()
         return
     end
     for key, state in pairs(savedLooksByClientKey) do
-        local parts = { "key=" .. escape(key), "active=" .. tostring(activeLooksByClientKey[key] == true) }
+        local isLegacy = legacySavedLookByClientKey[key] == true
+        local sessionKey = isLegacy and nil or (savedLookSessionByClientKey[key] or currentServerSessionKey())
+        local active = not isLegacy and activeLooksByClientKey[key] == true and savedLookBelongsToCurrentSession(key)
+        local parts = { "key=" .. escape(key), "active=" .. tostring(active) }
+        if sessionKey ~= nil then
+            parts[#parts + 1] = "session=" .. escape(sessionKey)
+        end
         for _, entry in ipairs(slots) do
             local slotState = state.slots[entry.key]
             if slotState ~= nil then
@@ -332,6 +438,7 @@ local function loadPersistentLooksFromPath(path)
     if file == nil then return false end
     for line in file:lines() do
         local key = nil
+        local sessionKey = nil
         local state = { characterId = 0, slots = {} }
         local active = false
         for part in tostring(line):gmatch("[^|]+") do
@@ -340,6 +447,8 @@ local function loadPersistentLooksFromPath(path)
                 key = unescape(value)
             elseif name == "active" then
                 active = value == "true"
+            elseif name == "session" then
+                sessionKey = normalizedSessionValue(unescape(value))
             elseif name ~= nil then
                 local identifier, displayName = tostring(value):match("^([^,]*),(.*)$")
                 if identifier ~= nil then
@@ -351,9 +460,16 @@ local function loadPersistentLooksFromPath(path)
                 end
             end
         end
-        if key ~= nil and key ~= "" then
-            savedLooksByClientKey[key] = state
-            activeLooksByClientKey[key] = active
+        local normalizedKey, legacyKey = normalizePersistentClientKey(key)
+        if normalizedKey ~= nil then
+            savedLooksByClientKey[normalizedKey] = state
+            savedLookSessionByClientKey[normalizedKey] = sessionKey
+            legacySavedLookByClientKey[normalizedKey] = legacyKey == true or sessionKey == nil
+            activeLooksByClientKey[normalizedKey] =
+                active == true and
+                legacyKey ~= true and
+                sessionKey ~= nil and
+                sessionKey == currentServerSessionKey()
         end
     end
     file:close()
@@ -482,6 +598,58 @@ local function clearClientSyncState(key)
     syncAttemptsByClientKey[key] = nil
 end
 
+local function normalizedCharacterId(characterId)
+    local id = tonumber(characterId) or 0
+    if id <= 0 then return nil end
+    return id
+end
+
+local function clearActiveCharacterId(characterId, shouldBroadcast, excludedClient)
+    local id = normalizedCharacterId(characterId)
+    if id == nil then return end
+
+    local wasActive = activeLooksByCharacterId[id] == true
+    local ownerKey = ownerKeyByCharacterId[id]
+
+    activeLooksByCharacterId[id] = false
+    savedLooksByCharacterId[id] = nil
+    ownerKeyByCharacterId[id] = nil
+
+    if ownerKey ~= nil and activeCharacterIdByClientKey[ownerKey] == id then
+        activeCharacterIdByClientKey[ownerKey] = nil
+    end
+
+    if shouldBroadcast and (wasActive or ownerKey ~= nil) and broadcastClear ~= nil then
+        broadcastClear(id, excludedClient)
+    end
+end
+
+local function markActiveClientCharacter(key, characterId, state, shouldBroadcastClears, excludedClient)
+    local id = normalizedCharacterId(characterId)
+    if id == nil or state == nil then return end
+
+    if key ~= nil then
+        local previousId = activeCharacterIdByClientKey[key] or lastSyncedCharacterByClientKey[key]
+        if previousId ~= nil and tonumber(previousId) ~= id then
+            clearActiveCharacterId(previousId, shouldBroadcastClears, excludedClient)
+        end
+
+        local previousOwnerKey = ownerKeyByCharacterId[id]
+        if previousOwnerKey ~= nil and previousOwnerKey ~= key then
+            activeLooksByClientKey[previousOwnerKey] = false
+            activeCharacterIdByClientKey[previousOwnerKey] = nil
+            clearClientSyncState(previousOwnerKey)
+            clearActiveCharacterId(id, shouldBroadcastClears, excludedClient)
+        end
+
+        activeCharacterIdByClientKey[key] = id
+        ownerKeyByCharacterId[id] = key
+    end
+
+    savedLooksByCharacterId[id] = state
+    activeLooksByCharacterId[id] = true
+end
+
 local function broadcastSyncedLookState(key, state, resetAttempts)
     broadcastLookState(state)
     recordSyncAttempt(key, state, resetAttempts)
@@ -493,13 +661,17 @@ local function syncActiveClientLook(client, force)
     if character == nil or key == nil then return end
     local state = savedLooksByClientKey[key]
     if state == nil or activeLooksByClientKey[key] ~= true then return end
+    if not savedLookBelongsToCurrentSession(key) then
+        activeLooksByClientKey[key] = false
+        clearClientSyncState(key)
+        return
+    end
 
     local characterId = characterEntityId(character)
     if characterId <= 0 then return end
 
     local characterState = cloneStateForCharacter(state, character)
-    savedLooksByCharacterId[characterId] = characterState
-    activeLooksByCharacterId[characterId] = true
+    markActiveClientCharacter(key, characterId, characterState, true, nil)
 
     local signature = lookStateSignature(characterState)
     local sameState =
@@ -526,6 +698,39 @@ local function syncAllActiveClientLooks(force)
     end
 end
 
+local function clearRuntimeActiveLookState()
+    savedLooksByCharacterId = {}
+    activeLooksByCharacterId = {}
+    activeCharacterIdByClientKey = {}
+    ownerKeyByCharacterId = {}
+    lastSyncedCharacterByClientKey = {}
+    lastSyncedLookSignatureByClientKey = {}
+    lastSyncAttemptTickByClientKey = {}
+    syncAttemptsByClientKey = {}
+end
+
+local function deactivatePersistentActiveLooks()
+    for key in pairs(activeLooksByClientKey) do
+        activeLooksByClientKey[key] = false
+    end
+end
+
+local function handleServerSessionChange()
+    local sessionKey = currentServerSessionKey()
+    if sessionKey == nil then return end
+    if lastServerSessionKey == nil then
+        lastServerSessionKey = sessionKey
+        return
+    end
+    if sessionKey == lastServerSessionKey then return end
+
+    lastServerSessionKey = sessionKey
+    clearRuntimeActiveLookState()
+    deactivatePersistentActiveLooks()
+    persistLooks()
+    log("Detected a new game session; deactivated persistent wardrobe looks.")
+end
+
 local function sendClearState(client, characterId)
     if client == nil or client.Connection == nil then return end
     local message = Networking.Start(NET_LOOK_CLEAR)
@@ -533,7 +738,7 @@ local function sendClearState(client, characterId)
     Networking.Send(message, client.Connection)
 end
 
-local function broadcastClear(characterId, excludedClient)
+broadcastClear = function(characterId, excludedClient)
     if excludedClient == nil then
         local message = Networking.Start(NET_LOOK_CLEAR)
         message.WriteUInt16(characterId or 0)
@@ -562,7 +767,7 @@ local function deactivateClientLook(client, deleteSaved, excludedClient)
     local characterId = characterEntityId(character)
     local key = clientKey(client)
     local clientWasActive = key ~= nil and activeLooksByClientKey[key] == true
-    local previousCharacterId = key ~= nil and lastSyncedCharacterByClientKey[key] or nil
+    local previousCharacterId = key ~= nil and (activeCharacterIdByClientKey[key] or lastSyncedCharacterByClientKey[key]) or nil
     local characterIds = {}
 
     if previousCharacterId ~= nil and tonumber(previousCharacterId) ~= nil and tonumber(previousCharacterId) > 0 then
@@ -574,21 +779,17 @@ local function deactivateClientLook(client, deleteSaved, excludedClient)
 
     if key ~= nil then
         activeLooksByClientKey[key] = false
+        activeCharacterIdByClientKey[key] = nil
         clearClientSyncState(key)
         if deleteSaved then
             savedLooksByClientKey[key] = nil
+            savedLookSessionByClientKey[key] = nil
+            legacySavedLookByClientKey[key] = nil
         end
     end
 
     for id in pairs(characterIds) do
-        local wasActive = activeLooksByCharacterId[id] == true
-        activeLooksByCharacterId[id] = false
-        if deleteSaved then
-            savedLooksByCharacterId[id] = nil
-        end
-        if wasActive or clientWasActive or deleteSaved then
-            broadcastClear(id, excludedClient)
-        end
+        clearActiveCharacterId(id, clientWasActive or deleteSaved or activeLooksByCharacterId[id] == true, excludedClient)
     end
 
     return characterId, key
@@ -604,11 +805,14 @@ Networking.Receive(NET_SAVE_REQUEST, function(_, client)
 
     deactivateClientLook(client, false, client)
 
-    savedLooksByCharacterId[state.characterId] = state
-    activeLooksByCharacterId[state.characterId] = false
     if key ~= nil then
         savedLooksByClientKey[key] = cloneStateForCharacter(state, character)
+        savedLookSessionByClientKey[key] = currentServerSessionKey()
+        legacySavedLookByClientKey[key] = false
         activeLooksByClientKey[key] = false
+    else
+        savedLooksByCharacterId[state.characterId] = state
+        activeLooksByCharacterId[state.characterId] = false
     end
 
     local processedItems = {}
@@ -633,17 +837,16 @@ Networking.Receive(NET_APPLY_REQUEST, function(_, client)
 
     local characterId = characterEntityId(character)
     local key = clientKey(client)
-    local state = savedLooksByCharacterId[characterId]
-    if state == nil and key ~= nil then
-        state = savedLooksByClientKey[key]
-    end
+    local state = key ~= nil and savedLooksByClientKey[key] or savedLooksByCharacterId[characterId]
     if state == nil then return end
+    if key ~= nil and not savedLookBelongsToCurrentSession(key) then return end
 
     local characterState = cloneStateForCharacter(state, character)
-    savedLooksByCharacterId[characterId] = characterState
-    activeLooksByCharacterId[characterId] = true
+    markActiveClientCharacter(key, characterId, characterState, true, nil)
     if key ~= nil then
         savedLooksByClientKey[key] = state
+        savedLookSessionByClientKey[key] = currentServerSessionKey()
+        legacySavedLookByClientKey[key] = false
         activeLooksByClientKey[key] = true
     end
     broadcastSyncedLookState(key, characterState, true)
@@ -679,16 +882,12 @@ Hook.Add("roundStart", "barowardrobeswitcher.sync-round-start", function()
 end)
 
 Hook.Add("roundEnd", "barowardrobeswitcher.server-cleanup", function()
-    savedLooksByCharacterId = {}
-    activeLooksByCharacterId = {}
-    lastSyncedCharacterByClientKey = {}
-    lastSyncedLookSignatureByClientKey = {}
-    lastSyncAttemptTickByClientKey = {}
-    syncAttemptsByClientKey = {}
+    clearRuntimeActiveLookState()
 end)
 
 Hook.Add("think", "barowardrobeswitcher.persistent-sync", function()
     serverTick = serverTick + 1
+    handleServerSessionChange()
     syncAllActiveClientLooks(false)
 end)
 
