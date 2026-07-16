@@ -19,11 +19,17 @@ The pure client reducer uses these phases:
 
 Clear operations pass through `ClearPending`; rejected commands, invalid render assets, and unavailable required hooks enter `Faulted`. The reducer returns effects such as capture, persistence, network send, render, and clear. The client adapter performs those effects and feeds success or failure events back to the reducer.
 
+Attachment visibility is a canonical four-key value object (`Hair`, `Beard`, `Moustache`, `FaceAttachment`) with `auto`, `hide`, and `show` states. The reducer updates it atomically. Active changes preview through `ApplyAttachmentVisibility`; persistence, network rejection, timeout, or renderer failure use explicit compensation effects to restore the previous whole policy.
+
 `autoApply` represents activation intent, not merely the existence of a saved look. Save leaves it disabled, a successful render enables it, and clear/forget disable it. Character and scene cleanup may carry `preserveAutoApply` only when the outgoing look was active or already marked for reapplication, allowing the replacement character to render once after the initial-equipment gate without undoing a manual clear.
 
 Server state is grouped per client session. Every accepted v2 command advances a server-owned revision. Commands include their base revision and operation ID, so retries are idempotent and stale apply requests cannot reactivate a look after clear or forget. A stable account keeps the current client-session dedupe cache across reconnects. Each cache retains at most 512 results; once full, unknown operations fail closed with a stable `operation_limit_reached` result until the client starts a new session. Revision exhaustion similarly rejects mutations with `revision_exhausted` instead of reusing `UInt32.MaxValue`.
 
-Connection, round, and LuaCs `character.created` events rebind active sessions to new Character entity IDs. A bounded event-triggered retry handles the short assignment race during respawn; there is no per-frame client/equipment scan.
+In single-player, runtime state is keyed by `Character.Info.ID`, so changing the controlled Character does not replace another crew member's state. The disk key is a stable fingerprint built from `OriginalName`, `SpeciesName`, and `HumanPrefabIds`; runtime entity IDs are never persisted. Fingerprint collisions fail closed for automatic restoration.
+
+At round start the client scans `Character.CharacterList` once, then follows `character.created`, `item.equip`, and `item.unequip` events. Each queued NPC waits for 12 stable equipment ticks, with a 120-tick fallback, before rebuilding its renderer session. The per-frame hook only processes this bounded queue; it does not scan the full crew list.
+
+Multiplayer connection, round, and LuaCs `character.created` events continue to rebind active sessions to new Character entity IDs. A bounded event-triggered retry handles the short assignment race during respawn; there is no per-frame client/equipment scan.
 
 ## Renderer safety boundary
 
@@ -39,11 +45,16 @@ Conditional or required-item `StatusEffect` sounds are classified as gameplay al
 
 Only stable identifiers and user intent are persisted. Runtime entity IDs and localized display names are never authoritative.
 
-- Client: `ClientLook.json`, schema 2.
-- Server: `ServerLooks.json`, schema 2, keyed by stable `Client.AccountId` representation.
+- Client: `ClientLook.json`, persistence schema 3.
+- Single-player: `SinglePlayerProfiles.json`, schema 2. It stores the global transfer toggle, imported campaign hashes, campaign/character-scoped profiles, and complete attachment visibility.
+- Server: `ServerLooks.json`, persistence schema 3, keyed by stable `Client.AccountId` representation.
 - Anonymous clients: memory only for the current server session.
 
-Writes use a same-directory temporary file and replacement/backup. Legacy files are migrated once and retained as `.v1.bak` for the v0.5.0 compatibility window. Corrupt files are quarantined instead of being applied.
+Campaign save paths and stable character fingerprints are SHA-256 hashed before persistence. Character display names are diagnostic only. A campaign-less single-player scene uses memory-only profiles. Legacy `ClientLook.json` data is imported once per campaign into the first controlled non-bot character and never overwrites an existing profile. Import preserves the captured look but deliberately clears auto-apply intent, because a legacy saved look is not consent to override a new campaign's starting equipment.
+
+Wire look schema 2 and persistence schema 3 are separate constants. The wire prefix remains unchanged; its optional marker/version/mask tail is not a persistence version.
+
+Writes use a same-directory temporary file and replacement/backup. Valid client/server v2 files migrate to v3 with `.v2.bak`; valid single-player v1 files migrate to v2 with `.v1.bak`. Corrupt files are quarantined instead of being applied.
 
 ## Packaging
 

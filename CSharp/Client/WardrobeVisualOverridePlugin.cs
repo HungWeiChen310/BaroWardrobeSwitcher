@@ -44,12 +44,15 @@ namespace BaroWardrobeSwitcher
         }
     }
 
-    public static class WardrobePersistence
+    public static partial class WardrobePersistence
     {
-        public const string Version = "0.5.0";
-        private const int PersistenceVersion = 2;
+        public const string Version = "0.5.1";
+        private const int PersistenceVersion = 3;
         private const string ModFolderName = "BaroWardrobeSwitcher";
         private const string ClientLookFileName = "ClientLook.json";
+        private const string VisibilityAuto = "auto";
+        private const string VisibilityHide = "hide";
+        private const string VisibilityShow = "show";
         internal const string TestStorageRootAppContextKey =
             "BaroWardrobeSwitcher.PersistenceProbe.StorageRoot";
         internal const string TestFailurePointAppContextKey =
@@ -111,13 +114,18 @@ namespace BaroWardrobeSwitcher
             {
                 string path = GetClientLookPath();
                 if (!File.Exists(path)) { return string.Empty; }
-                ClientLookDocument document = ReadClientDocument(path, out bool migrated);
-                if (migrated)
+                ClientLookDocument document = ReadClientDocument(path, out int migratedFromVersion);
+                if (migratedFromVersion > 0)
                 {
-                    string backupPath = path + ".v1.bak";
+                    string backupPath = path + ".v" + migratedFromVersion + ".bak";
                     File.Copy(path, backupPath, overwrite: true);
                     WriteJson(path, document);
-                    LogPersistenceInfo("Migrated client wardrobe persistence to schema v2.");
+                    LogPersistenceInfo(
+                        "Migrated client wardrobe persistence from schema v" +
+                        migratedFromVersion +
+                        " to schema v" +
+                        PersistenceVersion +
+                        ".");
                 }
                 if (document == null || !HasAnySlot(document.Slots) && !document.Captured)
                 {
@@ -195,13 +203,19 @@ namespace BaroWardrobeSwitcher
                 File.Copy(legacyPath, backupPath, overwrite: true);
                 File.Delete(legacyPath);
                 LogPersistenceInfo(
-                    "Migrated PersistentClientLook.txt to schema v2 and retained " +
+                    "Migrated PersistentClientLook.txt to schema v" +
+                    PersistenceVersion +
+                    " and retained " +
                     Path.GetFileName(backupPath) + ".");
                 return true;
             }
             catch (Exception ex)
             {
-                LogPersistenceError("Saved schema v2 but failed to archive legacy client look", ex);
+                LogPersistenceError(
+                    "Saved schema v" +
+                    PersistenceVersion +
+                    " but failed to archive legacy client look",
+                    ex);
                 return false;
             }
         }
@@ -247,7 +261,7 @@ namespace BaroWardrobeSwitcher
                     {
                         Version = PersistenceVersion,
                         Captured = false,
-                        HideHair = false,
+                        AttachmentVisibility = CreateAttachmentVisibility(false),
                         Slots = CreateEmptySlots()
                     });
                 return true;
@@ -259,7 +273,7 @@ namespace BaroWardrobeSwitcher
             }
         }
 
-        private static ClientLookDocument ReadClientDocument(string path, out bool migrated)
+        private static ClientLookDocument ReadClientDocument(string path, out int migratedFromVersion)
         {
             string json = File.ReadAllText(path, Encoding.UTF8);
             using JsonDocument parsed = JsonDocument.Parse(json);
@@ -270,18 +284,30 @@ namespace BaroWardrobeSwitcher
                 if (!IsCanonicalDocument(root))
                 {
                     throw new InvalidDataException(
-                        "Schema v2 client wardrobe persistence is not canonical.");
+                        "Schema v" + PersistenceVersion + " client wardrobe persistence is not canonical.");
                 }
-                migrated = false;
+                migratedFromVersion = 0;
                 ClientLookDocument current = JsonSerializer.Deserialize<ClientLookDocument>(json, JsonOptions);
                 ValidateDocument(current);
                 return current;
+            }
+            if (version == 2)
+            {
+                if (!IsCanonicalV2Document(root))
+                {
+                    throw new InvalidDataException(
+                        "Schema v2 client wardrobe persistence is not canonical.");
+                }
+                ClientLookDocument migratedDocument = MigrateLegacyDocument(root);
+                ValidateDocument(migratedDocument);
+                migratedFromVersion = 2;
+                return migratedDocument;
             }
             if (version == 0 || version == 1)
             {
                 ClientLookDocument migratedDocument = MigrateLegacyDocument(root);
                 ValidateDocument(migratedDocument);
-                migrated = true;
+                migratedFromVersion = 1;
                 return migratedDocument;
             }
             throw new InvalidDataException("Unsupported client wardrobe persistence schema: " + version);
@@ -344,7 +370,7 @@ namespace BaroWardrobeSwitcher
             {
                 Version = PersistenceVersion,
                 Captured = GetBoolean(parts, "captured"),
-                HideHair = GetBoolean(parts, "hidehair"),
+                AttachmentVisibility = ParseAttachmentVisibility(parts),
                 Slots = ParseSlots(parts)
             };
             return document;
@@ -359,7 +385,11 @@ namespace BaroWardrobeSwitcher
                 // captured look is returned to Lua as auto-apply intent.
                 "active=false",
                 "auto=" + document.Captured.ToString().ToLowerInvariant(),
-                "hidehair=" + document.HideHair.ToString().ToLowerInvariant()
+                "hidehair=" + LegacyHideHair(document.AttachmentVisibility).ToString().ToLowerInvariant(),
+                "visibilityHair=" + document.AttachmentVisibility.Hair,
+                "visibilityBeard=" + document.AttachmentVisibility.Beard,
+                "visibilityMoustache=" + document.AttachmentVisibility.Moustache,
+                "visibilityFaceAttachment=" + document.AttachmentVisibility.FaceAttachment
             };
             AppendEncodedSlots(parts, document.Slots);
             return string.Join("|", parts);
@@ -372,7 +402,7 @@ namespace BaroWardrobeSwitcher
             {
                 if (!slots.TryGetValue(slotKey, out string identifier) || string.IsNullOrWhiteSpace(identifier)) { continue; }
                 // Display names and runtime item ids are intentionally not persisted in
-                // schema v2. The Lua facade still receives the legacy comma separator.
+                // schema v3. The Lua facade still receives the legacy comma separator.
                 parts.Add(slotKey + "=" + Escape(identifier) + ",");
             }
         }
@@ -413,6 +443,152 @@ namespace BaroWardrobeSwitcher
                    string.Equals(value, "true", StringComparison.OrdinalIgnoreCase);
         }
 
+        private static AttachmentVisibilityDocument ParseAttachmentVisibility(
+            Dictionary<string, string> parts)
+        {
+            string[] keys =
+            {
+                "visibilityHair",
+                "visibilityBeard",
+                "visibilityMoustache",
+                "visibilityFaceAttachment"
+            };
+            bool hasAny = keys.Any(key => parts.ContainsKey(key));
+            if (!hasAny)
+            {
+                return CreateAttachmentVisibility(GetBoolean(parts, "hidehair"));
+            }
+            if (keys.Any(key => !parts.ContainsKey(key)))
+            {
+                throw new InvalidDataException(
+                    "Encoded attachment visibility must include all four layers.");
+            }
+
+            var visibility = new AttachmentVisibilityDocument
+            {
+                Hair = parts["visibilityHair"],
+                Beard = parts["visibilityBeard"],
+                Moustache = parts["visibilityMoustache"],
+                FaceAttachment = parts["visibilityFaceAttachment"]
+            };
+            ValidateAttachmentVisibility(visibility);
+            return visibility;
+        }
+
+        private static AttachmentVisibilityDocument CreateAttachmentVisibility(bool hideHair)
+        {
+            return new AttachmentVisibilityDocument
+            {
+                Hair = hideHair ? VisibilityHide : VisibilityAuto,
+                Beard = hideHair ? VisibilityHide : VisibilityAuto,
+                Moustache = hideHair ? VisibilityHide : VisibilityAuto,
+                FaceAttachment = VisibilityAuto
+            };
+        }
+
+        private static AttachmentVisibilityDocument CopyAttachmentVisibility(
+            AttachmentVisibilityDocument source)
+        {
+            ValidateAttachmentVisibility(source);
+            return new AttachmentVisibilityDocument
+            {
+                Hair = source.Hair,
+                Beard = source.Beard,
+                Moustache = source.Moustache,
+                FaceAttachment = source.FaceAttachment
+            };
+        }
+
+        private static bool LegacyHideHair(AttachmentVisibilityDocument visibility)
+        {
+            return visibility != null &&
+                   string.Equals(visibility.Hair, VisibilityHide, StringComparison.Ordinal) &&
+                   string.Equals(visibility.Beard, VisibilityHide, StringComparison.Ordinal) &&
+                   string.Equals(visibility.Moustache, VisibilityHide, StringComparison.Ordinal);
+        }
+
+        private static bool IsVisibilityState(string value)
+        {
+            return string.Equals(value, VisibilityAuto, StringComparison.Ordinal) ||
+                   string.Equals(value, VisibilityHide, StringComparison.Ordinal) ||
+                   string.Equals(value, VisibilityShow, StringComparison.Ordinal);
+        }
+
+        private static void ValidateAttachmentVisibility(AttachmentVisibilityDocument visibility)
+        {
+            if (visibility == null ||
+                !IsVisibilityState(visibility.Hair) ||
+                !IsVisibilityState(visibility.Beard) ||
+                !IsVisibilityState(visibility.Moustache) ||
+                !IsVisibilityState(visibility.FaceAttachment))
+            {
+                throw new InvalidDataException("Attachment visibility is invalid.");
+            }
+        }
+
+        private static bool IsCanonicalAttachmentVisibility(JsonElement value)
+        {
+            if (value.ValueKind != JsonValueKind.Object) { return false; }
+            var expected = new HashSet<string>(
+                new[] { "Hair", "Beard", "Moustache", "FaceAttachment" },
+                StringComparer.Ordinal);
+            foreach (JsonProperty property in value.EnumerateObject())
+            {
+                if (!expected.Remove(property.Name) ||
+                    property.Value.ValueKind != JsonValueKind.String ||
+                    !IsVisibilityState(property.Value.GetString()))
+                {
+                    return false;
+                }
+            }
+            return expected.Count == 0;
+        }
+
+        private static AttachmentVisibilityDocument ReadLegacyAttachmentVisibility(JsonElement root)
+        {
+            if (TryGetPropertyIgnoreCase(
+                    root,
+                    "attachmentVisibility",
+                    out JsonElement visibilityElement))
+            {
+                if (visibilityElement.ValueKind != JsonValueKind.Object)
+                {
+                    throw new InvalidDataException("Legacy attachment visibility is invalid.");
+                }
+                var visibility = new AttachmentVisibilityDocument();
+                if (!TryGetPropertyIgnoreCase(
+                        visibilityElement,
+                        "Hair",
+                        out JsonElement hair) ||
+                    !TryGetPropertyIgnoreCase(
+                        visibilityElement,
+                        "Beard",
+                        out JsonElement beard) ||
+                    !TryGetPropertyIgnoreCase(
+                        visibilityElement,
+                        "Moustache",
+                        out JsonElement moustache) ||
+                    !TryGetPropertyIgnoreCase(
+                        visibilityElement,
+                        "FaceAttachment",
+                        out JsonElement face) ||
+                    hair.ValueKind != JsonValueKind.String ||
+                    beard.ValueKind != JsonValueKind.String ||
+                    moustache.ValueKind != JsonValueKind.String ||
+                    face.ValueKind != JsonValueKind.String)
+                {
+                    throw new InvalidDataException("Legacy attachment visibility is incomplete.");
+                }
+                visibility.Hair = hair.GetString();
+                visibility.Beard = beard.GetString();
+                visibility.Moustache = moustache.GetString();
+                visibility.FaceAttachment = face.GetString();
+                ValidateAttachmentVisibility(visibility);
+                return visibility;
+            }
+            return CreateAttachmentVisibility(ReadBoolean(root, "hideHair"));
+        }
+
         private static bool HasAnySlot(Dictionary<string, string> slots)
         {
             return slots != null &&
@@ -448,7 +624,7 @@ namespace BaroWardrobeSwitcher
             {
                 "schemaVersion",
                 "captured",
-                "hideHair",
+                "attachmentVisibility",
                 "slots"
             };
             foreach (JsonProperty property in root.EnumerateObject())
@@ -462,6 +638,48 @@ namespace BaroWardrobeSwitcher
                 schemaVersion != PersistenceVersion ||
                 !root.TryGetProperty("captured", out JsonElement captured) ||
                 !IsBooleanKind(captured) ||
+                !root.TryGetProperty("attachmentVisibility", out JsonElement attachmentVisibility) ||
+                !IsCanonicalAttachmentVisibility(attachmentVisibility) ||
+                !root.TryGetProperty("slots", out JsonElement slots) ||
+                slots.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            HashSet<string> expectedSlots = new HashSet<string>(SlotKeys, StringComparer.Ordinal);
+            foreach (JsonProperty slot in slots.EnumerateObject())
+            {
+                if (!expectedSlots.Remove(slot.Name) ||
+                    slot.Value.ValueKind != JsonValueKind.String &&
+                    slot.Value.ValueKind != JsonValueKind.Null)
+                {
+                    return false;
+                }
+            }
+            return expectedSlots.Count == 0;
+        }
+
+        private static bool IsCanonicalV2Document(JsonElement root)
+        {
+            if (root.ValueKind != JsonValueKind.Object) { return false; }
+            var expectedProperties = new HashSet<string>(StringComparer.Ordinal)
+            {
+                "schemaVersion",
+                "captured",
+                "hideHair",
+                "slots"
+            };
+            foreach (JsonProperty property in root.EnumerateObject())
+            {
+                if (!expectedProperties.Remove(property.Name)) { return false; }
+            }
+            if (expectedProperties.Count != 0 ||
+                !root.TryGetProperty("schemaVersion", out JsonElement version) ||
+                version.ValueKind != JsonValueKind.Number ||
+                !version.TryGetInt32(out int schemaVersion) ||
+                schemaVersion != 2 ||
+                !root.TryGetProperty("captured", out JsonElement captured) ||
+                !IsBooleanKind(captured) ||
                 !root.TryGetProperty("hideHair", out JsonElement hideHair) ||
                 !IsBooleanKind(hideHair) ||
                 !root.TryGetProperty("slots", out JsonElement slots) ||
@@ -470,7 +688,7 @@ namespace BaroWardrobeSwitcher
                 return false;
             }
 
-            HashSet<string> expectedSlots = new HashSet<string>(SlotKeys, StringComparer.Ordinal);
+            var expectedSlots = new HashSet<string>(SlotKeys, StringComparer.Ordinal);
             foreach (JsonProperty slot in slots.EnumerateObject())
             {
                 if (!expectedSlots.Remove(slot.Name) ||
@@ -516,7 +734,7 @@ namespace BaroWardrobeSwitcher
             {
                 Version = PersistenceVersion,
                 Captured = captured,
-                HideHair = ReadBoolean(root, "hideHair"),
+                AttachmentVisibility = ReadLegacyAttachmentVisibility(root),
                 Slots = slots
             };
         }
@@ -580,6 +798,7 @@ namespace BaroWardrobeSwitcher
             {
                 throw new InvalidDataException("Client wardrobe schema mismatch: " + document.Version);
             }
+            ValidateAttachmentVisibility(document.AttachmentVisibility);
             document.Slots ??= CreateEmptySlots();
             foreach (string key in document.Slots.Keys.ToList())
             {
@@ -718,17 +937,36 @@ namespace BaroWardrobeSwitcher
             public int Version { get; set; }
             [JsonPropertyName("captured")]
             public bool Captured { get; set; }
-            [JsonPropertyName("hideHair")]
-            public bool HideHair { get; set; }
+            [JsonPropertyName("attachmentVisibility")]
+            public AttachmentVisibilityDocument AttachmentVisibility { get; set; }
             [JsonPropertyName("slots")]
             public Dictionary<string, string> Slots { get; set; }
+
+            [JsonIgnore]
+            public bool HideHair
+            {
+                get => LegacyHideHair(AttachmentVisibility);
+                set => AttachmentVisibility = CreateAttachmentVisibility(value);
+            }
+        }
+
+        private sealed class AttachmentVisibilityDocument
+        {
+            [JsonPropertyName("Hair")]
+            public string Hair { get; set; }
+            [JsonPropertyName("Beard")]
+            public string Beard { get; set; }
+            [JsonPropertyName("Moustache")]
+            public string Moustache { get; set; }
+            [JsonPropertyName("FaceAttachment")]
+            public string FaceAttachment { get; set; }
         }
     }
 
     public static class VisualOverride
     {
 
-        public const string Version = "0.5.0";
+        public const string Version = "0.5.1";
 
         public static string GetVersion()
         {
@@ -785,12 +1023,18 @@ namespace BaroWardrobeSwitcher
             WearableType.Moustache,
             WearableType.FaceAttachment
         };
-        // Attachment types hidden when the player opts to hide hair while a look is active.
-        private static readonly WearableType[] HairAttachmentTypes =
+        private const int AttachmentHairBit = 0x01;
+        private const int AttachmentBeardBit = 0x02;
+        private const int AttachmentMoustacheBit = 0x04;
+        private const int AttachmentFaceBit = 0x08;
+        private const int AttachmentVisibilityMask = 0x0F;
+        private static readonly Dictionary<WearableType, int> AttachmentBits =
+            new Dictionary<WearableType, int>
         {
-            WearableType.Hair,
-            WearableType.Beard,
-            WearableType.Moustache
+            [WearableType.Hair] = AttachmentHairBit,
+            [WearableType.Beard] = AttachmentBeardBit,
+            [WearableType.Moustache] = AttachmentMoustacheBit,
+            [WearableType.FaceAttachment] = AttachmentFaceBit
         };
         private static int drawOverrideLogCount;
         private static int virtualDrawErrorLogCount;
@@ -1006,7 +1250,8 @@ namespace BaroWardrobeSwitcher
                    ", pending=" + (session?.HasPendingCapture ?? false) +
                    ", sessionError=" + (session?.Error ?? "none") +
                    ", empty=" + (session?.EmptyLook ?? false) +
-                   ", hideHair=" + (session?.HideHair ?? false) +
+                   ", forceHideAttachments=0x" + (session?.ForceHideAttachmentMask ?? 0).ToString("X2") +
+                   ", forceShowAttachments=0x" + (session?.ForceShowAttachmentMask ?? 0).ToString("X2") +
                    ", sprites=" + spriteCount +
                    ", animations=" + animationCount +
                    ", sounds=" + soundCount +
@@ -1047,7 +1292,8 @@ namespace BaroWardrobeSwitcher
             foreach (RenderSession session in RenderSessions.Values)
             {
                 session.IsActive = false;
-                session.HideHair = false;
+                session.ForceHideAttachmentMask = 0;
+                session.ForceShowAttachmentMask = 0;
                 session.EmptySlots.Clear();
                 session.SavedSlots.Clear();
                 session.EquipmentMasksToSanitize.Clear();
@@ -1064,7 +1310,8 @@ namespace BaroWardrobeSwitcher
                 session.SuppressedEquipmentSounds.Clear();
                 session.SuppressedEquipmentComponentSounds.Clear();
                 session.IsActive = false;
-                session.HideHair = false;
+                session.ForceHideAttachmentMask = 0;
+                session.ForceShowAttachmentMask = 0;
                 session.EmptySlots.Clear();
                 session.SavedSlots.Clear();
                 session.EquipmentMasksToSanitize.Clear();
@@ -1350,21 +1597,52 @@ namespace BaroWardrobeSwitcher
             return true;
         }
 
-        // Opt-in hiding of the character's own hair/beard/moustache while a saved look
-        // is active, so helmets and hats that do not declare HideWearablesOfType no longer
-        // leave hair poking through. Only takes visible effect while the look is active.
-        public static bool SetHideHair(Character character, bool hideHair)
+        public static bool SetAttachmentVisibility(
+            Character character,
+            int forceHideMask,
+            int forceShowMask)
         {
             if (character == null) { return false; }
+            if ((forceHideMask & ~AttachmentVisibilityMask) != 0 ||
+                (forceShowMask & ~AttachmentVisibilityMask) != 0 ||
+                (forceHideMask & forceShowMask) != 0)
+            {
+                LuaCsLogger.Log(
+                    "[Baro Wardrobe Switcher] Rejected invalid attachment visibility masks: hide=0x" +
+                    forceHideMask.ToString("X2") +
+                    ", show=0x" +
+                    forceShowMask.ToString("X2") +
+                    ".");
+                return false;
+            }
+
             RenderSession session = GetCaptureSession(character);
-            bool changed = session.HideHair != hideHair;
-            session.HideHair = hideHair;
+            bool changed =
+                session.ForceHideAttachmentMask != forceHideMask ||
+                session.ForceShowAttachmentMask != forceShowMask;
+            session.ForceHideAttachmentMask = forceHideMask;
+            session.ForceShowAttachmentMask = forceShowMask;
             if (changed)
             {
-                LuaCsLogger.Log("[Baro Wardrobe Switcher] Fashion hair visibility set: hideHair=" + hideHair + ".");
-                RefreshWearables(character);
+                LuaCsLogger.Log(
+                    "[Baro Wardrobe Switcher] Fashion attachment visibility set: hide=0x" +
+                    forceHideMask.ToString("X2") +
+                    ", show=0x" +
+                    forceShowMask.ToString("X2") +
+                    ".");
             }
             return true;
+        }
+
+        // Compatibility wrapper for v0.5.1 Lua and third-party integrations.
+        public static bool SetHideHair(Character character, bool hideHair)
+        {
+            return SetAttachmentVisibility(
+                character,
+                hideHair
+                    ? AttachmentHairBit | AttachmentBeardBit | AttachmentMoustacheBit
+                    : 0,
+                0);
         }
 
         public static bool ApplyFashionItemVisual(Character character, Item item, bool carrier)
@@ -2530,13 +2808,20 @@ namespace BaroWardrobeSwitcher
         private static bool ShouldHideAttachmentForFashion(Character character, WearableSprite original)
         {
             if (character == null || original == null) { return false; }
-            if (RenderSessions.TryGetValue(character, out RenderSession session) &&
-                session.HiddenWearableTypes.Contains(original.Type))
+            if (!RenderSessions.TryGetValue(character, out RenderSession session) ||
+                !AttachmentBits.TryGetValue(original.Type, out int attachmentBit))
+            {
+                return false;
+            }
+            if ((session.ForceShowAttachmentMask & attachmentBit) != 0)
+            {
+                return false;
+            }
+            if ((session.ForceHideAttachmentMask & attachmentBit) != 0)
             {
                 return true;
             }
-            return session?.HideHair == true &&
-                   HairAttachmentTypes.Contains(original.Type);
+            return session.HiddenWearableTypes.Contains(original.Type);
         }
 
         private static string DescribeFashionHiddenTypes(Character character)

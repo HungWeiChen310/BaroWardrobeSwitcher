@@ -19,10 +19,20 @@ assert(Core ~= nil, "could not load Lua/WardrobeCore.lua")
 local function newBuffer()
     local values = {}
     local readIndex = 1
-    local buffer = {}
+    local buffer = { LengthBits = 0, BitPosition = 0 }
+
+    local function bitLength(kind, value)
+        if kind == "u16" then return 16 end
+        if kind == "u32" then return 32 end
+        if kind == "byte" then return 8 end
+        if kind == "bool" then return 1 end
+        if kind == "string" then return 16 + #(tostring(value or "")) * 8 end
+        return 0
+    end
 
     local function write(kind, value)
         values[#values + 1] = { kind = kind, value = value }
+        buffer.LengthBits = buffer.LengthBits + bitLength(kind, value)
     end
 
     local function read(kind)
@@ -30,15 +40,18 @@ local function newBuffer()
         assert(entry ~= nil, "attempted to read beyond buffer")
         assert(entry.kind == kind, "expected " .. kind .. ", got " .. tostring(entry.kind))
         readIndex = readIndex + 1
+        buffer.BitPosition = buffer.BitPosition + bitLength(kind, entry.value)
         return entry.value
     end
 
     buffer.WriteUInt16 = function(value) write("u16", value) end
     buffer.WriteUInt32 = function(value) write("u32", value) end
+    buffer.WriteByte = function(value) write("byte", value) end
     buffer.WriteBoolean = function(value) write("bool", value) end
     buffer.WriteString = function(value) write("string", value) end
     buffer.ReadUInt16 = function() return read("u16") end
     buffer.ReadUInt32 = function() return read("u32") end
+    buffer.ReadByte = function() return read("byte") end
     buffer.ReadBoolean = function() return read("bool") end
     buffer.ReadString = function() return read("string") end
     return buffer
@@ -64,6 +77,127 @@ assert(Core.writeLook(lookBuffer, look))
 local decodedLook = assert(Core.readLook(lookBuffer))
 assert(Core.lookEquals(look, decodedLook))
 assertEqual(decodedLook.hideHair, true)
+
+local triStateVisibility = {
+    Hair = Core.ATTACHMENT_VISIBILITY.Show,
+    Beard = Core.ATTACHMENT_VISIBILITY.Hide,
+    Moustache = Core.ATTACHMENT_VISIBILITY.Auto,
+    FaceAttachment = Core.ATTACHMENT_VISIBILITY.Show
+}
+local triStateLook = assert(Core.newLook(true, false, { Head = "helmet" }, triStateVisibility))
+assertEqual(triStateLook.hideHair, false,
+    "legacy hideHair must be false unless Hair/Beard/Moustache are all hidden")
+local forceHide, forceShow = Core.attachmentVisibilityMasks(triStateLook.attachmentVisibility)
+assertEqual(forceHide, 0x02)
+assertEqual(forceShow, 0x09)
+local decodedVisibility = assert(Core.attachmentVisibilityFromMasks(forceHide, forceShow))
+for _, key in ipairs(Core.ATTACHMENT_KEYS) do
+    assertEqual(decodedVisibility[key], triStateVisibility[key], "visibility mask round-trip failed for " .. key)
+end
+assert(Core.attachmentVisibilityFromMasks(0x10, 0) == nil)
+assert(Core.attachmentVisibilityFromMasks(0x01, 0x01) == nil)
+assert(Core.validateAttachmentVisibility({
+    Hair = "auto",
+    Beard = "auto",
+    Moustache = "auto"
+}) == nil)
+assert(Core.validateAttachmentVisibility({
+    Hair = "auto",
+    Beard = "auto",
+    Moustache = "auto",
+    FaceAttachment = "auto",
+    Unknown = "hide"
+}) == nil)
+assert(not Core.lookEquals(look, triStateLook),
+    "look equality/signature must include all four attachment visibility states")
+
+local triStateBuffer = newBuffer()
+assert(Core.writeLook(triStateBuffer, triStateLook))
+local triStateDecoded = assert(Core.readLook(triStateBuffer))
+assert(Core.lookEquals(triStateLook, triStateDecoded))
+
+local legacyReaderBuffer = newBuffer()
+assert(Core.writeLook(legacyReaderBuffer, triStateLook))
+assertEqual(legacyReaderBuffer.ReadUInt16(), Core.LOOK_SCHEMA_VERSION)
+assertEqual(legacyReaderBuffer.ReadBoolean(), true)
+assertEqual(legacyReaderBuffer.ReadBoolean(), false,
+    "old v2 readers must see only the safe legacy hideHair projection")
+local legacySlotCount = legacyReaderBuffer.ReadUInt16()
+for _ = 1, legacySlotCount do
+    legacyReaderBuffer.ReadString()
+    legacyReaderBuffer.ReadString()
+end
+assertEqual(legacyReaderBuffer.LengthBits - legacyReaderBuffer.BitPosition, 32,
+    "old v2 readers must be able to ignore the complete optional look tail")
+
+local oldWireLook = newBuffer()
+oldWireLook.WriteUInt16(Core.LOOK_SCHEMA_VERSION)
+oldWireLook.WriteBoolean(true)
+oldWireLook.WriteBoolean(true)
+oldWireLook.WriteUInt16(0)
+local migratedOldWireLook = assert(Core.readLook(oldWireLook))
+assertEqual(migratedOldWireLook.attachmentVisibility.Hair, "hide")
+assertEqual(migratedOldWireLook.attachmentVisibility.Beard, "hide")
+assertEqual(migratedOldWireLook.attachmentVisibility.Moustache, "hide")
+assertEqual(migratedOldWireLook.attachmentVisibility.FaceAttachment, "auto")
+
+local function lookPrefixBuffer()
+    local buffer = newBuffer()
+    buffer.WriteUInt16(Core.LOOK_SCHEMA_VERSION)
+    buffer.WriteBoolean(true)
+    buffer.WriteBoolean(false)
+    buffer.WriteUInt16(0)
+    return buffer
+end
+
+for byteCount = 1, 3 do
+    local partial = lookPrefixBuffer()
+    for _ = 1, byteCount do partial.WriteByte(0) end
+    local malformed, reason = Core.readLook(partial)
+    assert(malformed == nil and tostring(reason):find("extension length", 1, true) ~= nil)
+end
+local unknownMarker = lookPrefixBuffer()
+unknownMarker.WriteByte(0x58)
+unknownMarker.WriteByte(Core.LOOK_EXTENSION_VERSION)
+unknownMarker.WriteByte(0)
+unknownMarker.WriteByte(0)
+assert(Core.readLook(unknownMarker) == nil)
+local unknownExtensionVersion = lookPrefixBuffer()
+unknownExtensionVersion.WriteByte(Core.LOOK_EXTENSION_MARKER)
+unknownExtensionVersion.WriteByte(99)
+unknownExtensionVersion.WriteByte(0)
+unknownExtensionVersion.WriteByte(0)
+assert(Core.readLook(unknownExtensionVersion) == nil)
+local unknownMaskBit = lookPrefixBuffer()
+unknownMaskBit.WriteByte(Core.LOOK_EXTENSION_MARKER)
+unknownMaskBit.WriteByte(Core.LOOK_EXTENSION_VERSION)
+unknownMaskBit.WriteByte(0x10)
+unknownMaskBit.WriteByte(0)
+assert(Core.readLook(unknownMaskBit) == nil)
+local overlappingMasks = lookPrefixBuffer()
+overlappingMasks.WriteByte(Core.LOOK_EXTENSION_MARKER)
+overlappingMasks.WriteByte(Core.LOOK_EXTENSION_VERSION)
+overlappingMasks.WriteByte(0x01)
+overlappingMasks.WriteByte(0x01)
+assert(Core.readLook(overlappingMasks) == nil)
+
+local helloBuffer = newBuffer()
+assert(Core.writeServerHello(helloBuffer, 7, Core.CAPABILITY.AttachmentVisibility))
+local hello = assert(Core.readServerHello(helloBuffer))
+assertEqual(hello.revision, 7)
+assertEqual(hello.capabilities, Core.CAPABILITY.AttachmentVisibility)
+local oldHelloBuffer = newBuffer()
+oldHelloBuffer.WriteUInt16(Core.PROTOCOL_VERSION)
+oldHelloBuffer.WriteUInt32(8)
+local oldHello = assert(Core.readServerHello(oldHelloBuffer))
+assertEqual(oldHello.capabilities, 0)
+for byteCount = 1, 2 do
+    local partialHello = newBuffer()
+    partialHello.WriteUInt16(Core.PROTOCOL_VERSION)
+    partialHello.WriteUInt32(0)
+    for _ = 1, byteCount do partialHello.WriteByte(0) end
+    assert(Core.readServerHello(partialHello) == nil)
+end
 
 local command = {
     clientSessionId = "session-1",
@@ -629,23 +763,136 @@ assertEqual(table.concat(clearPersistCalls, ","), "ClearRender,Persist,RenderCom
 assertEqual(clearPersistFailure.getState().phase, Core.PHASE.Faulted)
 assertEqual(clearPersistFailure.getState().active, true)
 
+local allShown = {
+    Hair = "show",
+    Beard = "show",
+    Moustache = "show",
+    FaceAttachment = "show"
+}
+local inactiveVisibilityState = Core.newClientState({
+    characterKey = "42",
+    look = look,
+    revision = 10
+})
+local inactiveVisibilityPending, inactiveVisibilityEffects = Core.reduce(
+    inactiveVisibilityState,
+    {
+        type = "SetAttachmentVisibility",
+        attachmentVisibility = allShown
+    }
+)
+assertEqual(inactiveVisibilityEffects[1].type, "Persist",
+    "inactive local visibility changes must persist without rendering")
+local inactiveVisibilitySaved = Core.reduce(
+    inactiveVisibilityPending,
+    { type = "PersistenceSucceeded" }
+)
+assertEqual(inactiveVisibilitySaved.look.attachmentVisibility.Hair, "show")
+assertEqual(inactiveVisibilitySaved.pendingKind, nil)
+
+local activeVisibilityState = Core.newClientState({
+    characterKey = "42",
+    look = look,
+    revision = 10
+})
+activeVisibilityState = Core.reduce(activeVisibilityState, {
+    type = "RestoreLook",
+    look = look,
+    active = true,
+    autoApply = true
+})
+local activeVisibilityPending, activeVisibilityEffects = Core.reduce(
+    activeVisibilityState,
+    {
+        type = "SetAttachmentVisibility",
+        attachmentVisibility = allShown,
+        remote = true,
+        operationId = "visibility-active"
+    }
+)
+assertEqual(activeVisibilityEffects[1].type, "ApplyAttachmentVisibility",
+    "active visibility changes must preview before network/persistence")
+local activeVisibilityRendered, renderedEffects = Core.reduce(
+    activeVisibilityPending,
+    { type = "AttachmentVisibilityUpdateSucceeded" }
+)
+assertEqual(renderedEffects[1].type, "SendCommand")
+assertEqual(renderedEffects[1].kind, Core.COMMAND.Visibility)
+local rejectedVisibility, rejectedEffects = Core.reduce(activeVisibilityRendered, {
+    type = "AckReceived",
+    operationId = "visibility-active",
+    accepted = false,
+    revision = 10,
+    reason = "denied"
+})
+assertEqual(rejectedVisibility.look.attachmentVisibility.Hair, "hide")
+assertEqual(rejectedEffects[1].type, "ApplyAttachmentVisibilityCompensation")
+
+local inactiveRemotePending, inactiveRemoteEffects = Core.reduce(
+    inactiveVisibilityState,
+    {
+        type = "SetAttachmentVisibility",
+        attachmentVisibility = allShown,
+        remote = true,
+        operationId = "visibility-inactive"
+    }
+)
+assertEqual(inactiveRemoteEffects[1].type, "SendCommand",
+    "inactive remote visibility changes must skip renderer preview")
+local timedOutVisibility, timedOutEffects = Core.reduce(inactiveRemotePending, {
+    type = "CommandTimedOut",
+    operationId = "visibility-inactive"
+})
+assertEqual(timedOutVisibility.look.attachmentVisibility.Hair, "hide")
+assertEqual(#timedOutEffects, 0,
+    "inactive timeout rollback must not schedule renderer compensation")
+
+local acceptedVisibility, acceptedVisibilityEffects = Core.reduce(inactiveRemotePending, {
+    type = "AckReceived",
+    operationId = "visibility-inactive",
+    accepted = true,
+    revision = 11,
+    reason = "ok"
+})
+assertEqual(acceptedVisibilityEffects[1].type, "Persist")
+local acceptedButUnpersisted, acceptedFailureEffects = Core.reduce(
+    acceptedVisibility,
+    { type = "PersistenceFailed", reason = "disk full" }
+)
+assertEqual(acceptedButUnpersisted.look.attachmentVisibility.Hair, "show",
+    "server-accepted visibility must not roll back when local persistence fails")
+assertEqual(#acceptedFailureEffects, 0)
+
 local hairCalls = {}
 local hairFailure = Core.createClientController(duplicateState, {
-    SetHair = function(effect)
-        hairCalls[#hairCalls + 1] = "SetHair:" .. tostring(effect.hidden)
-        return { type = "HairUpdateSucceeded" }
+    ApplyAttachmentVisibility = function(effect)
+        hairCalls[#hairCalls + 1] = "ApplyVisibility:" ..
+            table.concat({
+                effect.attachmentVisibility.Hair,
+                effect.attachmentVisibility.Beard,
+                effect.attachmentVisibility.Moustache,
+                effect.attachmentVisibility.FaceAttachment
+            }, "/")
+        return { type = "AttachmentVisibilityUpdateSucceeded" }
     end,
     Persist = function()
         hairCalls[#hairCalls + 1] = "Persist"
         return false, "synthetic atomic replace failure"
     end,
-    SetHairCompensation = function(effect)
-        hairCalls[#hairCalls + 1] = "SetHairCompensation:" .. tostring(effect.hidden)
+    ApplyAttachmentVisibilityCompensation = function(effect)
+        hairCalls[#hairCalls + 1] = "VisibilityCompensation:" ..
+            table.concat({
+                effect.attachmentVisibility.Hair,
+                effect.attachmentVisibility.Beard,
+                effect.attachmentVisibility.Moustache,
+                effect.attachmentVisibility.FaceAttachment
+            }, "/")
         return { type = "CompensationSucceeded" }
     end
 })
 hairFailure.dispatch({ type = "SetHairHidden", hidden = false })
-assertEqual(table.concat(hairCalls, ","), "SetHair:false,Persist,SetHairCompensation:true")
+assertEqual(table.concat(hairCalls, ","),
+    "ApplyVisibility:auto/auto/auto/auto,Persist,VisibilityCompensation:hide/hide/hide/auto")
 assertEqual(hairFailure.getState().phase, Core.PHASE.Faulted)
 assertEqual(hairFailure.getState().look.hideHair, true)
 

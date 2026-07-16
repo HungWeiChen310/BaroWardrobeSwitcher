@@ -16,6 +16,7 @@ Pinned contracts used by the adapter:
 - [Official 1.13.4.0 changelog](https://github.com/FakeFishGames/Barotrauma/blob/a589d2cee3ff2214c99a7ea30c46f16a5406a01d/Barotrauma/BarotraumaShared/changelog.txt#L1-L13)
 - [Official `WearableSprite` construction and `Init(Character)` lifecycle](https://github.com/FakeFishGames/Barotrauma/blob/a589d2cee3ff2214c99a7ea30c46f16a5406a01d/Barotrauma/BarotraumaShared/SharedSource/Items/Components/Wearable.cs#L152-L210)
 - [Official exact `Limb.Draw` signature](https://github.com/FakeFishGames/Barotrauma/blob/a589d2cee3ff2214c99a7ea30c46f16a5406a01d/Barotrauma/BarotraumaClient/ClientSource/Characters/Limb.cs#L729-L730)
+- [Official `CharacterInfo` identity lifecycle](https://github.com/FakeFishGames/Barotrauma/blob/a589d2cee3ff2214c99a7ea30c46f16a5406a01d/Barotrauma/BarotraumaShared/SharedSource/Characters/CharacterInfo.cs)
 - [Official content-package metadata guide](https://regalis11.github.io/BaroModDoc/Intro/ContentPackages.html)
 - [LuaCs in-memory C# source loading](https://evilfactory.github.io/LuaCsForBarotrauma/cs-docs/html/md_manual_inmemorymod.html) and [LuaCs networking](https://evilfactory.github.io/LuaCsForBarotrauma/lua-docs/manual/networking/) (upstream LuaCs contracts, not official game APIs)
 
@@ -26,6 +27,17 @@ Required renderer capabilities:
 - `Limb.Draw(SpriteBatch, Camera, Color?, bool)`
 - `Limb.DrawWearable(WearableSprite, float, SpriteBatch, Color, float, SpriteEffects)`
 - `WearableSprite.Init(Character)` and readable initialization/resource properties
+
+Required single-player identity capabilities:
+
+- `Character.Info` and static `Character.CharacterList`
+- `Character.IsBot`, `Character.IsHuman`, and `Character.IsOnPlayerTeam`
+- `CharacterInfo.ID`, `OriginalName`, `SpeciesName`, and `HumanPrefabIds`
+
+Required networking codec capabilities:
+
+- `IReadMessage.ReadByte()` and `IWriteMessage.WriteByte(byte)`
+- Either `LengthBits` + `BitPosition` or `LengthBytes` + `BytePosition`, used to accept only absent or complete optional protocol tails
 
 Optional capabilities:
 
@@ -48,11 +60,15 @@ Run the contract probe on a machine with the game installed:
 
 ## Network compatibility
 
-Protocol 2 is used when both peers complete the v2 hello handshake. The six original v1 message names remain available in v0.5.0:
+Protocol 2 is used when both peers complete the v2 hello handshake. The six original v1 message names remain available in v0.5.1:
 
-- Old client with v0.5.0 server: v1.
-- v0.5.0 client with old server: v1 after the five-second hello timeout.
-- v0.5.0 client with v0.5.0 server: v2.
+- Old client with v0.5.1 server: v1.
+- v0.5.1 client with old server: v1 after the five-second hello timeout.
+- v0.5.1 client with v0.5.1 server: v2.
+
+The protocol number and wire look schema remain 2. Updated server hello messages may append `0x57, 1, capabilities`; capability bit `0x01` enables the `visibility` command and full four-layer synchronization. Updated look payloads may append `0x57, 1, forceHideMask, forceShowMask`. Updated readers reject partial, unknown-version, unknown-bit, or overlapping tails. Old v2 readers consume the unchanged prefix and ignore the tail.
+
+An updated client connected to a v2 server without capability `0x01` never sends the new command. It retains full local visibility and projects `hideHair=true` only when Hair, Beard, and Moustache are all explicitly hidden.
 
 The v1 bridge is scheduled for removal in v0.6.0. V2 state is revisioned; v1 remains best-effort compatibility and does not gain new positional fields.
 

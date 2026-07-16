@@ -62,13 +62,49 @@ end
 local loadCalls = 0
 local saveCalls = 0
 local lastSaved = nil
+local transferEnabled = false
+local importedCampaigns = {}
+local profiles = {}
+local function profileStorageKey(campaignKey, characterKey)
+    return tostring(campaignKey) .. "\n" .. tostring(characterKey)
+end
+local campaignStorageKey = "campaign:campaign-a.save"
+local function stableCharacterProfileKey(name)
+    return tostring(#name) .. ":" .. name .. "|5:human|0:|0:"
+end
 local persistence = {
     GetVersion = function() return WardrobeCore.MOD_VERSION end,
     GetLastError = function() return "" end,
     GetClientLookPath = function() return "sessionless/ClientLook.json" end,
+    GetSinglePlayerProfilesPath = function() return "campaign/SinglePlayerProfiles.json" end,
+    GetSinglePlayerTransferEnabled = function() return transferEnabled end,
+    SetSinglePlayerTransferEnabled = function(enabled)
+        transferEnabled = enabled == true
+        return true
+    end,
+    TryImportLegacyClientLook = function(campaignKey, characterKey)
+        if importedCampaigns[campaignKey] then return false end
+        importedCampaigns[campaignKey] = true
+        profiles[profileStorageKey(campaignKey, characterKey)] =
+            "captured=true|active=false|auto=false|hidehair=false|Head=helmet,"
+        return true
+    end,
+    LoadSinglePlayerProfile = function(campaignKey, characterKey)
+        loadCalls = loadCalls + 1
+        return profiles[profileStorageKey(campaignKey, characterKey)] or ""
+    end,
+    SaveSinglePlayerProfile = function(campaignKey, characterKey, _, encoded)
+        saveCalls = saveCalls + 1
+        lastSaved = tostring(encoded)
+        profiles[profileStorageKey(campaignKey, characterKey)] = tostring(encoded)
+        return true
+    end,
+    DeleteSinglePlayerProfile = function(campaignKey, characterKey)
+        profiles[profileStorageKey(campaignKey, characterKey)] = nil
+        return true
+    end,
     ClientLookFileExists = function() return true end,
     LoadClientLook = function()
-        loadCalls = loadCalls + 1
         return "captured=true|active=false|auto=false|hidehair=false|Head=helmet,"
     end,
     SaveClientLook = function(encoded)
@@ -80,6 +116,12 @@ local persistence = {
 }
 
 local activationCount = 0
+local attachmentVisibilityCalls = 0
+local lastForceHideMask = nil
+local lastForceShowMask = nil
+local activationCharacterIds = {}
+local activeCharacterIds = {}
+local capturedIdentifierByCharacterId = {}
 local prefabCaptureCount = 0
 local reuseCheckCount = 0
 local reusableCharacters = {}
@@ -112,32 +154,52 @@ local visualOverride = {
         reuseCheckCount = reuseCheckCount + 1
         return reusableCharacters[characterId(character)] == true
     end,
-    CaptureFashionPrefab = function()
+    CaptureFashionPrefab = function(character, identifier)
         prefabCaptureCount = prefabCaptureCount + 1
+        capturedIdentifierByCharacterId[characterId(character)] = tostring(identifier)
         return 1
     end,
     CaptureEmptyFashion = function() return true end,
     SetFashionSlots = function() return true end,
-    SetHideHair = function() return true end,
-    ActivateFashionVisual = function()
+    SetAttachmentVisibility = function(_, forceHideMask, forceShowMask)
+        attachmentVisibilityCalls = attachmentVisibilityCalls + 1
+        lastForceHideMask = forceHideMask
+        lastForceShowMask = forceShowMask
+        return true
+    end,
+    ActivateFashionVisual = function(character)
         activationCount = activationCount + 1
+        local id = characterId(character)
+        activationCharacterIds[#activationCharacterIds + 1] = id
+        activeCharacterIds[id] = true
         return true
     end,
     ClearCharacter = function(character)
         local id = characterId(character)
-        if id ~= nil then reusableCharacters[id] = nil end
+        if id ~= nil then
+            reusableCharacters[id] = nil
+            activeCharacterIds[id] = nil
+        end
         return true
     end,
     ClearAll = function()
         reusableCharacters = {}
+        activeCharacterIds = {}
         transactionCharacter = nil
         return true
     end,
-    RestoreCharacterItemVisuals = function() return true end,
-    RestoreItemVisuals = function() return true end,
+    RestoreCharacterItemVisuals = function(character)
+        activeCharacterIds[characterId(character)] = nil
+        return true
+    end,
+    RestoreItemVisuals = function(character)
+        activeCharacterIds[characterId(character)] = nil
+        return true
+    end,
     PruneStaleCharacters = function() return true end
 }
 
+local gameSessionDataPath = { SavePath = "campaign-a.save" }
 local function vector(x, y)
     return { X = x, Y = y }
 end
@@ -146,6 +208,15 @@ LuaUserData = {
     CreateStatic = function(name)
         if name == "BaroWardrobeSwitcher.WardrobePersistence" then return persistence end
         if name == "BaroWardrobeSwitcher.VisualOverride" then return visualOverride end
+        if name == "Barotrauma.GameMain" then
+            return {
+                GameSession = {
+                    DataPath = gameSessionDataPath,
+                    IsRunning = true,
+                    RoundEnding = false
+                }
+            }
+        end
         if name == "Microsoft.Xna.Framework.Vector2" then return vector end
         if name == "Microsoft.Xna.Framework.Color" then
             return { White = {}, Cyan = {} }
@@ -165,7 +236,8 @@ Hook = {
 Networking = {
     Receive = function() end
 }
-Character = { Controlled = nil }
+Game = { IsMultiplayer = false }
+Character = { Controlled = nil, CharacterList = {} }
 ChatMessageType = {
     ServerMessageBoxInGame = "ServerMessageBoxInGame",
     MessageBox = "MessageBox"
@@ -204,108 +276,278 @@ GUI = {
     end
 }
 
-assert(dofile(clientPath) == nil)
-assert(loadCalls == 1, "client persistence was not loaded without a game session key")
-
-local restored = false
-for _, message in ipairs(messages) do
-    if message:find("Loaded persistent client wardrobe look from C# persistence.", 1, true) then
-        restored = true
-        break
-    end
-end
-assert(restored, "portable client look was rejected when no game session key was available")
-
-Character.Controlled = {
-    ID = 42,
-    Name = "Sessionless Tester",
-    Inventory = {
-        GetItemInLimbSlot = function() return nil end
+local function makeCharacter(entityId, infoId, name, isBot)
+    return {
+        ID = entityId,
+        Name = name,
+        IsHuman = true,
+        IsOnPlayerTeam = true,
+        IsBot = isBot == true,
+        Info = {
+            ID = infoId,
+            Name = name,
+            OriginalName = name,
+            SpeciesName = "human",
+            HumanPrefabIds = { Item1 = "", Item2 = "" }
+        },
+        Inventory = {
+            GetItemInLimbSlot = function() return nil end
+        }
     }
-}
+end
+
+profiles[profileStorageKey(campaignStorageKey, stableCharacterProfileKey("Existing NPC"))] =
+    "captured=true|active=false|auto=false|hidehair=false|Head=existinghelmet,"
+profiles[profileStorageKey(campaignStorageKey, stableCharacterProfileKey("Twin NPC"))] =
+    "captured=true|active=false|auto=true|hidehair=false|Head=twinhelmet,"
+profiles[profileStorageKey(campaignStorageKey, stableCharacterProfileKey("No Stable ID"))] =
+    "captured=true|active=false|auto=true|hidehair=false|Head=unstablehelmet,"
+
+assert(dofile(clientPath) == nil)
+assert(loadCalls == 0, "single-player profiles should load only after a campaign character exists")
+
+local player = makeCharacter(42, 100, "Player Tester", false)
+local npc = makeCharacter(43, 200, "NPC Tester", true)
+local existingNpc = makeCharacter(44, 300, "Existing NPC", true)
+Character.CharacterList = { player, npc, existingNpc }
+Character.Controlled = player
 openPanel = true
 assert(type(hooks.think) == "function", "client think hook was not registered")
 hooks.think()
+assert(loadCalls >= 2, "single-player crew profiles were not loaded during the one-shot crew scan")
+local importedPlayerProfileKey =
+    profileStorageKey(campaignStorageKey, stableCharacterProfileKey("Player Tester"))
+assert(profiles[importedPlayerProfileKey] ~= nil and
+    profiles[importedPlayerProfileKey]:find("Head=helmet,", 1, true) ~= nil,
+    "the legacy client look was not imported into the first controlled profile")
+assert(activationCount == 0 and prefabCaptureCount == 0,
+    "an imported legacy look activated before the player manually applied it")
 
-local hideHairButton = buttons["Hide Hair"]
-assert(hideHairButton ~= nil and hideHairButton.Enabled ~= false,
-    "Hide Hair should be enabled when a saved look exists")
-assert(type(hideHairButton.OnClicked) == "function", "Hide Hair callback was not installed")
-hideHairButton.OnClicked()
+local appearanceLayersButton = buttons["Appearance Layers..."]
+assert(appearanceLayersButton ~= nil and appearanceLayersButton.Enabled ~= false,
+    "Appearance Layers should be enabled when a saved look exists")
+assert(type(appearanceLayersButton.OnClicked) == "function",
+    "Appearance Layers callback was not installed")
+appearanceLayersButton.OnClicked()
+local hideStandardHairButton = buttons["Hide Standard Hair"]
+assert(hideStandardHairButton ~= nil and
+    type(hideStandardHairButton.OnClicked) == "function",
+    "Hide Standard Hair preset was not installed")
+hideStandardHairButton.OnClicked()
 
-assert(saveCalls == 1, "Hide Hair did not persist in a sessionless game mode")
-assert(lastSaved ~= nil and lastSaved:find("hidehair=true", 1, true) ~= nil,
-    "Hide Hair persistence did not store the updated intent")
+assert(saveCalls == 1, "attachment visibility did not persist to the current character profile")
+assert(lastSaved ~= nil and
+    lastSaved:find("schema=3", 1, true) ~= nil and
+    lastSaved:find("hidehair=true", 1, true) ~= nil and
+    lastSaved:find("visibilityHair=hide", 1, true) ~= nil and
+    lastSaved:find("visibilityFaceAttachment=auto", 1, true) ~= nil,
+    "attachment visibility persistence did not store the complete policy")
 
 local applyButton = buttons["Apply Saved Look"]
 assert(applyButton ~= nil and type(applyButton.OnClicked) == "function",
     "Apply Saved Look callback was not installed")
+local saveButton = buttons["Save Current Outfit"]
+assert(saveButton ~= nil and type(saveButton.OnClicked) == "function",
+    "Save Current Outfit callback was not installed")
 local clearButton = buttons["Clear Look"]
 assert(clearButton ~= nil and type(clearButton.OnClicked) == "function",
     "Clear Look callback was not installed")
+local forgetButton = buttons["Forget Saved Look"]
+assert(forgetButton ~= nil and type(forgetButton.OnClicked) == "function",
+    "Forget Saved Look callback was not installed")
+local enableTransferButton = buttons["Enable Appearance Transfer"]
+assert(enableTransferButton ~= nil and type(enableTransferButton.OnClicked) == "function",
+    "single-player appearance-transfer toggle was not installed")
 
-assert(type(hooks.roundEnd) == "function", "roundEnd hook was not registered")
-hooks.roundEnd()
+applyButton.OnClicked()
+assert(activationCount == 1, "manual apply did not activate the player profile")
+assert(prefabCaptureCount == 1,
+    "a persisted player profile did not rebuild its renderer payload from the prefab")
+assert(lastForceHideMask == 0x07 and lastForceShowMask == 0,
+    "Hide Standard Hair did not project to the expected renderer masks")
+
+local hairLayerButton = buttons["Hair — Hide"]
+assert(hairLayerButton ~= nil and type(hairLayerButton.OnClicked) == "function",
+    "Hair visibility layer button was not installed")
+local callsBeforeHairShow = attachmentVisibilityCalls
+hairLayerButton.OnClicked()
+assert(attachmentVisibilityCalls == callsBeforeHairShow + 1 and
+       lastForceHideMask == 0x06 and lastForceShowMask == 0x01,
+    "active Hair=Show did not preview with ForceShow taking priority")
+assert(lastSaved:find("hidehair=false", 1, true) ~= nil and
+       lastSaved:find("visibilityHair=show", 1, true) ~= nil and
+       lastSaved:find("visibilityBeard=hide", 1, true) ~= nil,
+    "active layer update did not persist the complete policy")
+
+-- Default-off transfer: switching through a no-controlled frame must not leak
+-- the player's active look onto an unconfigured NPC.
 Character.Controlled = nil
 hooks.think()
-Character.Controlled = {
-    ID = 43,
-    Name = "Replacement Tester",
-    Inventory = {
-        GetItemInLimbSlot = function() return nil end
-    }
-}
+Character.Controlled = npc
 hooks.think()
-assert(activationCount == 0,
-    "a saved but inactive look was incorrectly applied to the replacement character")
+assert(activationCount == 1,
+    "the default-off transfer setting leaked the player's look onto an NPC; activations=" ..
+    tostring(activationCount) ..
+    ", ids=" ..
+    table.concat(activationCharacterIds, ",") ..
+    ", log=" ..
+    table.concat(messages, " || "))
 
--- Simulate the atomically committed session produced by a successful local save.
--- The first apply and a clear/reapply on the same character must use that exact
--- renderer session without rebuilding from the active prefab.
-reusableCharacters[43] = true
-applyButton.OnClicked()
-assert(activationCount == 1, "manual apply did not activate the renderer")
-assert(prefabCaptureCount == 0,
-    "same-character apply rebuilt the look instead of reusing the committed renderer session")
+Character.Controlled = nil
+hooks.think()
+Character.Controlled = player
+hooks.think()
+enableTransferButton.OnClicked()
+assert(transferEnabled, "appearance-transfer setting was not persisted")
 
+Character.Controlled = nil
+hooks.think()
+Character.Controlled = npc
+hooks.think()
+assert(activationCount == 2,
+    "enabled transfer did not fill the unconfigured NPC profile; activations=" ..
+    tostring(activationCount) ..
+    ", transfer=" ..
+    tostring(transferEnabled))
+assert(prefabCaptureCount == 2,
+    "transferred NPC look did not build an NPC-owned renderer session")
+assert(lastSaved ~= nil and lastSaved:find("auto=true", 1, true) ~= nil,
+    "successful transferred look was not persisted for the target NPC")
+
+-- Clear/reapply on the same NPC must reuse its committed renderer session.
 clearButton.OnClicked()
 applyButton.OnClicked()
-assert(activationCount == 2, "clear/reapply did not reactivate the renderer")
-assert(prefabCaptureCount == 0,
+assert(activationCount == 3, "NPC clear/reapply did not reactivate the renderer")
+assert(prefabCaptureCount == 2,
     "clear/reapply discarded the reusable renderer session and rebuilt from the prefab")
 
-hooks.roundEnd()
+-- An existing inactive profile must win over transfer and remain inactive until
+-- explicitly applied.
 Character.Controlled = nil
 hooks.think()
-Character.Controlled = {
-    ID = 44,
-    Name = "Active Replacement Tester",
-    Inventory = {
-        GetItemInLimbSlot = function() return nil end
-    }
-}
+Character.Controlled = existingNpc
 hooks.think()
 assert(activationCount == 3,
-    "an active look was not reapplied exactly once to the replacement character")
-assert(prefabCaptureCount == 1,
-    "a replacement character incorrectly reused the previous character's renderer session")
+    "appearance transfer overwrote or activated an existing NPC profile")
+local existingProfileKey =
+    profileStorageKey(campaignStorageKey, stableCharacterProfileKey("Existing NPC"))
+assert(profiles[existingProfileKey] ~= nil and
+    profiles[existingProfileKey]:find("existinghelmet", 1, true) ~= nil,
+    "appearance transfer replaced an existing NPC profile")
+applyButton.OnClicked()
+assert(activationCount == 4,
+    "manual apply did not activate the existing NPC profile")
+assert(capturedIdentifierByCharacterId[44] == "existinghelmet",
+    "the existing NPC profile did not use its own saved appearance")
+assert(activeCharacterIds[43] == true and activeCharacterIds[44] == true,
+    "two NPCs could not keep different active wardrobe sessions")
+
+-- Clear only the player before the scene transition. Both NPC profiles remain
+-- active and should restore independently in the replacement scene.
+Character.Controlled = nil
+hooks.think()
+Character.Controlled = player
+hooks.think()
+clearButton.OnClicked()
+Character.Controlled = nil
+hooks.think()
+Character.Controlled = npc
+hooks.think()
+
+assert(type(hooks.roundEnd) == "function", "roundEnd hook was not registered")
+assert(type(hooks.roundStart) == "function", "roundStart hook was not registered")
+hooks.roundEnd()
+local playerNextScene = makeCharacter(142, 100, "Player Tester", false)
+local npcNextScene = makeCharacter(143, 200, "NPC Tester", true)
+local existingNextScene = makeCharacter(144, 300, "Existing NPC", true)
+Character.CharacterList = { playerNextScene, npcNextScene, existingNextScene }
+Character.Controlled = playerNextScene
+hooks.roundStart()
+for _ = 1, 15 do hooks.think() end
+assert(activationCount == 6,
+    "active NPC looks were not independently restored in the next scene")
+assert(prefabCaptureCount == 5,
+    "replacement NPCs incorrectly reused renderer sessions from the previous scene")
+assert(capturedIdentifierByCharacterId[143] == "helmet",
+    "the transferred NPC profile restored the wrong appearance")
+assert(capturedIdentifierByCharacterId[144] == "existinghelmet",
+    "the existing NPC profile restored the wrong appearance")
+assert(activeCharacterIds[143] == true and activeCharacterIds[144] == true,
+    "NPC profiles did not remain simultaneously active after scene restoration")
 assert(reuseCheckCount >= 3,
     "local render effects did not query renderer-session reuse before choosing prefab capture")
 
-clearButton.OnClicked()
-hooks.roundEnd()
 Character.Controlled = nil
 hooks.think()
-Character.Controlled = {
-    ID = 45,
-    Name = "Cleared Replacement Tester",
-    Inventory = {
-        GetItemInLimbSlot = function() return nil end
-    }
-}
+Character.Controlled = npcNextScene
 hooks.think()
-assert(activationCount == 3,
-    "a manually cleared look was incorrectly reapplied to the replacement character")
+clearButton.OnClicked()
+forgetButton.OnClicked()
+assert(activeCharacterIds[144] == true,
+    "clearing or forgetting one NPC removed another NPC's active appearance")
+local npcProfileKey =
+    profileStorageKey(campaignStorageKey, stableCharacterProfileKey("NPC Tester"))
+assert(profiles[npcProfileKey] == nil,
+    "Forget Saved Look did not delete only the current NPC profile")
+assert(profiles[existingProfileKey] ~= nil,
+    "Forget Saved Look deleted another NPC profile")
+
+hooks.roundEnd()
+local playerFinalScene = makeCharacter(242, 100, "Player Tester", false)
+local npcFinalScene = makeCharacter(243, 200, "NPC Tester", true)
+local existingFinalScene = makeCharacter(244, 300, "Existing NPC", true)
+local twinA = makeCharacter(245, 400, "Twin NPC", true)
+local twinB = makeCharacter(246, 401, "Twin NPC", true)
+local missingStableId = makeCharacter(247, nil, "No Stable ID", true)
+Character.CharacterList = {
+    playerFinalScene,
+    npcFinalScene,
+    existingFinalScene,
+    twinA,
+    twinB,
+    missingStableId
+}
+Character.Controlled = playerFinalScene
+hooks.roundStart()
+for _ = 1, 15 do hooks.think() end
+assert(activationCount == 7,
+    "forgotten or ambiguous NPC profiles were incorrectly restored")
+assert(activeCharacterIds[244] == true,
+    "an unaffected NPC profile did not restore in the final scene")
+assert(activeCharacterIds[243] ~= true,
+    "a forgotten NPC profile was restored in a later scene")
+assert(activeCharacterIds[245] ~= true and activeCharacterIds[246] ~= true,
+    "an ambiguous character fingerprint did not fail closed")
+assert(activeCharacterIds[247] ~= true,
+    "a character without Character.Info.ID did not fail closed")
+
+-- Without a campaign save path, profiles remain usable in memory but no
+-- character profile is written to SinglePlayerProfiles.json.
+hooks.roundEnd()
+gameSessionDataPath.SavePath = nil
+local memoryPlayer = makeCharacter(342, 500, "Memory Player", false)
+local memoryNpc = makeCharacter(343, 501, "Memory NPC", true)
+Character.CharacterList = { memoryPlayer, memoryNpc }
+Character.Controlled = memoryPlayer
+hooks.roundStart()
+hooks.think()
+local savesBeforeMemoryProfile = saveCalls
+saveButton.OnClicked()
+applyButton.OnClicked()
+assert(activationCount == 8,
+    "campaign-less player profile did not apply; activations=" ..
+    tostring(activationCount))
+Character.Controlled = nil
+hooks.think()
+Character.Controlled = memoryNpc
+for _ = 1, 15 do hooks.think() end
+assert(activationCount == 9,
+    "campaign-less in-memory profiles did not apply and transfer during the session; activations=" ..
+    tostring(activationCount) ..
+    ", ids=" ..
+    table.concat(activationCharacterIds, ","))
+assert(saveCalls == savesBeforeMemoryProfile,
+    "a campaign-less single-player profile was incorrectly written to disk")
 
 print = originalPrint
 print("Wardrobe client facade tests passed")

@@ -2,7 +2,7 @@ local MOD_NAME = "Baro Wardrobe Switcher"
 
 if not SERVER then return end
 
--- WardrobeCore is loaded first by ModConfig in v0.5.0. Keep the constants below
+-- WardrobeCore is loaded first by ModConfig in v0.5.1. Keep the constants below
 -- as a deployment-safe fallback so a partially upgraded installation fails
 -- gracefully instead of preventing the server script from loading.
 local Core = rawget(_G, "WardrobeCore") or rawget(_G, "BaroWardrobeCore")
@@ -25,7 +25,8 @@ NET.FORGET_REQUEST = NET.FORGET_REQUEST or NET.V1_FORGET_REQUEST or "barowardrob
 NET.LOOK_APPLY = NET.LOOK_APPLY or NET.V1_LOOK_APPLY or "barowardrobeswitcher.look.apply"
 NET.LOOK_CLEAR = NET.LOOK_CLEAR or NET.V1_LOOK_CLEAR or "barowardrobeswitcher.look.clear"
 local PROTOCOL_VERSION = Core ~= nil and (Core.PROTOCOL_VERSION or Core.PROTOCOL) or 2
-local SCHEMA_VERSION = Core ~= nil and (Core.SCHEMA_VERSION or Core.LOOK_SCHEMA_VERSION) or 2
+local LOOK_SCHEMA_VERSION = Core ~= nil and (Core.LOOK_SCHEMA_VERSION or Core.SCHEMA_VERSION) or 2
+local PERSISTENCE_VERSION = Core ~= nil and Core.PERSISTENCE_VERSION or 3
 local LIMITS = Core ~= nil and Core.LIMITS or {}
 local MAX_SLOTS = tonumber(LIMITS.MAX_SLOTS or LIMITS.maxSlots) or 6
 local MAX_IDENTIFIER_BYTES = tonumber(LIMITS.MAX_IDENTIFIER_BYTES or LIMITS.maxIdentifierBytes) or 256
@@ -34,6 +35,34 @@ local MAX_SESSION_ID_BYTES = 128
 local MAX_OPERATION_ID_BYTES = 128
 local MAX_SEEN_OPERATIONS = tonumber(LIMITS.MAX_SEEN_OPERATIONS or LIMITS.maxSeenOperations) or 512
 local MAX_REVISION = 4294967295
+local ATTACHMENT_KEYS = Core ~= nil and Core.ATTACHMENT_KEYS or {
+    "Hair",
+    "Beard",
+    "Moustache",
+    "FaceAttachment"
+}
+local ATTACHMENT_BITS = Core ~= nil and Core.ATTACHMENT_BITS or {
+    Hair = 0x01,
+    Beard = 0x02,
+    Moustache = 0x04,
+    FaceAttachment = 0x08
+}
+local ATTACHMENT_VISIBILITY = Core ~= nil and Core.ATTACHMENT_VISIBILITY or {
+    Auto = "auto",
+    Hide = "hide",
+    Show = "show"
+}
+local ATTACHMENT_MASK = Core ~= nil and Core.ATTACHMENT_MASK or 0x0F
+local CAPABILITY_ATTACHMENT_VISIBILITY =
+    Core ~= nil and Core.CAPABILITY ~= nil and Core.CAPABILITY.AttachmentVisibility or 0x01
+local COMMAND_VISIBILITY =
+    Core ~= nil and Core.COMMAND ~= nil and Core.COMMAND.Visibility or "visibility"
+local SUPPORTS_ATTACHMENT_VISIBILITY =
+    Core ~= nil and
+    type(Core.validateAttachmentVisibility) == "function" and
+    type(Core.attachmentVisibilityMasks) == "function" and
+    (type(Core.readLook) == "function" or type(Core.ReadLook) == "function") and
+    (type(Core.writeLook) == "function" or type(Core.WriteLook) == "function")
 
 local CharacterInventory = nil
 local Client = nil
@@ -110,12 +139,87 @@ local function messageLengthBytes(message)
     return nil
 end
 
+local function attachmentVisibilityFromLegacy(hideHair)
+    if Core ~= nil and Core.attachmentVisibilityFromLegacy ~= nil then
+        return Core.attachmentVisibilityFromLegacy(hideHair == true)
+    end
+    local hidden = hideHair == true
+    return {
+        Hair = hidden and ATTACHMENT_VISIBILITY.Hide or ATTACHMENT_VISIBILITY.Auto,
+        Beard = hidden and ATTACHMENT_VISIBILITY.Hide or ATTACHMENT_VISIBILITY.Auto,
+        Moustache = hidden and ATTACHMENT_VISIBILITY.Hide or ATTACHMENT_VISIBILITY.Auto,
+        FaceAttachment = ATTACHMENT_VISIBILITY.Auto
+    }
+end
+
+local function validateAttachmentVisibility(value, legacyHideHair)
+    if Core ~= nil and Core.validateAttachmentVisibility ~= nil then
+        return Core.validateAttachmentVisibility(value, legacyHideHair == true)
+    end
+    if value == nil then return attachmentVisibilityFromLegacy(legacyHideHair) end
+    if type(value) ~= "table" then return nil, "invalid_attachment_visibility" end
+    local expected = {}
+    for _, key in ipairs(ATTACHMENT_KEYS) do expected[key] = true end
+    for key in pairs(value) do
+        if expected[key] ~= true then return nil, "unknown_attachment_layer" end
+    end
+    local result = {}
+    for _, key in ipairs(ATTACHMENT_KEYS) do
+        local state = value[key]
+        if state ~= ATTACHMENT_VISIBILITY.Auto and
+            state ~= ATTACHMENT_VISIBILITY.Hide and
+            state ~= ATTACHMENT_VISIBILITY.Show then
+            return nil, "invalid_attachment_visibility"
+        end
+        result[key] = state
+    end
+    return result
+end
+
+local function copyAttachmentVisibility(value, legacyHideHair)
+    local visibility = validateAttachmentVisibility(value, legacyHideHair)
+    if visibility == nil then return attachmentVisibilityFromLegacy(legacyHideHair) end
+    local copy = {}
+    for _, key in ipairs(ATTACHMENT_KEYS) do copy[key] = visibility[key] end
+    return copy
+end
+
+local function legacyHideHair(value)
+    if Core ~= nil and Core.legacyHideHair ~= nil then return Core.legacyHideHair(value) end
+    local visibility = validateAttachmentVisibility(value, false)
+    return visibility ~= nil and
+        visibility.Hair == ATTACHMENT_VISIBILITY.Hide and
+        visibility.Beard == ATTACHMENT_VISIBILITY.Hide and
+        visibility.Moustache == ATTACHMENT_VISIBILITY.Hide
+end
+
+local function attachmentVisibilityMasks(value)
+    if Core ~= nil and Core.attachmentVisibilityMasks ~= nil then
+        return Core.attachmentVisibilityMasks(value)
+    end
+    local visibility, reason = validateAttachmentVisibility(value, false)
+    if visibility == nil then return nil, nil, reason end
+    local forceHide, forceShow = 0, 0
+    for _, key in ipairs(ATTACHMENT_KEYS) do
+        local bit = ATTACHMENT_BITS[key]
+        if visibility[key] == ATTACHMENT_VISIBILITY.Hide then
+            forceHide = forceHide + bit
+        elseif visibility[key] == ATTACHMENT_VISIBILITY.Show then
+            forceShow = forceShow + bit
+        end
+    end
+    return forceHide, forceShow
+end
+
 local function cloneLook(look)
     if look == nil then return nil end
+    local attachmentVisibility =
+        copyAttachmentVisibility(look.attachmentVisibility, look.hideHair == true)
     local cloned = {
-        schemaVersion = SCHEMA_VERSION,
+        schemaVersion = LOOK_SCHEMA_VERSION,
         captured = look.captured == true,
-        hideHair = look.hideHair == true,
+        hideHair = legacyHideHair(attachmentVisibility),
+        attachmentVisibility = attachmentVisibility,
         slots = {}
     }
     for _, entry in ipairs(slots) do
@@ -271,7 +375,7 @@ local function connectedClients()
 end
 
 -- JSON codec kept local to avoid adding a server-side C# assembly. It accepts
--- standard JSON but the writer emits only the schema-v2 document below.
+-- standard JSON but the writer emits only the persistence-v3 document below.
 local function jsonEscape(value)
     return tostring(value or "")
         :gsub("\\", "\\\\")
@@ -442,11 +546,30 @@ local function atomicWrite(path, contents)
     return true
 end
 
+local function hasOnlyFields(value, allowed)
+    if type(value) ~= "table" then return false end
+    for key in pairs(value) do
+        if allowed[key] ~= true then return false end
+    end
+    return true
+end
+
+local function encodeAttachmentVisibilityJson(visibility)
+    local canonical = copyAttachmentVisibility(visibility, false)
+    local members = {}
+    for _, key in ipairs(ATTACHMENT_KEYS) do
+        members[#members + 1] = '"' .. key .. '":"' .. jsonEscape(canonical[key]) .. '"'
+    end
+    return "{" .. table.concat(members, ",") .. "}"
+end
+
 local function encodeLookJson(look)
     local members = {
-        '"schemaVersion":' .. tostring(SCHEMA_VERSION),
+        '"schemaVersion":' .. tostring(LOOK_SCHEMA_VERSION),
         '"captured":' .. tostring(look ~= nil and look.captured == true),
-        '"hideHair":' .. tostring(look ~= nil and look.hideHair == true)
+        '"attachmentVisibility":' .. encodeAttachmentVisibilityJson(
+            look ~= nil and look.attachmentVisibility or nil
+        )
     }
     local slotMembers = {}
     for _, entry in ipairs(slots) do
@@ -501,7 +624,7 @@ local function encodePersistenceDocument()
         }, ",") .. "}"
     end
     return "{" .. table.concat({
-        '"schemaVersion":' .. tostring(SCHEMA_VERSION),
+        '"schemaVersion":' .. tostring(PERSISTENCE_VERSION),
         '"records":[' .. table.concat(records, ",") .. "]",
         '"pendingLegacySteamRecords":[' .. table.concat(pendingLegacy, ",") .. "]",
         '"migratedLegacySteamIds":[' .. table.concat(migrated, ",") .. "]"
@@ -525,7 +648,13 @@ local function parseLegacyDocument(text)
     for line in tostring(text):gmatch("[^\r\n]+") do
         local identity, sessionKey, active = nil, nil, false
         local sawActive = false
-        local look = { schemaVersion = SCHEMA_VERSION, captured = true, hideHair = false, slots = {} }
+        local look = {
+            schemaVersion = LOOK_SCHEMA_VERSION,
+            captured = true,
+            hideHair = false,
+            attachmentVisibility = attachmentVisibilityFromLegacy(false),
+            slots = {}
+        }
         for part in line:gmatch("[^|]+") do
             local name, value = part:match("^([^=]+)=(.*)$")
             if name == nil then return nil, nil, "malformed_field" end
@@ -562,15 +691,42 @@ local function parseLegacyDocument(text)
     return accountRecords, steamRecords
 end
 
-local function validateStoredLook(raw)
-    if type(raw) ~= "table" or tonumber(raw.schemaVersion) ~= SCHEMA_VERSION or
+local function validateStoredLook(raw, persistenceVersion)
+    if type(raw) ~= "table" or type(raw.schemaVersion) ~= "number" or
+        raw.schemaVersion ~= LOOK_SCHEMA_VERSION or
         raw.captured ~= true or type(raw.slots) ~= "table" then
         return nil
     end
+    local visibility
+    if persistenceVersion == PERSISTENCE_VERSION then
+        if not hasOnlyFields(raw, {
+            schemaVersion = true,
+            captured = true,
+            attachmentVisibility = true,
+            slots = true
+        }) or raw.hideHair ~= nil or type(raw.attachmentVisibility) ~= "table" then
+            return nil
+        end
+        visibility = validateAttachmentVisibility(raw.attachmentVisibility, false)
+    elseif persistenceVersion == 2 then
+        if not hasOnlyFields(raw, {
+            schemaVersion = true,
+            captured = true,
+            hideHair = true,
+            slots = true
+        }) or type(raw.hideHair) ~= "boolean" then
+            return nil
+        end
+        visibility = attachmentVisibilityFromLegacy(raw.hideHair == true)
+    else
+        return nil
+    end
+    if visibility == nil then return nil end
     local look = {
-        schemaVersion = SCHEMA_VERSION,
+        schemaVersion = LOOK_SCHEMA_VERSION,
         captured = raw.captured == true,
-        hideHair = raw.hideHair == true,
+        hideHair = legacyHideHair(visibility),
+        attachmentVisibility = visibility,
         slots = {}
     }
     local count = 0
@@ -592,9 +748,24 @@ local function quarantine(path, reason)
     warn("Quarantined invalid wardrobe persistence" .. (moved and " to " .. destination or "") .. ": " .. tostring(reason))
 end
 
-local function decodeStoredRecord(raw)
-    local look = type(raw) == "table" and validateStoredLook(raw.look) or nil
-    local revision = type(raw) == "table" and tonumber(raw.revision) or nil
+local function decodeStoredRecord(raw, persistenceVersion, identityField)
+    if type(raw) ~= "table" or not hasOnlyFields(raw, {
+        [identityField] = true,
+        revision = true,
+        active = true,
+        sessionKey = true,
+        look = true
+    }) then
+        return nil
+    end
+    if type(raw[identityField]) ~= "string" or
+        type(raw.active) ~= "boolean" or
+        type(raw.revision) ~= "number" or
+        (raw.sessionKey ~= nil and type(raw.sessionKey) ~= "string") then
+        return nil
+    end
+    local look = validateStoredLook(raw.look, persistenceVersion)
+    local revision = raw.revision
     if look == nil or revision == nil or revision < 0 or revision > 4294967295 or revision % 1 ~= 0 then
         return nil
     end
@@ -610,14 +781,27 @@ local function loadJsonPersistence(path)
     local text = readAllText(path)
     if text == nil then return false end
     local ok, document = pcall(decodeJson, text)
-    if not ok or type(document) ~= "table" or tonumber(document.schemaVersion) ~= SCHEMA_VERSION or type(document.records) ~= "table" then
+    local documentVersion =
+        ok and type(document) == "table" and type(document.schemaVersion) == "number" and
+        document.schemaVersion or nil
+    if not ok or
+        (documentVersion ~= PERSISTENCE_VERSION and documentVersion ~= 2) or
+        type(document.records) ~= "table" or
+        type(document.pendingLegacySteamRecords) ~= "table" or
+        type(document.migratedLegacySteamIds) ~= "table" or
+        not hasOnlyFields(document, {
+            schemaVersion = true,
+            records = true,
+            pendingLegacySteamRecords = true,
+            migratedLegacySteamIds = true
+        }) then
         quarantine(path, ok and "invalid_schema" or document)
         return false
     end
     local loaded = {}
     for _, raw in ipairs(document.records) do
         local accountId = type(raw) == "table" and trim(raw.accountId) or nil
-        local record = decodeStoredRecord(raw)
+        local record = decodeStoredRecord(raw, documentVersion, "accountId")
         if accountId == nil or loaded[accountId] ~= nil or record == nil then
             quarantine(path, "invalid_record")
             return false
@@ -630,6 +814,10 @@ local function loadJsonPersistence(path)
     end
     local loadedMigrated = {}
     for _, steamId in ipairs(document.migratedLegacySteamIds or {}) do
+        if type(steamId) ~= "string" then
+            quarantine(path, "invalid_migrated_legacy_id")
+            return false
+        end
         steamId = trim(steamId)
         if steamId == nil or loadedMigrated[steamId] then
             quarantine(path, "invalid_migrated_legacy_id")
@@ -644,7 +832,7 @@ local function loadJsonPersistence(path)
     end
     for _, raw in ipairs(document.pendingLegacySteamRecords or {}) do
         local steamId = type(raw) == "table" and trim(raw.steamId) or nil
-        local record = decodeStoredRecord(raw)
+        local record = decodeStoredRecord(raw, documentVersion, "steamId")
         if steamId == nil or pendingLegacy[steamId] ~= nil or record == nil then
             quarantine(path, "invalid_pending_legacy_record")
             return false
@@ -654,6 +842,22 @@ local function loadJsonPersistence(path)
     persistentRecords = loaded
     migratedLegacySteamIds = loadedMigrated
     legacySteamRecords = pendingLegacy
+    if documentVersion == 2 then
+        local backupPath = path .. ".v2.bak"
+        local backedUp = File ~= nil and pcall(function()
+            if File.Exists(backupPath) then File.Delete(backupPath) end
+            File.Copy(path, backupPath, true)
+        end)
+        if not backedUp then
+            warn("Could not preserve ServerLooks.json.v2.bak; leaving the valid v2 file unchanged.")
+            return true
+        end
+        if persistLooks() then
+            log("Migrated server wardrobe persistence from v2 to v3.")
+        else
+            warn("Could not persist migrated server wardrobe v3; the v2 source remains available for retry.")
+        end
+    end
     return true
 end
 
@@ -690,7 +894,7 @@ local function loadPersistence()
     local loadedJson = primaryExists and loadJsonPersistence(jsonPath)
     if primaryExists and not loadedJson then
         -- The primary was present but unreadable/invalid and has been quarantined.
-        -- Persist an empty v2 tombstone so a later restart cannot silently import
+        -- Persist an empty current-version tombstone so a later restart cannot silently import
         -- an older legacy source after the corrupt primary has been moved away.
         -- If even that write fails, retire the legacy sources as migration evidence
         -- rather than leaving data that could be auto-applied on the next startup.
@@ -707,7 +911,7 @@ local function loadPersistence()
         end
     end
     -- A .v1.bak file is migration evidence only. Never import it automatically:
-    -- doing so after Forget, a missing v2 file, or corrupt-v2 quarantine could
+    -- doing so after Forget, a missing current file, or corrupt-primary quarantine could
     -- resurrect state that the user explicitly deleted.
     -- Very old builds used a process-relative file. It is imported once only.
     if not loadedJson and fileExists("PersistentLooks.txt") and loadLegacyPersistence("PersistentLooks.txt") then
@@ -866,14 +1070,18 @@ local function canonicalSlot(identifier, slotKey)
 end
 
 local function canonicalizeLook(raw, requireCaptured)
-    if type(raw) ~= "table" or tonumber(raw.schemaVersion) ~= SCHEMA_VERSION or type(raw.slots) ~= "table" then
+    if type(raw) ~= "table" or tonumber(raw.schemaVersion) ~= LOOK_SCHEMA_VERSION or type(raw.slots) ~= "table" then
         return nil, "invalid_look_schema"
     end
     if requireCaptured and raw.captured ~= true then return nil, "look_not_captured" end
+    local attachmentVisibility, visibilityReason =
+        validateAttachmentVisibility(raw.attachmentVisibility, raw.hideHair == true)
+    if attachmentVisibility == nil then return nil, visibilityReason end
     local canonical = {
-        schemaVersion = SCHEMA_VERSION,
+        schemaVersion = LOOK_SCHEMA_VERSION,
         captured = raw.captured == true,
-        hideHair = raw.hideHair == true,
+        hideHair = legacyHideHair(attachmentVisibility),
+        attachmentVisibility = attachmentVisibility,
         slots = {}
     }
     local count, payloadBytes = 0, 16
@@ -894,10 +1102,16 @@ end
 
 local function captureAuthoritativeLook(character, clientLook)
     if character == nil then return nil, "character_unavailable" end
+    local attachmentVisibility, visibilityReason = validateAttachmentVisibility(
+        type(clientLook) == "table" and clientLook.attachmentVisibility or nil,
+        type(clientLook) == "table" and clientLook.hideHair == true
+    )
+    if attachmentVisibility == nil then return nil, visibilityReason end
     local raw = {
-        schemaVersion = SCHEMA_VERSION,
+        schemaVersion = LOOK_SCHEMA_VERSION,
         captured = true,
-        hideHair = type(clientLook) == "table" and clientLook.hideHair == true,
+        hideHair = legacyHideHair(attachmentVisibility),
+        attachmentVisibility = attachmentVisibility,
         slots = {}
     }
     for _, entry in ipairs(slots) do
@@ -925,6 +1139,7 @@ local function readCoreLook(message)
         schemaVersion = tonumber(message.ReadUInt16()),
         captured = message.ReadBoolean() == true,
         hideHair = message.ReadBoolean() == true,
+        attachmentVisibility = nil,
         slots = {}
     }
     local count = tonumber(message.ReadUInt16()) or 0
@@ -939,10 +1154,15 @@ local function readCoreLook(message)
 end
 
 local function writeCoreLook(message, look)
+    local attachmentVisibility = copyAttachmentVisibility(
+        look ~= nil and look.attachmentVisibility or nil,
+        look ~= nil and look.hideHair == true
+    )
     local wireLook = {
-        schemaVersion = SCHEMA_VERSION,
+        schemaVersion = LOOK_SCHEMA_VERSION,
         captured = look ~= nil and look.captured == true,
-        hideHair = look ~= nil and look.hideHair == true,
+        hideHair = legacyHideHair(attachmentVisibility),
+        attachmentVisibility = attachmentVisibility,
         slots = {}
     }
     for _, entry in ipairs(slots) do
@@ -951,7 +1171,7 @@ local function writeCoreLook(message, look)
     end
     if Core ~= nil and Core.writeLook ~= nil then Core.writeLook(message, wireLook) return end
     if Core ~= nil and Core.WriteLook ~= nil then Core.WriteLook(message, wireLook) return end
-    message.WriteUInt16(SCHEMA_VERSION)
+    message.WriteUInt16(LOOK_SCHEMA_VERSION)
     message.WriteBoolean(wireLook.captured)
     message.WriteBoolean(wireLook.hideHair)
     local count = 0
@@ -960,6 +1180,13 @@ local function writeCoreLook(message, look)
     for _, entry in ipairs(slots) do
         local identifier = wireLook.slots[entry.key]
         if identifier ~= nil then message.WriteString(entry.key) message.WriteString(identifier) end
+    end
+    if SUPPORTS_ATTACHMENT_VISIBILITY then
+        local forceHide, forceShow = attachmentVisibilityMasks(wireLook.attachmentVisibility)
+        message.WriteByte(0x57)
+        message.WriteByte(1)
+        message.WriteByte(forceHide)
+        message.WriteByte(forceShow)
     end
 end
 
@@ -1334,6 +1561,40 @@ local function commitApply(session, character, look)
     return true, "ok"
 end
 
+local function commitVisibility(session, requestedLook)
+    if not canAdvanceRevision(session) then return false, "revision_exhausted" end
+    if session.savedLook == nil then return false, "look_unavailable" end
+    if type(requestedLook) ~= "table" then return false, "visibility_unavailable" end
+    local attachmentVisibility, visibilityReason =
+        validateAttachmentVisibility(requestedLook.attachmentVisibility, requestedLook.hideHair == true)
+    if attachmentVisibility == nil then return false, visibilityReason or "invalid_attachment_visibility" end
+
+    -- Only merge the visibility policy into the authoritative server capture.
+    -- Client-supplied slots are deliberately ignored so this command cannot be
+    -- used to replace or smuggle equipment identifiers.
+    local merged = cloneLook(session.savedLook)
+    merged.attachmentVisibility = copyAttachmentVisibility(attachmentVisibility, false)
+    merged.hideHair = legacyHideHair(merged.attachmentVisibility)
+
+    local previous = snapshotCommitState(session)
+    nextRevision(session)
+    session.savedLook = merged
+    if not persistStableSessionOrRollback(session, previous) then return false, "persistence_failed" end
+
+    local characterId = tonumber(session.activeCharacterId)
+    if session.active == true and characterId ~= nil and characterId > 0 then
+        activeByCharacterId[characterId] = {
+            session = session,
+            revision = session.revision,
+            look = cloneLook(merged)
+        }
+        broadcastState(session.revision, characterId, true, merged)
+    else
+        sendOwnInactiveState(session)
+    end
+    return true, "ok"
+end
+
 local function commitClear(session, deleteSaved)
     if not canAdvanceRevision(session) then return false, "revision_exhausted" end
     local previous = snapshotCommitState(session)
@@ -1366,7 +1627,15 @@ local function parseV2Command(message)
     return command
 end
 
-local validCommandKinds = { save = true, apply = true, clear = true, forget = true }
+local validCommandKinds = {
+    save = true,
+    apply = true,
+    clear = true,
+    forget = true
+}
+if SUPPORTS_ATTACHMENT_VISIBILITY then
+    validCommandKinds[COMMAND_VISIBILITY] = true
+end
 
 local function validateV2Envelope(command)
     if type(command) ~= "table" or command.version ~= PROTOCOL_VERSION then return false, "unsupported_protocol" end
@@ -1382,6 +1651,7 @@ local function validateV2Envelope(command)
     local envelopeBytes = 16 + byteLength(command.clientSessionId) + byteLength(command.operationId) + byteLength(command.kind)
     if envelopeBytes > MAX_PAYLOAD_BYTES then return false, "payload_too_large" end
     if (command.kind == "clear" or command.kind == "forget") and command.hasLook then return false, "unexpected_look" end
+    if command.kind == COMMAND_VISIBILITY and not command.hasLook then return false, "missing_look" end
     return true
 end
 
@@ -1412,12 +1682,23 @@ Networking.Receive(NET.V2_HELLO, function(message, client)
     session.protocol = 2
     bindOperationCache(session, clientSessionId)
     local response = Networking.Start(NET.V2_HELLO)
+    local advertisedCapabilities =
+        SUPPORTS_ATTACHMENT_VISIBILITY and CAPABILITY_ATTACHMENT_VISIBILITY or 0
     if Core ~= nil and Core.writeServerHello ~= nil then
-        local written, writeReason = Core.writeServerHello(response, math.max(0, session.revision))
+        local written, writeReason = Core.writeServerHello(
+            response,
+            math.max(0, session.revision),
+            advertisedCapabilities
+        )
         if not written then warn("Could not encode v2 hello response: " .. tostring(writeReason)) return end
     else
         response.WriteUInt16(PROTOCOL_VERSION)
         response.WriteUInt32(math.max(0, session.revision))
+        if advertisedCapabilities ~= 0 then
+            response.WriteByte(0x57)
+            response.WriteByte(1)
+            response.WriteByte(advertisedCapabilities)
+        end
     end
     Networking.Send(response, client.Connection)
     sendActiveSnapshot(client)
@@ -1467,6 +1748,8 @@ Networking.Receive(NET.V2_COMMAND, function(message, client)
         if command.hasLook then look, reason = canonicalizeLook(command.look, true) else look = cloneLook(session.savedLook) end
         if character ~= nil and look ~= nil then accepted, reason = commitApply(session, character, look)
         elseif look == nil and reason == nil then reason = "look_unavailable" end
+    elseif command.kind == COMMAND_VISIBILITY then
+        accepted, reason = commitVisibility(session, command.look)
     elseif command.kind == "clear" then
         accepted, reason = commitClear(session, false)
     elseif command.kind == "forget" then
@@ -1480,7 +1763,13 @@ local function readLegacyApplyLook(message)
     local ok, supplied, look, payloadBytes = pcall(function()
         local hasLook = message.ReadBoolean() == true
         if not hasLook then return false, nil, 1 end
-        local raw = { schemaVersion = SCHEMA_VERSION, captured = true, hideHair = false, slots = {} }
+        local raw = {
+            schemaVersion = LOOK_SCHEMA_VERSION,
+            captured = true,
+            hideHair = false,
+            attachmentVisibility = attachmentVisibilityFromLegacy(false),
+            slots = {}
+        }
         local bytes = 1
         for _, entry in ipairs(slots) do
             if message.ReadBoolean() then
@@ -1657,4 +1946,5 @@ end)
 
 loadPersistence()
 lastGameSessionKey = currentGameSessionKey()
-log("Server authority v0.5.0 loaded (protocol 2, persistence 2). Path: " .. tostring(storagePath("ServerLooks.json")))
+log("Server authority v0.5.1 loaded (protocol 2, look schema 2, persistence 3). Path: " ..
+    tostring(storagePath("ServerLooks.json")))

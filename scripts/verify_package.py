@@ -15,9 +15,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ERRORS: list[str] = []
 EXPECTED_METADATA = {
-    "modVersion": "0.5.0",
+    "modVersion": "0.5.1",
     "protocolVersion": 2,
-    "persistenceVersion": 2,
+    "lookSchemaVersion": 2,
+    "persistenceVersion": 3,
     "barotraumaGameVersion": "1.13.4.0",
     "barotraumaSourceCommit": "a589d2cee3ff2214c99a7ea30c46f16a5406a01d",
     "luaCsCommit": "0d380afcd1feeb842c0c86290d46bcaf198cd5e4",
@@ -156,7 +157,7 @@ def main() -> int:
         mod_version = re.search(r'MOD_VERSION\s*=\s*"([^"]+)"', core)
         if protocol is None or int(protocol.group(1)) != version["protocolVersion"]:
             fail("WardrobeCore.lua protocol version does not match version.json")
-        if schema is None or int(schema.group(1)) != version["persistenceVersion"]:
+        if schema is None or int(schema.group(1)) != version["lookSchemaVersion"]:
             fail("WardrobeCore.lua look schema version does not match version.json")
         if persistence is None or int(persistence.group(1)) != version["persistenceVersion"]:
             fail("WardrobeCore.lua persistence version does not match version.json")

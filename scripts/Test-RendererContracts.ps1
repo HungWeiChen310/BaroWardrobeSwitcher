@@ -140,6 +140,57 @@ Assert-Contains $renderer "return session.Validate(out _);" `
     "Invalid renderer sessions must never be reused."
 Write-Host "PASS committed-session-reuse"
 
+# Attachment visibility is an independent draw-time policy. Force-show must win
+# over force-hide, which in turn wins over the appearance item's XML auto mask.
+Assert-Contains $renderer "public static bool SetAttachmentVisibility(" `
+    "LuaCs must expose the four-layer attachment visibility API."
+Assert-Contains $renderer "(forceHideMask & ~AttachmentVisibilityMask) != 0" `
+    "Attachment visibility must reject unknown hide-mask bits."
+Assert-Contains $renderer "(forceShowMask & ~AttachmentVisibilityMask) != 0" `
+    "Attachment visibility must reject unknown show-mask bits."
+Assert-Contains $renderer "(forceHideMask & forceShowMask) != 0" `
+    "Attachment visibility must reject overlapping force-hide/show masks."
+Assert-Contains $renderer "public static bool SetHideHair(Character character, bool hideHair)" `
+    "The legacy SetHideHair LuaCs wrapper must remain available."
+
+$visibilitySetterStart = $renderer.IndexOf(
+    "public static bool SetAttachmentVisibility(",
+    [StringComparison]::Ordinal)
+$visibilitySetterEnd = $renderer.IndexOf(
+    "public static bool ApplyFashionItemVisual(",
+    [StringComparison]::Ordinal)
+if ($visibilitySetterStart -lt 0 -or $visibilitySetterEnd -le $visibilitySetterStart) {
+    throw "Could not isolate attachment visibility setter."
+}
+$visibilitySetter = $renderer.Substring(
+    $visibilitySetterStart,
+    $visibilitySetterEnd - $visibilitySetterStart)
+Assert-NotContains $visibilitySetter "RefreshWearables(" `
+    "Changing attachment visibility must not call Character.OnWearablesChanged()."
+Assert-NotContains $visibilitySetter "OnWearablesChanged" `
+    "Changing attachment visibility must not invoke the wearable rebuild path."
+
+$hideAttachmentStart = $renderer.IndexOf(
+    "private static bool ShouldHideAttachmentForFashion(",
+    [StringComparison]::Ordinal)
+$hideAttachmentEnd = $renderer.IndexOf(
+    "private static string DescribeFashionHiddenTypes(",
+    [StringComparison]::Ordinal)
+if ($hideAttachmentStart -lt 0 -or $hideAttachmentEnd -le $hideAttachmentStart) {
+    throw "Could not isolate attachment visibility draw policy."
+}
+$hideAttachmentPolicy = $renderer.Substring(
+    $hideAttachmentStart,
+    $hideAttachmentEnd - $hideAttachmentStart)
+Assert-Before $hideAttachmentPolicy "session.ForceShowAttachmentMask" "session.ForceHideAttachmentMask" `
+    "Force-show must be evaluated before force-hide."
+Assert-Before $hideAttachmentPolicy "session.ForceHideAttachmentMask" "session.HiddenWearableTypes.Contains" `
+    "Force-hide must be evaluated before the appearance item's XML auto mask."
+foreach ($layer in @("WearableType.Hair", "WearableType.Beard", "WearableType.Moustache", "WearableType.FaceAttachment")) {
+    Assert-Contains $renderer $layer "Attachment visibility mapping is missing $layer."
+}
+Write-Host "PASS attachment-visibility-priority"
+
 # Functional alarms (oxygen low/empty, required-item failures, other conditional
 # equipment warnings) must remain attached to the real item. Replaying them from a
 # cosmetic session caused alarms to outlive unequip; suppressing them hid the alarm.
