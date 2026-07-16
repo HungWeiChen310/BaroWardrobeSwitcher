@@ -106,19 +106,33 @@ LuaCsLogger = { Log = function() end, LogError = function() end }
 
 local function newBuffer(name)
     local values, readIndex = {}, 1
-    local buffer = { name = name }
-    local function write(kind, value) values[#values + 1] = { kind = kind, value = value } end
+    local buffer = { name = name, LengthBits = 0, BitPosition = 0 }
+    local function bitLength(kind, value)
+        if kind == "u16" then return 16 end
+        if kind == "u32" then return 32 end
+        if kind == "byte" then return 8 end
+        if kind == "bool" then return 1 end
+        if kind == "string" then return 16 + #(tostring(value or "")) * 8 end
+        return 0
+    end
+    local function write(kind, value)
+        values[#values + 1] = { kind = kind, value = value }
+        buffer.LengthBits = buffer.LengthBits + bitLength(kind, value)
+    end
     local function read(kind)
         local entry = values[readIndex]
         assert(entry ~= nil, "read beyond test buffer")
         assert(entry.kind == kind, "expected " .. kind .. ", got " .. tostring(entry.kind))
         readIndex = readIndex + 1
+        buffer.BitPosition = buffer.BitPosition + bitLength(kind, entry.value)
         return entry.value
     end
     buffer.WriteUInt16 = function(value) write("u16", value) end
     buffer.ReadUInt16 = function() return read("u16") end
     buffer.WriteUInt32 = function(value) write("u32", value) end
     buffer.ReadUInt32 = function() return read("u32") end
+    buffer.WriteByte = function(value) write("byte", value) end
+    buffer.ReadByte = function() return read("byte") end
     buffer.WriteBoolean = function(value) write("bool", value) end
     buffer.ReadBoolean = function() return read("bool") end
     buffer.WriteString = function(value) write("string", value) end
@@ -163,6 +177,17 @@ local function sendCommand(command, targetClient)
     local sent = Networking.sent[#Networking.sent]
     assert(sent.message.name == Core.NET.V2_ACK)
     return assert(Core.readAck(sent.message))
+end
+
+local function lastSentMessage(name, connection)
+    for index = #Networking.sent, 1, -1 do
+        local sent = Networking.sent[index]
+        if sent.message.name == name and
+            (connection == nil or sent.connection == connection) then
+            return sent.message
+        end
+    end
+    return nil
 end
 
 local clear = {
@@ -313,6 +338,121 @@ local afterDowngradeAttempt = sendCommand({
 assert(afterDowngradeAttempt.accepted and afterDowngradeAttempt.revision == 7,
     "ignored v1 downgrade must not mutate the v2 session revision")
 
+local visibilityClient = {
+    Connection = {},
+    Character = { ID = 74, Name = "Visibility" }
+}
+connectedClients[#connectedClients + 1] = visibilityClient
+local visibilityHello = newBuffer()
+assert(Core.writeClientHello(visibilityHello, "visibility-session"))
+Networking.handlers[Core.NET.V2_HELLO](visibilityHello, visibilityClient)
+local visibilityServerHello =
+    assert(Core.readServerHello(lastSentMessage(Core.NET.V2_HELLO, visibilityClient.Connection)))
+assert(visibilityServerHello.capabilities == Core.CAPABILITY.AttachmentVisibility,
+    "new server hello must advertise full attachment visibility synchronization")
+
+local visibilityApply = sendCommand({
+    clientSessionId = "visibility-session",
+    operationId = "visibility-apply",
+    baseRevision = 0,
+    kind = Core.COMMAND.Apply,
+    look = assert(Core.newLook(true, false, { Head = "helmet" }))
+}, visibilityClient)
+assert(visibilityApply.accepted and visibilityApply.revision == 1)
+
+local requestedVisibility = {
+    Hair = "show",
+    Beard = "hide",
+    Moustache = "auto",
+    FaceAttachment = "show"
+}
+local visibilityAck = sendCommand({
+    clientSessionId = "visibility-session",
+    operationId = "visibility-active-update",
+    baseRevision = 1,
+    kind = Core.COMMAND.Visibility,
+    -- This identifier is intentionally invalid. The visibility command must
+    -- ignore all client-supplied equipment slots and merge only the four-layer policy.
+    look = assert(Core.newLook(true, false, { Head = "not-a-real-prefab" }, requestedVisibility))
+}, visibilityClient)
+assert(visibilityAck.accepted and visibilityAck.revision == 2)
+local activeVisibilityState = assert(Core.readState(
+    lastSentMessage(Core.NET.V2_STATE, visibilityClient.Connection)))
+assert(activeVisibilityState.active and
+       activeVisibilityState.look.slots.Head == "helmet" and
+       activeVisibilityState.look.attachmentVisibility.Hair == "show" and
+       activeVisibilityState.look.attachmentVisibility.Beard == "hide" and
+       activeVisibilityState.look.attachmentVisibility.FaceAttachment == "show",
+    "visibility command must retain authoritative slots and broadcast the merged active policy")
+
+local visibilityClear = sendCommand({
+    clientSessionId = "visibility-session",
+    operationId = "visibility-clear",
+    baseRevision = 2,
+    kind = Core.COMMAND.Clear
+}, visibilityClient)
+assert(visibilityClear.accepted and visibilityClear.revision == 3)
+local inactiveVisibilityAck = sendCommand({
+    clientSessionId = "visibility-session",
+    operationId = "visibility-inactive-update",
+    baseRevision = 3,
+    kind = Core.COMMAND.Visibility,
+    look = assert(Core.newLook(
+        true,
+        false,
+        { Head = "also-not-authoritative" },
+        Core.attachmentVisibilityFromLegacy(false)
+    ))
+}, visibilityClient)
+assert(inactiveVisibilityAck.accepted and inactiveVisibilityAck.revision == 4)
+local inactiveVisibilityState = assert(Core.readState(
+    lastSentMessage(Core.NET.V2_STATE, visibilityClient.Connection)))
+assert(not inactiveVisibilityState.active and
+       inactiveVisibilityState.look.slots.Head == "helmet" and
+       inactiveVisibilityState.look.attachmentVisibility.Hair == "auto",
+    "inactive visibility command must return the updated authoritative saved look")
+
+local overlappingVisibility = newBuffer()
+overlappingVisibility.WriteUInt16(Core.PROTOCOL_VERSION)
+overlappingVisibility.WriteString("visibility-session")
+overlappingVisibility.WriteString("visibility-overlap")
+overlappingVisibility.WriteUInt32(4)
+overlappingVisibility.WriteString(Core.COMMAND.Visibility)
+overlappingVisibility.WriteBoolean(true)
+overlappingVisibility.WriteUInt16(Core.LOOK_SCHEMA_VERSION)
+overlappingVisibility.WriteBoolean(true)
+overlappingVisibility.WriteBoolean(false)
+overlappingVisibility.WriteUInt16(0)
+overlappingVisibility.WriteByte(Core.LOOK_EXTENSION_MARKER)
+overlappingVisibility.WriteByte(Core.LOOK_EXTENSION_VERSION)
+overlappingVisibility.WriteByte(0x01)
+overlappingVisibility.WriteByte(0x01)
+Networking.handlers[Core.NET.V2_COMMAND](overlappingVisibility, visibilityClient)
+local overlappingVisibilityAck =
+    assert(Core.readAck(Networking.sent[#Networking.sent].message))
+assert(not overlappingVisibilityAck.accepted and
+       overlappingVisibilityAck.reason == "malformed_look" and
+       overlappingVisibilityAck.revision == 4,
+    "overlapping visibility masks must be rejected without changing revision")
+
+local noLookClient = {
+    Connection = {},
+    Character = { ID = 73, Name = "No Look" }
+}
+connectedClients[#connectedClients + 1] = noLookClient
+local noLookHello = newBuffer()
+assert(Core.writeClientHello(noLookHello, "no-look-session"))
+Networking.handlers[Core.NET.V2_HELLO](noLookHello, noLookClient)
+local noLookVisibility = sendCommand({
+    clientSessionId = "no-look-session",
+    operationId = "visibility-without-look",
+    baseRevision = 0,
+    kind = Core.COMMAND.Visibility,
+    look = assert(Core.newLook(true, false, {}, requestedVisibility))
+}, noLookClient)
+assert(not noLookVisibility.accepted and noLookVisibility.reason == "look_unavailable",
+    "visibility command must not create an authoritative look from client-supplied slots")
+
 local limitedClient = { Connection = {}, Character = { ID = 75, Name = "Limited" } }
 connectedClients[#connectedClients + 1] = limitedClient
 local limitedHello = newBuffer()
@@ -361,13 +501,13 @@ Networking.handlers[Core.NET.V1_SAVE_REQUEST](newBuffer(), legacyClient)
 local legacyApply = newBuffer()
 legacyApply.WriteBoolean(false) -- v1 bridge selects the server-stored captured look
 Networking.handlers[Core.NET.V1_APPLY_REQUEST](legacyApply, legacyClient)
-local legacyState = Networking.sent[#Networking.sent].message
+local legacyState = assert(lastSentMessage(Core.NET.V1_LOOK_APPLY, legacyClient.Connection))
 assert(legacyState.name == Core.NET.V1_LOOK_APPLY, "v1 client must receive the original look.apply message")
 assert(legacyState.ReadUInt16() == 77)
 for _ = 1, #Core.SLOT_KEYS do assert(legacyState.ReadBoolean() == false) end
 
 Networking.handlers[Core.NET.V1_CLEAR_REQUEST](newBuffer(), legacyClient)
-local legacyClear = Networking.sent[#Networking.sent].message
+local legacyClear = assert(lastSentMessage(Core.NET.V1_LOOK_CLEAR, legacyClient.Connection))
 assert(legacyClear.name == Core.NET.V1_LOOK_CLEAR and legacyClear.ReadUInt16() == 77,
     "v1 clear must keep its original wire layout")
 
@@ -427,7 +567,10 @@ local stableSave = sendCommand({
 assert(stableSave.accepted and stableSave.revision == 1)
 local serverJsonPath = storageRoot .. "/ServerLooks.json"
 local persistedAfterSave = assert(memoryFiles[serverJsonPath])
-assert(persistedAfterSave:find('"schemaVersion":2', 1, true) ~= nil)
+assert(persistedAfterSave:find('{"schemaVersion":3', 1, true) == 1)
+assert(persistedAfterSave:find('"attachmentVisibility"', 1, true) ~= nil and
+       persistedAfterSave:find('"hideHair"', 1, true) == nil,
+    "server persistence v3 must store the complete visibility policy without authoritative hideHair")
 assert(persistedAfterSave:find('"accountId":"stable-account"', 1, true) ~= nil,
     "stable AccountId must be the persistence key")
 assert(persistedAfterSave:find('"itemId"', 1, true) == nil and persistedAfterSave:find('"name"', 1, true) == nil,
@@ -507,28 +650,64 @@ assert(Core.writeClientHello(reloadedHello, "stable-session-reloaded"))
 Networking.handlers[Core.NET.V2_HELLO](reloadedHello, stableClient)
 local reloadedState = assert(Core.readServerHello(Networking.sent[#Networking.sent].message))
 assert(reloadedState.revision == 0,
-    "a retained v1 backup must not resurrect a forgotten look when valid v2 persistence exists")
+    "a retained v1 backup must not resurrect a forgotten look when valid current persistence exists")
 
 memoryFiles[serverJsonPath] = '{"schemaVersion":2,"records":['
 memoryFiles[storageRoot .. "/ServerLooks.txt"] =
     "key=account:stale-account|active=true|Head=helmet,Stale Helmet\n"
 loadFirst(candidates("Lua/WardrobeSwitcherServer.lua"), false)
 local corruptGuard = assert(memoryFiles[serverJsonPath])
-assert(corruptGuard:find('"schemaVersion":2', 1, true) ~= nil and
+assert(corruptGuard:find('"schemaVersion":3', 1, true) ~= nil and
        corruptGuard:find('"records":[]', 1, true) ~= nil and
        corruptGuard:find("stale-account", 1, true) == nil,
-    "truncated v2 persistence must be replaced with an empty durable tombstone")
+    "truncated persistence must be replaced with an empty durable v3 tombstone")
 assert(memoryFiles[storageRoot .. "/ServerLooks.txt"] ~= nil,
-    "a stale legacy source must not be imported in the same startup as corrupt-v2 quarantine")
+    "a stale legacy source must not be imported in the same startup as corrupt-primary quarantine")
 local quarantinedJson = false
 for path in pairs(memoryFiles) do
     if path:find("ServerLooks.json.", 1, true) and path:sub(-8) == ".corrupt" then quarantinedJson = true end
 end
-assert(quarantinedJson, "truncated v2 persistence must receive a timestamped .corrupt name")
+assert(quarantinedJson, "truncated persistence must receive a timestamped .corrupt name")
 
 loadFirst(candidates("Lua/WardrobeSwitcherServer.lua"), false)
 assert(memoryFiles[serverJsonPath]:find("stale-account", 1, true) == nil,
     "the corruption tombstone must prevent stale legacy import on later restarts")
+
+local function quarantinedPersistenceContains(fragment)
+    for path, contents in pairs(memoryFiles) do
+        if path:find("ServerLooks.json.", 1, true) and
+            path:sub(-8) == ".corrupt" and
+            tostring(contents):find(fragment, 1, true) ~= nil then
+            return true
+        end
+    end
+    return false
+end
+
+memoryFiles[storageRoot .. "/ServerLooks.txt"] = nil
+memoryFiles[serverJsonPath] =
+    '{"schemaVersion":3,"records":[{"accountId":"missing-visibility-account",' ..
+    '"revision":1,"active":false,"sessionKey":null,"look":{"schemaVersion":2,' ..
+    '"captured":true,"slots":{"Head":"helmet"}}}],"pendingLegacySteamRecords":[],' ..
+    '"migratedLegacySteamIds":[]}'
+loadFirst(candidates("Lua/WardrobeSwitcherServer.lua"), false)
+assert(memoryFiles[serverJsonPath]:find('"records":[]', 1, true) ~= nil and
+       memoryFiles[serverJsonPath]:find("missing-visibility-account", 1, true) == nil,
+    "server persistence v3 without attachmentVisibility must be quarantined")
+assert(quarantinedPersistenceContains("missing-visibility-account"),
+    "missing v3 attachmentVisibility did not preserve quarantine evidence")
+
+memoryFiles[serverJsonPath] =
+    '{"schemaVersion":2,"records":[{"accountId":"missing-hidehair-account",' ..
+    '"revision":1,"active":false,"sessionKey":null,"look":{"schemaVersion":2,' ..
+    '"captured":true,"slots":{"Head":"helmet"}}}],"pendingLegacySteamRecords":[],' ..
+    '"migratedLegacySteamIds":[]}'
+loadFirst(candidates("Lua/WardrobeSwitcherServer.lua"), false)
+assert(memoryFiles[serverJsonPath]:find('"records":[]', 1, true) ~= nil and
+       memoryFiles[serverJsonPath]:find("missing-hidehair-account", 1, true) == nil,
+    "noncanonical server persistence v2 without hideHair must be quarantined")
+assert(quarantinedPersistenceContains("missing-hidehair-account"),
+    "missing v2 hideHair did not preserve quarantine evidence")
 
 memoryFiles[serverJsonPath] = nil
 memoryFiles[storageRoot .. "/ServerLooks.txt"] =
@@ -548,7 +727,7 @@ loadFirst(candidates("Lua/WardrobeSwitcherServer.lua"), false)
 local pendingMigrationJson = assert(memoryFiles[serverJsonPath])
 assert(pendingMigrationJson:find('"pendingLegacySteamRecords"', 1, true) ~= nil and
        pendingMigrationJson:find('"steamId":"123"', 1, true) ~= nil,
-    "unmapped legacy Steam records must survive the first v2 rewrite")
+    "unmapped legacy Steam records must survive the first v3 rewrite")
 
 loadFirst(candidates("Lua/WardrobeSwitcherServer.lua"), false)
 local migratedAccount = { StringRepresentation = "migrated-account" }
@@ -589,6 +768,11 @@ memoryFiles[serverJsonPath] =
     '"hideHair":false,"slots":{"Head":"helmet"}}}],"pendingLegacySteamRecords":[],' ..
     '"migratedLegacySteamIds":[]}'
 loadFirst(candidates("Lua/WardrobeSwitcherServer.lua"), false)
+assert(memoryFiles[serverJsonPath]:find('"schemaVersion":3', 1, true) ~= nil and
+       memoryFiles[serverJsonPath]:find('"attachmentVisibility"', 1, true) ~= nil,
+    "valid server persistence v2 must migrate to v3")
+assert(memoryFiles[serverJsonPath .. ".v2.bak"] ~= nil,
+    "server persistence v2 migration must preserve a .v2.bak source")
 local maxAccount = { StringRepresentation = "max-account" }
 local maxClient = {
     Connection = {},

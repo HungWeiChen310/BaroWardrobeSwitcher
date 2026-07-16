@@ -113,6 +113,25 @@ void RequireProperty(string label, Type declaringType, string name)
     }
 }
 
+void RequirePublicProperty(
+    string label,
+    Type declaringType,
+    string name,
+    Type? propertyType = null)
+{
+    PropertyInfo? property = declaringType.GetProperty(name, AllMembers);
+    if (property?.GetMethod is null ||
+        !property.GetMethod.IsPublic ||
+        propertyType is not null && property.PropertyType != propertyType)
+    {
+        failures.Add($"public property mismatch: {label}");
+    }
+    else
+    {
+        Console.WriteLine($"PASS {label}");
+    }
+}
+
 void RequireReadWriteProperty(string label, Type declaringType, string name)
 {
     PropertyInfo? property = declaringType.GetProperty(name, AllMembers);
@@ -122,6 +141,19 @@ void RequireReadWriteProperty(string label, Type declaringType, string name)
         !property.SetMethod.IsPublic)
     {
         failures.Add($"read/write property missing: {label}");
+    }
+    else
+    {
+        Console.WriteLine($"PASS {label}");
+    }
+}
+
+void RequirePublicStaticField(string label, Type declaringType, string name)
+{
+    FieldInfo? field = declaringType.GetField(name, AllMembers);
+    if (field is null || !field.IsPublic || !field.IsStatic)
+    {
+        failures.Add($"public static field mismatch: {label}");
     }
     else
     {
@@ -146,6 +178,21 @@ void RequirePublicField(string label, Type declaringType, string name, Type fiel
     FieldInfo? field = declaringType.GetField(name, AllMembers);
     if (field is null || !field.IsPublic || field.FieldType != fieldType)
     {
+        failures.Add(
+            $"public field mismatch: {label} " +
+            $"(actual={field?.FieldType.FullName ?? "missing"}, public={field?.IsPublic.ToString() ?? "n/a"})");
+    }
+    else
+    {
+        Console.WriteLine($"PASS {label}");
+    }
+}
+
+void RequireAnyPublicField(string label, Type declaringType, string name)
+{
+    FieldInfo? field = declaringType.GetField(name, AllMembers);
+    if (field is null || !field.IsPublic)
+    {
         failures.Add($"public field mismatch: {label}");
     }
     else
@@ -159,6 +206,7 @@ Type camera = RequireType("Barotrauma.Camera");
 Type wearableSprite = RequireType("Barotrauma.WearableSprite");
 Type sprite = RequireType("Barotrauma.Sprite");
 Type character = RequireType("Barotrauma.Character");
+Type characterInfo = RequireType("Barotrauma.CharacterInfo");
 Type animController = RequireType("Barotrauma.AnimController");
 Type statusEffect = RequireType("Barotrauma.StatusEffect");
 Type animLoadInfo = RequireType("Barotrauma.StatusEffect+AnimLoadInfo");
@@ -177,6 +225,16 @@ Type spriteBatch = RequireExternalType(monoGameFile, "Microsoft.Xna.Framework.Gr
 Type color = RequireExternalType("XNATypes.dll", "Microsoft.Xna.Framework.Color");
 Type vector2 = RequireExternalType("XNATypes.dll", "Microsoft.Xna.Framework.Vector2");
 Type spriteEffects = spriteBatch.Assembly.GetType("Microsoft.Xna.Framework.Graphics.SpriteEffects", throwOnError: true)!;
+
+RequirePublicProperty("Character.Info", character, "Info", characterInfo);
+RequirePublicStaticField("Character.CharacterList", character, "CharacterList");
+RequirePublicProperty("Character.IsBot", character, "IsBot", typeof(bool));
+RequirePublicProperty("Character.IsHuman", character, "IsHuman", typeof(bool));
+RequirePublicProperty("Character.IsOnPlayerTeam", character, "IsOnPlayerTeam", typeof(bool));
+RequireAnyPublicField("CharacterInfo.ID", characterInfo, "ID");
+RequirePublicProperty("CharacterInfo.OriginalName", characterInfo, "OriginalName");
+RequirePublicProperty("CharacterInfo.SpeciesName", characterInfo, "SpeciesName");
+RequireAnyPublicField("CharacterInfo.HumanPrefabIds", characterInfo, "HumanPrefabIds");
 
 RequireMethod("Limb.Draw(SpriteBatch,Camera,Color?,bool)", limb, "Draw",
     new[] { spriteBatch, camera, typeof(Nullable<>).MakeGenericType(color), typeof(bool) }, typeof(void));
@@ -233,18 +291,36 @@ RequirePublicField("Sprite.effects", sprite, "effects", spriteEffects);
 
 Type? readMessage = game.GetType("Barotrauma.Networking.IReadMessage", throwOnError: false) ??
                     gameCore?.GetType("Barotrauma.Networking.IReadMessage", throwOnError: false);
+Type? writeMessage = game.GetType("Barotrauma.Networking.IWriteMessage", throwOnError: false) ??
+                     gameCore?.GetType("Barotrauma.Networking.IWriteMessage", throwOnError: false);
 if (readMessage is null)
 {
     failures.Add("type missing: Barotrauma.Networking.IReadMessage");
 }
-else if (readMessage.GetProperty("LengthBytes", AllMembers) is null &&
-         readMessage.GetProperty("LengthBits", AllMembers) is null)
+else if (!(
+             readMessage.GetProperty("LengthBits", AllMembers) is not null &&
+             readMessage.GetProperty("BitPosition", AllMembers) is not null
+         ) &&
+         !(
+             readMessage.GetProperty("LengthBytes", AllMembers) is not null &&
+             readMessage.GetProperty("BytePosition", AllMembers) is not null
+         ))
 {
-    failures.Add("IReadMessage has neither LengthBytes nor LengthBits for the 4 KiB wire gate");
+    failures.Add("IReadMessage has neither a bit-position nor byte-position remaining-length contract");
 }
 else
 {
     Console.WriteLine("PASS IReadMessage wire-length contract");
+    RequireMethod("IReadMessage.ReadByte()", readMessage, "ReadByte", Array.Empty<Type>(), typeof(byte));
+}
+if (writeMessage is null)
+{
+    failures.Add("type missing: Barotrauma.Networking.IWriteMessage");
+}
+else
+{
+    RequireMethod("IWriteMessage.WriteByte(byte)", writeMessage, "WriteByte",
+        new[] { typeof(byte) }, typeof(void));
 }
 
 RequireMethod("AnimController.UpdateAnimations(float)", animController, "UpdateAnimations",

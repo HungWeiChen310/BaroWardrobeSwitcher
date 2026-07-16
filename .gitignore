@@ -9,11 +9,14 @@ TestResults/
 PersistentLooks.txt
 PersistentClientLook.txt
 ClientLook.json
+SinglePlayerProfiles.json
 ServerLooks.txt
 ServerLooks.json
 *.tmp
 *.v1.bak
+*.v2.bak
 ClientLook.json.bak
+SinglePlayerProfiles.json.bak
 ServerLooks.json.bak
 *.corrupt
 *.corrupt.*

@@ -3,11 +3,15 @@
 
 local Core = {}
 
-Core.MOD_VERSION = "0.5.0"
+Core.MOD_VERSION = "0.5.1"
 Core.PROTOCOL_VERSION = 2
 Core.LOOK_SCHEMA_VERSION = 2
-Core.PERSISTENCE_VERSION = 2
+Core.PERSISTENCE_VERSION = 3
 Core.HELLO_TIMEOUT_SECONDS = 5
+Core.LOOK_EXTENSION_MARKER = 0x57
+Core.LOOK_EXTENSION_VERSION = 1
+Core.HELLO_EXTENSION_MARKER = 0x57
+Core.HELLO_EXTENSION_VERSION = 1
 
 Core.NET = {
     V2_HELLO = "barowardrobeswitcher.v2.hello",
@@ -36,6 +40,32 @@ for _, key in ipairs(Core.SLOT_KEYS) do
     Core.SLOT_SET[key] = true
 end
 
+Core.ATTACHMENT_KEYS = {
+    "Hair",
+    "Beard",
+    "Moustache",
+    "FaceAttachment"
+}
+
+Core.ATTACHMENT_BITS = {
+    Hair = 0x01,
+    Beard = 0x02,
+    Moustache = 0x04,
+    FaceAttachment = 0x08
+}
+
+Core.ATTACHMENT_MASK = 0x0F
+
+Core.ATTACHMENT_VISIBILITY = {
+    Auto = "auto",
+    Hide = "hide",
+    Show = "show"
+}
+
+Core.CAPABILITY = {
+    AttachmentVisibility = 0x01
+}
+
 Core.LIMITS = {
     MAX_SLOTS = 6,
     MAX_IDENTIFIER_BYTES = 256,
@@ -62,14 +92,16 @@ Core.COMMAND = {
     Save = "save",
     Apply = "apply",
     Clear = "clear",
-    Forget = "forget"
+    Forget = "forget",
+    Visibility = "visibility"
 }
 
 local validCommands = {
     [Core.COMMAND.Save] = true,
     [Core.COMMAND.Apply] = true,
     [Core.COMMAND.Clear] = true,
-    [Core.COMMAND.Forget] = true
+    [Core.COMMAND.Forget] = true,
+    [Core.COMMAND.Visibility] = true
 }
 
 local function shallowCopy(source)
@@ -120,6 +152,114 @@ local function rawSlotIdentifier(value)
     return tostring(value)
 end
 
+function Core.attachmentVisibilityFromLegacy(hideHair)
+    local hidden = hideHair == true
+    return {
+        Hair = hidden and Core.ATTACHMENT_VISIBILITY.Hide or Core.ATTACHMENT_VISIBILITY.Auto,
+        Beard = hidden and Core.ATTACHMENT_VISIBILITY.Hide or Core.ATTACHMENT_VISIBILITY.Auto,
+        Moustache = hidden and Core.ATTACHMENT_VISIBILITY.Hide or Core.ATTACHMENT_VISIBILITY.Auto,
+        FaceAttachment = Core.ATTACHMENT_VISIBILITY.Auto
+    }
+end
+
+function Core.validateAttachmentVisibility(value, legacyHideHair)
+    if value == nil then
+        return Core.attachmentVisibilityFromLegacy(legacyHideHair)
+    end
+    if type(value) ~= "table" then
+        return nil, "attachmentVisibility must be a table"
+    end
+
+    local expected = {}
+    for _, key in ipairs(Core.ATTACHMENT_KEYS) do expected[key] = true end
+    for key, _ in pairs(value) do
+        if expected[key] ~= true then
+            return nil, "unknown attachment visibility layer " .. tostring(key)
+        end
+    end
+
+    local result = {}
+    for _, key in ipairs(Core.ATTACHMENT_KEYS) do
+        local state = value[key]
+        if state ~= Core.ATTACHMENT_VISIBILITY.Auto and
+            state ~= Core.ATTACHMENT_VISIBILITY.Hide and
+            state ~= Core.ATTACHMENT_VISIBILITY.Show then
+            return nil, "invalid attachment visibility for " .. key
+        end
+        result[key] = state
+    end
+    return result
+end
+
+function Core.copyAttachmentVisibility(value)
+    return Core.validateAttachmentVisibility(value, false)
+end
+
+function Core.legacyHideHair(value)
+    local visibility = Core.validateAttachmentVisibility(value, false)
+    if visibility == nil then return false end
+    return visibility.Hair == Core.ATTACHMENT_VISIBILITY.Hide and
+        visibility.Beard == Core.ATTACHMENT_VISIBILITY.Hide and
+        visibility.Moustache == Core.ATTACHMENT_VISIBILITY.Hide
+end
+
+function Core.attachmentVisibilityMasks(value)
+    local visibility, reason = Core.validateAttachmentVisibility(value, false)
+    if visibility == nil then return nil, nil, reason end
+    local forceHide, forceShow = 0, 0
+    for _, key in ipairs(Core.ATTACHMENT_KEYS) do
+        local bit = Core.ATTACHMENT_BITS[key]
+        if visibility[key] == Core.ATTACHMENT_VISIBILITY.Hide then
+            forceHide = forceHide + bit
+        elseif visibility[key] == Core.ATTACHMENT_VISIBILITY.Show then
+            forceShow = forceShow + bit
+        end
+    end
+    return forceHide, forceShow
+end
+
+function Core.attachmentVisibilityFromMasks(forceHide, forceShow)
+    forceHide = tonumber(forceHide)
+    forceShow = tonumber(forceShow)
+    if forceHide == nil or forceShow == nil or
+        forceHide < 0 or forceShow < 0 or
+        forceHide % 1 ~= 0 or forceShow % 1 ~= 0 or
+        forceHide > Core.ATTACHMENT_MASK or forceShow > Core.ATTACHMENT_MASK then
+        return nil, "attachment visibility masks are invalid"
+    end
+    if forceHide % (Core.ATTACHMENT_MASK + 1) ~= forceHide or
+        forceShow % (Core.ATTACHMENT_MASK + 1) ~= forceShow then
+        return nil, "attachment visibility masks contain unknown bits"
+    end
+
+    local visibility = {}
+    for _, key in ipairs(Core.ATTACHMENT_KEYS) do
+        local bit = Core.ATTACHMENT_BITS[key]
+        local hidden = math.floor(forceHide / bit) % 2 == 1
+        local shown = math.floor(forceShow / bit) % 2 == 1
+        if hidden and shown then
+            return nil, "attachment visibility masks overlap for " .. key
+        end
+        visibility[key] = hidden and Core.ATTACHMENT_VISIBILITY.Hide or
+            (shown and Core.ATTACHMENT_VISIBILITY.Show or Core.ATTACHMENT_VISIBILITY.Auto)
+    end
+    return visibility
+end
+
+local function messageRemainingBits(message)
+    local lengthBits = tonumber(message ~= nil and message.LengthBits or nil)
+    local bitPosition = tonumber(message ~= nil and message.BitPosition or nil)
+    if lengthBits ~= nil and bitPosition ~= nil then
+        return lengthBits - bitPosition
+    end
+    local lengthBytes = tonumber(message ~= nil and message.LengthBytes or nil)
+    local bytePosition = tonumber(message ~= nil and message.BytePosition or nil)
+    if lengthBytes ~= nil and bytePosition ~= nil then
+        return (lengthBytes - bytePosition) * 8
+    end
+    return 0
+end
+
 function Core.validateLook(value)
     if type(value) ~= "table" then
         return nil, "look must be a table"
@@ -168,19 +308,27 @@ function Core.validateLook(value)
         return nil, "look exceeds maximum payload size"
     end
 
+    local attachmentVisibility, visibilityReason = Core.validateAttachmentVisibility(
+        value.attachmentVisibility,
+        value.hideHair == true
+    )
+    if attachmentVisibility == nil then return nil, visibilityReason end
+
     return {
         schemaVersion = Core.LOOK_SCHEMA_VERSION,
         captured = value.captured == true,
-        hideHair = value.hideHair == true,
+        hideHair = Core.legacyHideHair(attachmentVisibility),
+        attachmentVisibility = attachmentVisibility,
         slots = slots
     }
 end
 
-function Core.newLook(captured, hideHair, slots)
+function Core.newLook(captured, hideHair, slots, attachmentVisibility)
     return Core.validateLook({
         schemaVersion = Core.LOOK_SCHEMA_VERSION,
         captured = captured == true,
         hideHair = hideHair == true,
+        attachmentVisibility = attachmentVisibility,
         slots = slots or {}
     })
 end
@@ -192,11 +340,12 @@ function Core.copyLook(look)
     return valid
 end
 
-function Core.fromLegacyLook(legacyLook, captured, hideHair)
+function Core.fromLegacyLook(legacyLook, captured, hideHair, attachmentVisibility)
     return Core.validateLook({
         schemaVersion = Core.LOOK_SCHEMA_VERSION,
         captured = captured == true,
         hideHair = hideHair == true,
+        attachmentVisibility = attachmentVisibility,
         slots = legacyLook or {}
     })
 end
@@ -241,6 +390,7 @@ function Core.parseLegacyClientLookLine(line)
     local active = false
     local autoApply = false
     local hideHair = false
+    local attachmentVisibility = nil
     local sessionKey = nil
 
     local function booleanValue(name, value)
@@ -256,7 +406,7 @@ function Core.parseLegacyClientLookLine(line)
         seen[name] = true
 
         if name == "schema" then
-            if value ~= "1" and value ~= "2" then
+            if value ~= "1" and value ~= "2" and value ~= "3" then
                 return nil, "unsupported legacy client look schema " .. tostring(value)
             end
         elseif name == "captured" then
@@ -275,6 +425,13 @@ function Core.parseLegacyClientLookLine(line)
             local reason
             hideHair, reason = booleanValue(name, value)
             if hideHair == nil then return nil, reason end
+        elseif name == "visibilityHair" or
+            name == "visibilityBeard" or
+            name == "visibilityMoustache" or
+            name == "visibilityFaceAttachment" then
+            attachmentVisibility = attachmentVisibility or {}
+            local key = name:sub(#"visibility" + 1)
+            attachmentVisibility[key] = value
         elseif name == "session" then
             sessionKey = decodePersistentValue(value)
         elseif Core.SLOT_SET[name] then
@@ -296,7 +453,7 @@ function Core.parseLegacyClientLookLine(line)
     end
 
     if captured == nil then return nil, "legacy client look is missing captured intent" end
-    local look, reason = Core.fromLegacyLook(legacy, captured, hideHair)
+    local look, reason = Core.fromLegacyLook(legacy, captured, hideHair, attachmentVisibility)
     if look == nil then return nil, reason end
     if not Core.hasLook(look) then return nil, "legacy client look has no captured intent" end
     return {
@@ -326,6 +483,9 @@ function Core.lookSignature(look)
         "captured=" .. tostring(valid.captured),
         "hideHair=" .. tostring(valid.hideHair)
     }
+    for _, key in ipairs(Core.ATTACHMENT_KEYS) do
+        parts[#parts + 1] = key .. "=" .. valid.attachmentVisibility[key]
+    end
     for _, key in ipairs(Core.SLOT_KEYS) do
         parts[#parts + 1] = key .. "=" .. tostring(valid.slots[key] or "-")
     end
@@ -359,6 +519,11 @@ function Core.writeLook(message, look)
             message.WriteString(identifier)
         end
     end
+    local forceHide, forceShow = Core.attachmentVisibilityMasks(valid.attachmentVisibility)
+    message.WriteByte(Core.LOOK_EXTENSION_MARKER)
+    message.WriteByte(Core.LOOK_EXTENSION_VERSION)
+    message.WriteByte(forceHide)
+    message.WriteByte(forceShow)
     return true
 end
 
@@ -388,10 +553,31 @@ function Core.readLook(message)
         slots[key] = identifier
     end
 
+    local attachmentVisibility = nil
+    local remainingBits = messageRemainingBits(message)
+    if remainingBits == 32 then
+        local marker = message.ReadByte()
+        local extensionVersion = message.ReadByte()
+        local forceHide = message.ReadByte()
+        local forceShow = message.ReadByte()
+        if marker ~= Core.LOOK_EXTENSION_MARKER then
+            return nil, "unknown look extension marker " .. tostring(marker)
+        end
+        if extensionVersion ~= Core.LOOK_EXTENSION_VERSION then
+            return nil, "unsupported look extension version " .. tostring(extensionVersion)
+        end
+        local visibility, visibilityReason = Core.attachmentVisibilityFromMasks(forceHide, forceShow)
+        if visibility == nil then return nil, visibilityReason end
+        attachmentVisibility = visibility
+    elseif remainingBits ~= 0 then
+        return nil, "malformed look extension length " .. tostring(remainingBits)
+    end
+
     return Core.validateLook({
         schemaVersion = schemaVersion,
         captured = captured,
         hideHair = hideHair,
+        attachmentVisibility = attachmentVisibility,
         slots = slots
     })
 end
@@ -431,11 +617,19 @@ function Core.readClientHello(message)
     return { protocolVersion = version, clientSessionId = valid }
 end
 
-function Core.writeServerHello(message, revision)
+function Core.writeServerHello(message, revision, capabilities)
     local validRevision, reason = normalizeRevision(revision, "revision")
     if validRevision == nil then return false, reason end
+    capabilities = tonumber(capabilities)
+    if capabilities == nil then capabilities = Core.CAPABILITY.AttachmentVisibility end
+    if capabilities < 0 or capabilities > 255 or capabilities % 1 ~= 0 then
+        return false, "capabilities must be an unsigned byte"
+    end
     message.WriteUInt16(Core.PROTOCOL_VERSION)
     message.WriteUInt32(validRevision)
+    message.WriteByte(Core.HELLO_EXTENSION_MARKER)
+    message.WriteByte(Core.HELLO_EXTENSION_VERSION)
+    message.WriteByte(capabilities)
     return true
 end
 
@@ -445,7 +639,26 @@ function Core.readServerHello(message)
     if version ~= Core.PROTOCOL_VERSION then
         return nil, "unsupported protocol version " .. tostring(version)
     end
-    return { protocolVersion = version, revision = revision }
+    local capabilities = 0
+    local remainingBits = messageRemainingBits(message)
+    if remainingBits == 24 then
+        local marker = message.ReadByte()
+        local extensionVersion = message.ReadByte()
+        capabilities = message.ReadByte()
+        if marker ~= Core.HELLO_EXTENSION_MARKER then
+            return nil, "unknown server hello extension marker " .. tostring(marker)
+        end
+        if extensionVersion ~= Core.HELLO_EXTENSION_VERSION then
+            return nil, "unsupported server hello extension version " .. tostring(extensionVersion)
+        end
+    elseif remainingBits ~= 0 then
+        return nil, "malformed server hello extension length " .. tostring(remainingBits)
+    end
+    return {
+        protocolVersion = version,
+        revision = revision,
+        capabilities = capabilities
+    }
 end
 
 function Core.validateCommand(command)
@@ -478,6 +691,9 @@ function Core.validateCommand(command)
     end
     if (command.kind == Core.COMMAND.Clear or command.kind == Core.COMMAND.Forget) and look ~= nil then
         return nil, command.kind .. " command must not contain a look"
+    end
+    if command.kind == Core.COMMAND.Visibility and look == nil then
+        return nil, "visibility command requires a look"
     end
 
     return {
@@ -657,6 +873,14 @@ local function effect(kind, values)
     return result
 end
 
+local function attachmentVisibilityEffect(kind, look)
+    return effect(kind, {
+        attachmentVisibility = look ~= nil and
+            Core.copyAttachmentVisibility(look.attachmentVisibility) or
+            Core.attachmentVisibilityFromLegacy(false)
+    })
+end
+
 function Core.newClientState(options)
     options = options or {}
     local look = Core.copyLook(options.look)
@@ -725,6 +949,16 @@ local function restoreRollback(state)
     clearRollback(state)
 end
 
+local function restoreAttachmentVisibilityRollback(state, effects, compensate)
+    local rollbackLook = Core.copyLook(state.rollbackLook)
+    local rollbackActive = state.rollbackActive == true
+    restoreRollback(state)
+    if compensate == true and rollbackActive and rollbackLook ~= nil then
+        effects[#effects + 1] =
+            attachmentVisibilityEffect("ApplyAttachmentVisibilityCompensation", rollbackLook)
+    end
+end
+
 local function commandPending(state, event, phase)
     state.phase = phase
     state.pendingOperationId = event.operationId
@@ -740,6 +974,14 @@ function Core.reduce(currentState, event)
 
     local state = copyClientState(currentState)
     local effects = {}
+
+    if event.type == "SetHairHidden" then
+        local compatibilityEvent = shallowCopy(event)
+        compatibilityEvent.type = "SetAttachmentVisibility"
+        compatibilityEvent.attachmentVisibility =
+            Core.attachmentVisibilityFromLegacy(event.hidden == true)
+        event = compatibilityEvent
+    end
 
     if event.type == "CharacterLost" then
         local preserveAutoApply = Core.hasLook(state.look) and
@@ -789,19 +1031,43 @@ function Core.reduce(currentState, event)
         return state, effects
     end
 
-    if event.type == "SetHairHidden" then
+    if event.type == "SetAttachmentVisibility" then
         if state.look == nil then
-            state.error = "cannot change hair visibility without a saved look"
+            state.error = "cannot change attachment visibility without a saved look"
+            return state, effects
+        end
+        if state.pendingKind ~= nil then
+            state.error = "cannot change attachment visibility while another operation is pending"
+            return state, effects
+        end
+        local visibility, visibilityReason = Core.validateAttachmentVisibility(
+            event.attachmentVisibility,
+            false
+        )
+        if visibility == nil then
+            state.error = visibilityReason
             return state, effects
         end
         beginRollback(state)
-        state.pendingKind = "hair"
+        state.pendingKind = Core.COMMAND.Visibility
+        state.pendingOperationId = event.operationId
+        state.pendingRemote = event.remote == true
+        state.pendingServerAccepted = false
         local updated = Core.copyLook(state.look)
-        updated.hideHair = event.hidden == true
+        updated.attachmentVisibility = visibility
+        updated.hideHair = Core.legacyHideHair(visibility)
         state.look = updated
         state.error = nil
         if state.active then
-            effects[#effects + 1] = effect("SetHair", { hidden = updated.hideHair })
+            effects[#effects + 1] =
+                attachmentVisibilityEffect("ApplyAttachmentVisibility", updated)
+        elseif state.pendingRemote then
+            effects[#effects + 1] = effect("SendCommand", {
+                operationId = state.pendingOperationId,
+                kind = Core.COMMAND.Visibility,
+                baseRevision = state.revision,
+                look = Core.copyLook(updated)
+            })
         else
             effects[#effects + 1] = effect("Persist", { look = Core.copyLook(updated) })
         end
@@ -969,6 +1235,9 @@ function Core.reduce(currentState, event)
         elseif event.awaitAck ~= true and state.pendingKind == Core.COMMAND.Forget then
             state.pendingRemote = false
             effects[#effects + 1] = effect("ClearRender", { remote = false, forget = true })
+        elseif event.awaitAck ~= true and state.pendingKind == Core.COMMAND.Visibility then
+            state.pendingRemote = false
+            effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
         end
         return state, effects
     end
@@ -978,6 +1247,8 @@ function Core.reduce(currentState, event)
             state.pendingKind == Core.COMMAND.Clear or
             state.pendingKind == Core.COMMAND.Forget then
             restoreRollback(state)
+        elseif state.pendingKind == Core.COMMAND.Visibility then
+            restoreAttachmentVisibilityRollback(state, effects, state.rollbackActive == true)
         end
         state.phase = Core.PHASE.Faulted
         state.error = tostring(event.reason or "network command could not be sent")
@@ -1055,6 +1326,8 @@ function Core.reduce(currentState, event)
                 state.pendingKind == Core.COMMAND.Clear or
                 state.pendingKind == Core.COMMAND.Forget then
                 restoreRollback(state)
+            elseif state.pendingKind == Core.COMMAND.Visibility then
+                restoreAttachmentVisibilityRollback(state, effects, state.rollbackActive == true)
             end
             state.phase = Core.PHASE.Faulted
             state.error = tostring(event.reason or "server rejected command")
@@ -1080,6 +1353,10 @@ function Core.reduce(currentState, event)
             state.autoApply = false
             state.phase = Core.PHASE.Saving
             effects[#effects + 1] = effect("ClearRender", { remote = true, save = true })
+        elseif kind == Core.COMMAND.Visibility then
+            state.pendingRemote = false
+            state.pendingServerAccepted = true
+            effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
         else
             clearPending(state)
             state.phase = Core.PHASE.ApplyPending
@@ -1112,6 +1389,25 @@ function Core.reduce(currentState, event)
             end
         end
 
+        local pendingKindBeforeState = state.pendingKind
+        local confirmsPendingVisibility =
+            pendingKindBeforeState == Core.COMMAND.Visibility and
+            look ~= nil and
+            Core.lookEquals(state.look, look) and
+            (state.pendingRemote == true or state.pendingServerAccepted == true)
+        if confirmsPendingVisibility then
+            state.revision = revision
+            state.look = look
+            state.active = event.active == true
+            state.phase = state.active and Core.PHASE.Active or
+                (Core.hasLook(look) and Core.PHASE.SavedInactive or Core.PHASE.Idle)
+            state.pendingRemote = false
+            state.pendingServerAccepted = true
+            state.error = nil
+            effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
+            return state, effects
+        end
+
         if event.active ~= true and currentState.active ~= true and
             revision == (tonumber(currentState.revision) or -1) and
             (look == nil or Core.lookEquals(currentState.look, look)) then
@@ -1119,7 +1415,6 @@ function Core.reduce(currentState, event)
             return state, effects
         end
 
-        local pendingKindBeforeState = state.pendingKind
         local confirmsPendingDestructive = event.active ~= true and state.pendingRemote == true and
             (pendingKindBeforeState == Core.COMMAND.Clear or pendingKindBeforeState == Core.COMMAND.Forget)
         if not confirmsPendingDestructive then beginRollback(state) end
@@ -1244,7 +1539,7 @@ function Core.reduce(currentState, event)
     end
 
     if event.type == "PersistenceSucceeded" then
-        if state.pendingKind == "hair" then
+        if state.pendingKind == Core.COMMAND.Visibility then
             clearPending(state)
             clearRollback(state)
         elseif state.pendingKind == Core.COMMAND.Save then
@@ -1275,20 +1570,33 @@ function Core.reduce(currentState, event)
         return state, effects
     end
 
-    if event.type == "HairUpdateSucceeded" then
-        if state.pendingKind == "hair" then
-            effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
+    if event.type == "AttachmentVisibilityUpdateSucceeded" then
+        if state.pendingKind == Core.COMMAND.Visibility then
+            if state.pendingRemote then
+                effects[#effects + 1] = effect("SendCommand", {
+                    operationId = state.pendingOperationId,
+                    kind = Core.COMMAND.Visibility,
+                    baseRevision = state.revision,
+                    look = Core.copyLook(state.look)
+                })
+            else
+                effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
+            end
         end
         return state, effects
     end
 
-    if event.type == "PersistenceFailed" or event.type == "HairUpdateFailed" then
-        if state.pendingKind == "hair" then
-            local rollbackLook = Core.copyLook(state.rollbackLook)
-            local needsHairCompensation = event.type == "PersistenceFailed" and state.rollbackActive == true
-            restoreRollback(state)
-            if needsHairCompensation and rollbackLook ~= nil then
-                effects[#effects + 1] = effect("SetHairCompensation", { hidden = rollbackLook.hideHair == true })
+    if event.type == "PersistenceFailed" or event.type == "AttachmentVisibilityUpdateFailed" then
+        if state.pendingKind == Core.COMMAND.Visibility then
+            if state.pendingServerAccepted then
+                clearPending(state)
+                clearRollback(state)
+            else
+                restoreAttachmentVisibilityRollback(
+                    state,
+                    effects,
+                    event.type == "PersistenceFailed" and state.rollbackActive == true
+                )
             end
         elseif state.pendingKind == Core.COMMAND.Save then
             restoreRollback(state)
@@ -1328,6 +1636,8 @@ function Core.reduce(currentState, event)
                 state.pendingKind == Core.COMMAND.Clear or
                 state.pendingKind == Core.COMMAND.Forget then
                 restoreRollback(state)
+            elseif state.pendingKind == Core.COMMAND.Visibility then
+                restoreAttachmentVisibilityRollback(state, effects, state.rollbackActive == true)
             end
             state.phase = Core.PHASE.Faulted
             state.error = tostring(event.reason or "server command timed out")
@@ -1358,7 +1668,8 @@ function Core.clientViewModel(state)
     local phase = state.phase
     local busy = phase == Core.PHASE.Saving or
         phase == Core.PHASE.ApplyPending or
-        phase == Core.PHASE.ClearPending
+        phase == Core.PHASE.ClearPending or
+        state.pendingKind == Core.COMMAND.Visibility
     return {
         phase = phase,
         revision = tonumber(state.revision) or 0,
@@ -1387,8 +1698,8 @@ local requiredClientEffects = {
     RenderCompensation = true,
     ClearRender = true,
     ClearRenderCompensation = true,
-    SetHair = true,
-    SetHairCompensation = true
+    ApplyAttachmentVisibility = true,
+    ApplyAttachmentVisibilityCompensation = true
 }
 
 local function successEventForEffect(currentEffect)
@@ -1414,8 +1725,12 @@ local function successEventForEffect(currentEffect)
         }
     end
     if currentEffect.type == "ClearRenderCompensation" then return { type = "CompensationSucceeded" } end
-    if currentEffect.type == "SetHair" then return { type = "HairUpdateSucceeded" } end
-    if currentEffect.type == "SetHairCompensation" then return { type = "CompensationSucceeded" } end
+    if currentEffect.type == "ApplyAttachmentVisibility" then
+        return { type = "AttachmentVisibilityUpdateSucceeded" }
+    end
+    if currentEffect.type == "ApplyAttachmentVisibilityCompensation" then
+        return { type = "CompensationSucceeded" }
+    end
     return nil
 end
 
@@ -1447,8 +1762,10 @@ local function failureEventForEffect(currentEffect, reason)
     if currentEffect.type == "ClearRenderCompensation" then
         return { type = "CompensationFailed", reason = message }
     end
-    if currentEffect.type == "SetHair" then return { type = "HairUpdateFailed", reason = message } end
-    if currentEffect.type == "SetHairCompensation" then
+    if currentEffect.type == "ApplyAttachmentVisibility" then
+        return { type = "AttachmentVisibilityUpdateFailed", reason = message }
+    end
+    if currentEffect.type == "ApplyAttachmentVisibilityCompensation" then
         return { type = "CompensationFailed", reason = message }
     end
     return nil

@@ -340,7 +340,9 @@ namespace BaroWardrobeSwitcher
 
         public int FashionComponentSoundCursor { get; set; }
 
-        public bool HideHair { get; set; }
+        public int ForceHideAttachmentMask { get; set; }
+
+        public int ForceShowAttachmentMask { get; set; }
 
         public bool EmptyLook { get; set; }
 
