@@ -250,7 +250,14 @@ local function messageRemainingBits(message)
     local lengthBits = tonumber(message ~= nil and message.LengthBits or nil)
     local bitPosition = tonumber(message ~= nil and message.BitPosition or nil)
     if lengthBits ~= nil and bitPosition ~= nil then
-        return lengthBits - bitPosition
+        local remainingBits = lengthBits - bitPosition
+        -- Barotrauma transports whole bytes, so the last byte can contain
+        -- non-semantic padding after an otherwise bit-packed message.
+        local paddingBits = (8 - bitPosition % 8) % 8
+        if lengthBits % 8 == 0 and remainingBits >= paddingBits then
+            remainingBits = remainingBits - paddingBits
+        end
+        return remainingBits
     end
     local lengthBytes = tonumber(message ~= nil and message.LengthBytes or nil)
     local bytePosition = tonumber(message ~= nil and message.BytePosition or nil)

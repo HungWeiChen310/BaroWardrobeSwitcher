@@ -54,6 +54,10 @@ local function newBuffer()
     buffer.ReadByte = function() return read("byte") end
     buffer.ReadBoolean = function() return read("bool") end
     buffer.ReadString = function() return read("string") end
+    buffer.FinalizeForTransport = function()
+        buffer.LengthBits = math.ceil(buffer.LengthBits / 8) * 8
+        return buffer
+    end
     return buffer
 end
 
@@ -113,6 +117,7 @@ assert(not Core.lookEquals(look, triStateLook),
 
 local triStateBuffer = newBuffer()
 assert(Core.writeLook(triStateBuffer, triStateLook))
+triStateBuffer.FinalizeForTransport()
 local triStateDecoded = assert(Core.readLook(triStateBuffer))
 assert(Core.lookEquals(triStateLook, triStateDecoded))
 
@@ -135,6 +140,7 @@ oldWireLook.WriteUInt16(Core.LOOK_SCHEMA_VERSION)
 oldWireLook.WriteBoolean(true)
 oldWireLook.WriteBoolean(true)
 oldWireLook.WriteUInt16(0)
+oldWireLook.FinalizeForTransport()
 local migratedOldWireLook = assert(Core.readLook(oldWireLook))
 assertEqual(migratedOldWireLook.attachmentVisibility.Hair, "hide")
 assertEqual(migratedOldWireLook.attachmentVisibility.Beard, "hide")
@@ -153,6 +159,7 @@ end
 for byteCount = 1, 3 do
     local partial = lookPrefixBuffer()
     for _ = 1, byteCount do partial.WriteByte(0) end
+    partial.FinalizeForTransport()
     local malformed, reason = Core.readLook(partial)
     assert(malformed == nil and tostring(reason):find("extension length", 1, true) ~= nil)
 end
@@ -161,24 +168,28 @@ unknownMarker.WriteByte(0x58)
 unknownMarker.WriteByte(Core.LOOK_EXTENSION_VERSION)
 unknownMarker.WriteByte(0)
 unknownMarker.WriteByte(0)
+unknownMarker.FinalizeForTransport()
 assert(Core.readLook(unknownMarker) == nil)
 local unknownExtensionVersion = lookPrefixBuffer()
 unknownExtensionVersion.WriteByte(Core.LOOK_EXTENSION_MARKER)
 unknownExtensionVersion.WriteByte(99)
 unknownExtensionVersion.WriteByte(0)
 unknownExtensionVersion.WriteByte(0)
+unknownExtensionVersion.FinalizeForTransport()
 assert(Core.readLook(unknownExtensionVersion) == nil)
 local unknownMaskBit = lookPrefixBuffer()
 unknownMaskBit.WriteByte(Core.LOOK_EXTENSION_MARKER)
 unknownMaskBit.WriteByte(Core.LOOK_EXTENSION_VERSION)
 unknownMaskBit.WriteByte(0x10)
 unknownMaskBit.WriteByte(0)
+unknownMaskBit.FinalizeForTransport()
 assert(Core.readLook(unknownMaskBit) == nil)
 local overlappingMasks = lookPrefixBuffer()
 overlappingMasks.WriteByte(Core.LOOK_EXTENSION_MARKER)
 overlappingMasks.WriteByte(Core.LOOK_EXTENSION_VERSION)
 overlappingMasks.WriteByte(0x01)
 overlappingMasks.WriteByte(0x01)
+overlappingMasks.FinalizeForTransport()
 assert(Core.readLook(overlappingMasks) == nil)
 
 local helloBuffer = newBuffer()
@@ -208,6 +219,7 @@ local command = {
 }
 local commandBuffer = newBuffer()
 assert(Core.writeCommand(commandBuffer, command))
+commandBuffer.FinalizeForTransport()
 local decodedCommand = assert(Core.readCommand(commandBuffer))
 assertEqual(decodedCommand.operationId, command.operationId)
 assertEqual(decodedCommand.baseRevision, 3)
@@ -226,6 +238,7 @@ assert(storedApply.look == nil, "v2 apply may select the server-stored look")
 
 local stateBuffer = newBuffer()
 assert(Core.writeState(stateBuffer, { revision = 4, characterId = 42, active = true, look = look }))
+stateBuffer.FinalizeForTransport()
 local decodedState = assert(Core.readState(stateBuffer))
 assertEqual(decodedState.revision, 4)
 assertEqual(decodedState.characterId, 42)

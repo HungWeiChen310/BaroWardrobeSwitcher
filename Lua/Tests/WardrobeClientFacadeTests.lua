@@ -233,8 +233,53 @@ Hook = {
         hooks[name] = callback
     end
 }
+local networkHandlers = {}
+local networkSent = {}
+local function newNetworkBuffer(name)
+    local values, readIndex = {}, 1
+    local buffer = { name = name, LengthBits = 0, BitPosition = 0 }
+    local function bitLength(kind, value)
+        if kind == "u16" then return 16 end
+        if kind == "u32" then return 32 end
+        if kind == "byte" then return 8 end
+        if kind == "bool" then return 1 end
+        if kind == "string" then return 16 + #(tostring(value or "")) * 8 end
+        return 0
+    end
+    local function write(kind, value)
+        values[#values + 1] = { kind = kind, value = value }
+        buffer.LengthBits = buffer.LengthBits + bitLength(kind, value)
+    end
+    local function read(kind)
+        local entry = assert(values[readIndex], "read beyond network test buffer")
+        assert(entry.kind == kind, "expected " .. kind .. ", got " .. tostring(entry.kind))
+        readIndex = readIndex + 1
+        buffer.BitPosition = buffer.BitPosition + bitLength(kind, entry.value)
+        return entry.value
+    end
+    buffer.WriteUInt16 = function(value) write("u16", value) end
+    buffer.ReadUInt16 = function() return read("u16") end
+    buffer.WriteUInt32 = function(value) write("u32", value) end
+    buffer.ReadUInt32 = function() return read("u32") end
+    buffer.WriteByte = function(value) write("byte", value) end
+    buffer.ReadByte = function() return read("byte") end
+    buffer.WriteBoolean = function(value) write("bool", value) end
+    buffer.ReadBoolean = function() return read("bool") end
+    buffer.WriteString = function(value) write("string", value) end
+    buffer.ReadString = function() return read("string") end
+    buffer.FinalizeForTransport = function()
+        buffer.LengthBits = math.ceil(buffer.LengthBits / 8) * 8
+        return buffer
+    end
+    return buffer
+end
 Networking = {
-    Receive = function() end
+    Receive = function(name, handler) networkHandlers[name] = handler end,
+    Start = function(name) return newNetworkBuffer(name) end,
+    Send = function(message)
+        message.FinalizeForTransport()
+        networkSent[#networkSent + 1] = message
+    end
 }
 Game = { IsMultiplayer = false }
 Character = { Controlled = nil, CharacterList = {} }
@@ -548,6 +593,63 @@ assert(activationCount == 9,
     table.concat(activationCharacterIds, ","))
 assert(saveCalls == savesBeforeMemoryProfile,
     "a campaign-less single-player profile was incorrectly written to disk")
+
+-- A deterministic multiplayer rejection must not make auto-apply enqueue the
+-- same command every think tick. Manual Apply remains available for retries.
+hooks.roundEnd()
+persistence.LoadClientLook = function()
+    return "captured=true|active=true|auto=true|hidehair=false|Head=helmet,"
+end
+Game.IsMultiplayer = true
+hooks.roundStart()
+for _ = 1, 15 do hooks.think() end
+
+local serverHello = newNetworkBuffer(WardrobeCore.NET.V2_HELLO)
+assert(WardrobeCore.writeServerHello(
+    serverHello,
+    0,
+    WardrobeCore.CAPABILITY.AttachmentVisibility
+))
+serverHello.FinalizeForTransport()
+assert(type(networkHandlers[WardrobeCore.NET.V2_HELLO]) == "function")
+networkHandlers[WardrobeCore.NET.V2_HELLO](serverHello)
+
+local sentApply = nil
+for index = #networkSent, 1, -1 do
+    if networkSent[index].name == WardrobeCore.NET.V2_COMMAND then
+        sentApply = networkSent[index]
+        break
+    end
+end
+assert(sentApply ~= nil, "multiplayer auto-apply command was not sent")
+local decodedApply = assert(WardrobeCore.readCommand(sentApply))
+assert(decodedApply.kind == WardrobeCore.COMMAND.Apply)
+
+local rejectedAck = newNetworkBuffer(WardrobeCore.NET.V2_ACK)
+assert(WardrobeCore.writeAck(rejectedAck, {
+    operationId = decodedApply.operationId,
+    accepted = false,
+    revision = 0,
+    reason = "malformed_look"
+}))
+rejectedAck.FinalizeForTransport()
+networkHandlers[WardrobeCore.NET.V2_ACK](rejectedAck)
+
+local applyCountAfterRejection = 0
+for _, message in ipairs(networkSent) do
+    if message.name == WardrobeCore.NET.V2_COMMAND then
+        applyCountAfterRejection = applyCountAfterRejection + 1
+    end
+end
+for _ = 1, 10 do hooks.think() end
+local finalApplyCount = 0
+for _, message in ipairs(networkSent) do
+    if message.name == WardrobeCore.NET.V2_COMMAND then
+        finalApplyCount = finalApplyCount + 1
+    end
+end
+assert(finalApplyCount == applyCountAfterRejection,
+    "a rejected multiplayer auto-apply was queued again without a state change")
 
 print = originalPrint
 print("Wardrobe client facade tests passed")

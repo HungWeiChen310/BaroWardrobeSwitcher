@@ -2210,6 +2210,7 @@ local function serverAutoApplyRequestKey(character)
 end
 
 local function clearPendingServerApplyRequest()
+    lastServerAutoApplySignature = nil
     pendingServerApplyRequestKey = nil
     pendingServerApplyLastRequestTick = 0
     pendingServerApplyAttempts = 0
@@ -3629,6 +3630,8 @@ local function autoApplySavedLookIfNeeded(character)
         not singlePlayerAutomaticRestoreAllowed(character) then
         return
     end
+    if isMultiplayerClient() and
+        lastServerAutoApplySignature == serverAutoApplyRequestKey(character) then return end
     local view = clientController ~= nil and clientController.getViewModel() or nil
     if view ~= nil and view.busy then return end
     if applyFashionToCurrentEquipment(true) then
