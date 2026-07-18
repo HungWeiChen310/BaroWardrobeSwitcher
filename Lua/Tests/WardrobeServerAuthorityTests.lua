@@ -137,6 +137,10 @@ local function newBuffer(name)
     buffer.ReadBoolean = function() return read("bool") end
     buffer.WriteString = function(value) write("string", value) end
     buffer.ReadString = function() return read("string") end
+    buffer.FinalizeForTransport = function()
+        buffer.LengthBits = math.ceil(buffer.LengthBits / 8) * 8
+        return buffer
+    end
     return buffer
 end
 
@@ -146,6 +150,7 @@ Networking = {
     Receive = function(name, handler) Networking.handlers[name] = handler end,
     Start = function(name) return newBuffer(name) end,
     Send = function(message, connection)
+        message.FinalizeForTransport()
         Networking.sent[#Networking.sent + 1] = { message = message, connection = connection }
     end
 }
@@ -173,6 +178,7 @@ local function sendCommand(command, targetClient)
     targetClient = targetClient or client
     local message = newBuffer()
     assert(Core.writeCommand(message, command))
+    message.FinalizeForTransport()
     Networking.handlers[Core.NET.V2_COMMAND](message, targetClient)
     local sent = Networking.sent[#Networking.sent]
     assert(sent.message.name == Core.NET.V2_ACK)
