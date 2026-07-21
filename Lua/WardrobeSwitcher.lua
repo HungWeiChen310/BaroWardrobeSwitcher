@@ -583,8 +583,8 @@ local InitialEquipStableTicks = 12
 local InitialEquipFallbackTicks = 120
 local ServerApplyRetryTicks = 30
 local ServerApplyMaxAttempts = 10
-local PendingNetworkMessageMaxTicks = 300
-local NetworkApplySuppressTicks = PendingNetworkMessageMaxTicks
+local PendingLegacyNetworkMessageMaxTicks = 300
+local NetworkApplySuppressTicks = PendingLegacyNetworkMessageMaxTicks
 
 local function copyLookData(lookData)
     local copy = {}
@@ -2771,9 +2771,11 @@ function Helpers.sendNextProtocolCommand()
     return true
 end
 
-function Helpers.sendV2Hello()
+function Helpers.sendV2Hello(forceSnapshot)
     if not coreAvailable or not Helpers.isMultiplayerClient() or Networking == nil then return false end
-    if protocolMode ~= "probing" or protocolHelloSentAt ~= nil then return false end
+    local probing = protocolMode == "probing" and protocolHelloSentAt == nil
+    local requestingSnapshot = forceSnapshot == true and protocolMode == "v2"
+    if not probing and not requestingSnapshot then return false end
     local ok, reason = pcall(function()
         local message = Networking.Start(NET_V2_HELLO)
         local written, writeReason = Core.writeClientHello(message, clientSessionId)
@@ -2781,7 +2783,9 @@ function Helpers.sendV2Hello()
         Networking.Send(message)
     end)
     if ok then
-        protocolHelloSentAt = protocolClock()
+        if probing then protocolHelloSentAt = protocolClock() end
+    elseif requestingSnapshot then
+        Helpers.debugLog("Failed to request the v2 wardrobe state snapshot: " .. tostring(reason))
     else
         Helpers.debugLog("Failed to send v2 hello; waiting for v1 fallback: " .. tostring(reason))
         protocolHelloSentAt = protocolClock()
@@ -4331,7 +4335,8 @@ function Helpers.processPendingNetworkMessages()
     Helpers.pruneNetworkApplySuppressions()
 
     for characterId, pending in pairs(pendingNetworkClearsByCharacterId) do
-        if globalTick - pending.receivedTick > PendingNetworkMessageMaxTicks then
+        if pending.protocolRevision == nil and
+            globalTick - pending.receivedTick > PendingLegacyNetworkMessageMaxTicks then
             pendingNetworkClearsByCharacterId[characterId] = nil
         elseif Helpers.findEntityById(characterId) ~= nil then
             Helpers.handleNetworkLookClear(characterId, pending.protocolRevision, pending.protocolLook)
@@ -4339,7 +4344,8 @@ function Helpers.processPendingNetworkMessages()
     end
 
     for characterId, pending in pairs(pendingNetworkAppliesByCharacterId) do
-        if globalTick - pending.receivedTick > PendingNetworkMessageMaxTicks then
+        if pending.protocolRevision == nil and
+            globalTick - pending.receivedTick > PendingLegacyNetworkMessageMaxTicks then
             pendingNetworkAppliesByCharacterId[characterId] = nil
         elseif Helpers.findEntityById(characterId) ~= nil then
             Helpers.handleNetworkLookApply(
@@ -5055,6 +5061,9 @@ end)
 
 Hook.Add("roundStart", "barowardrobeswitcher.notice", function()
     Helpers.startInitialEquipGate()
+    -- Existing multiplayer connections do not renegotiate between rounds. Reuse
+    -- the v2 hello as an idempotent request for the server's active-look snapshot.
+    Helpers.sendV2Hello(true)
     if isSinglePlayerClient() then
         pendingSinglePlayerRestores = {}
         singlePlayerRoundScanned = false

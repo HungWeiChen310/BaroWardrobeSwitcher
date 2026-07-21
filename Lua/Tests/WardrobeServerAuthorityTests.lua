@@ -271,6 +271,25 @@ local reboundState = assert(Core.readState(Networking.sent[#Networking.sent].mes
 assert(reboundState.active and reboundState.revision == 4 and reboundState.characterId == 43,
     "character replacement must rebind the active look without changing revision")
 
+-- A slower client can finish loading after the next round has already rebound
+-- active sessions. Its v2 hello must return a snapshot with the new entity ID.
+do
+    Hook.handlers.roundEnd()
+    client.Character = { ID = 143, Name = "Tester Next Round" }
+    Hook.handlers.roundStart()
+    local lateClient = { Connection = {}, Character = { ID = 144, Name = "Late Player" } }
+    connectedClients[2] = lateClient
+    local lateHello = newBuffer()
+    assert(Core.writeClientHello(lateHello, "late-client-session"))
+    Networking.handlers[Core.NET.V2_HELLO](lateHello, lateClient)
+    local lateSnapshot = assert(Core.readState(
+        assert(lastSentMessage(Core.NET.V2_STATE, lateClient.Connection))))
+    assert(lateSnapshot.active and lateSnapshot.revision == 4 and
+        lateSnapshot.characterId == 143 and lateSnapshot.look.slots.Head == "helmet",
+        "a late client did not receive the active next-round wardrobe snapshot")
+    connectedClients[2] = nil
+end
+
 local clearStoredApply = sendCommand({
     clientSessionId = "client-session",
     operationId = "op-clear-stored-apply",

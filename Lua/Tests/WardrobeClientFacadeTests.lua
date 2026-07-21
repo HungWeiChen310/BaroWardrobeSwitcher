@@ -217,6 +217,16 @@ LuaUserData = {
         if name == "BaroWardrobeSwitcher.WardrobePersistence" then return persistence end
         if name == "BaroWardrobeSwitcher.WardrobeFileLogger" then return fileLogger end
         if name == "BaroWardrobeSwitcher.VisualOverride" then return visualOverride end
+        if name == "Barotrauma.Entity" then
+            return {
+                FindEntityByID = function(id)
+                    for _, character in ipairs(Character.CharacterList or {}) do
+                        if tonumber(character.ID) == tonumber(id) then return character end
+                    end
+                    return nil
+                end
+            }
+        end
         if name == "Barotrauma.GameMain" then
             return {
                 GameSession = {
@@ -735,6 +745,70 @@ assert(removedWidgets == removesBeforeClose,
 hooks.think()
 assert(removedWidgets == removesBeforeClose + 1,
     "Close did not release the overlay on the next tick")
+
+-- A round snapshot can arrive long before a slow client creates the remote
+-- Character. Revisioned v2 state is authoritative for the whole round and must
+-- survive beyond the old 300-tick timeout.
+do
+    local function deliverState(state)
+        local message = newNetworkBuffer(WardrobeCore.NET.V2_STATE)
+        assert(WardrobeCore.writeState(message, state))
+        message.FinalizeForTransport()
+        networkHandlers[WardrobeCore.NET.V2_STATE](message)
+    end
+
+    local remoteId = 901
+    local remoteLook = assert(WardrobeCore.newLook(true, false, { Head = "helmet" }))
+    local beforeLateEntity = activationCount
+    deliverState({ revision = 10, characterId = remoteId, active = true, look = remoteLook })
+    for _ = 1, 320 do hooks.think() end
+    assert(activationCount == beforeLateEntity,
+        "a snapshot rendered before its remote Character existed")
+
+    Character.CharacterList[#Character.CharacterList + 1] =
+        makeCharacter(remoteId, remoteId, "Early Player", false)
+    hooks.think()
+    assert(activationCount == beforeLateEntity + 1 and activeCharacterIds[remoteId] == true,
+        "a retained snapshot was not applied when the late Character appeared")
+    assert(capturedIdentifierByCharacterId[remoteId] == "helmet",
+        "the late Character received the wrong wardrobe look")
+
+    local afterApply = activationCount
+    deliverState({ revision = 10, characterId = remoteId, active = true, look = remoteLook })
+    deliverState({ revision = 9, characterId = remoteId, active = false, look = remoteLook })
+    assert(activationCount == afterApply and activeCharacterIds[remoteId] == true,
+        "duplicate or stale state replaced the accepted remote look")
+    deliverState({ revision = 11, characterId = remoteId, active = false, look = remoteLook })
+    deliverState({ revision = 10, characterId = remoteId, active = true, look = remoteLook })
+    assert(activationCount == afterApply and activeCharacterIds[remoteId] ~= true,
+        "an out-of-order state resurrected a newer cleared look")
+
+    local helloBeforeRound = nil
+    local helloCountBeforeRound = 0
+    for _, message in ipairs(networkSent) do
+        if message.name == WardrobeCore.NET.V2_HELLO then
+            helloBeforeRound = message
+            helloCountBeforeRound = helloCountBeforeRound + 1
+        end
+    end
+    assert(helloBeforeRound ~= nil, "initial v2 hello was not sent")
+    local initialSessionId = assert(WardrobeCore.readClientHello(helloBeforeRound)).clientSessionId
+    hooks.roundEnd()
+    hooks.roundStart()
+    local helloAfterRound = nil
+    local helloCountAfterRound = 0
+    for _, message in ipairs(networkSent) do
+        if message.name == WardrobeCore.NET.V2_HELLO then
+            helloAfterRound = message
+            helloCountAfterRound = helloCountAfterRound + 1
+        end
+    end
+    assert(helloCountAfterRound == helloCountBeforeRound + 1,
+        "multiplayer round start did not request exactly one fresh state snapshot")
+    assert(assert(WardrobeCore.readClientHello(helloAfterRound)).clientSessionId == initialSessionId,
+        "round snapshot request replaced the negotiated client session")
+end
+
 assert(#messages == 0,
     "routine wardrobe diagnostics leaked into the Lua console")
 assert(#loggedMessages > 0,
