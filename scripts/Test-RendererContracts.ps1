@@ -175,6 +175,132 @@ Assert-Before $drawWearableOverride `
     "Empty saved slots must win before matching fashion sprites from other equipment slots."
 Write-Host "PASS empty-slot-priority"
 
+# LimbType.None is overloaded by custom content: an explicit limb="None" can target
+# a real custom-ragdoll limb, while a legacy unbound None uses the equipment slot.
+# Keep the two paths separate without naming any mod.
+Assert-Contains $renderer 'sprite?.SourceElement?.GetAttribute("limb") != null' `
+    "Explicit None limb bindings must be detected from the source XML."
+Assert-Contains $renderer "private static bool SpriteBelongsToLimb(WearableSprite sprite, LimbType limbType)" `
+    "Limb checks must read the physical sprite instead of trusting a dictionary key."
+$limbBindingStart = $renderer.IndexOf(
+    "private static bool SpriteBelongsToLimb(",
+    [StringComparison]::Ordinal)
+$limbBindingEnd = $renderer.IndexOf(
+    "private static LimbType GetFallbackAnchorLimb(",
+    [StringComparison]::Ordinal)
+if ($limbBindingStart -lt 0 -or $limbBindingEnd -le $limbBindingStart) {
+    throw "Could not isolate fashion limb-binding policy."
+}
+$limbBindingPolicy = $renderer.Substring(
+    $limbBindingStart,
+    $limbBindingEnd - $limbBindingStart)
+Assert-Before $limbBindingPolicy "HasExplicitLimbBinding(sprite)" "GetFallbackAnchorLimb(sprite)" `
+    "An explicit None limb must remain exact instead of falling back to the equipment slot."
+Assert-Contains $limbBindingPolicy "return sprite.Limb == limbType;" `
+    "Explicit limb bindings must be compared from the physical sprite."
+
+$enumerateStart = $renderer.IndexOf(
+    "private static IEnumerable<KeyValuePair<Tuple<WearableType, LimbType>, FashionSpriteDescriptor>> EnumerateFashionSpritesForLimb(",
+    [StringComparison]::Ordinal)
+$enumerateEnd = $renderer.IndexOf(
+    "private static void SortWearablesForDraw(",
+    [StringComparison]::Ordinal)
+if ($enumerateStart -lt 0 -or $enumerateEnd -le $enumerateStart) {
+    throw "Could not isolate fashion sprite injection candidates."
+}
+$enumeratePolicy = $renderer.Substring($enumerateStart, $enumerateEnd - $enumerateStart)
+Assert-Contains $enumeratePolicy "SpriteBelongsToLimb(descriptor.Sprite, limbType)" `
+    "Injected candidates must validate the physical sprite limb."
+Write-Host "PASS physical-sprite-limb-binding"
+
+$injectedStart = $drawWearableOverride.IndexOf(
+    "if (transaction.InjectedSprites.Contains(original))",
+    [StringComparison]::Ordinal)
+$injectedEnd = $drawWearableOverride.IndexOf(
+    "bool hideOriginalForEmptySavedSlot",
+    [StringComparison]::Ordinal)
+if ($injectedStart -lt 0 -or $injectedEnd -le $injectedStart) {
+    throw "Could not isolate injected sprite draw boundary."
+}
+$injectedPolicy = $drawWearableOverride.Substring($injectedStart, $injectedEnd - $injectedStart)
+Assert-Contains $injectedPolicy "if (!SpriteBelongsToLimb(original, limb.type))" `
+    "Injected sprites must fail closed when their physical limb does not match the draw limb."
+Assert-Contains $injectedPolicy "skipOriginal = true;" `
+    "Cross-limb injected sprites must be skipped."
+Assert-Before $injectedPolicy "if (!SpriteBelongsToLimb(original, limb.type))" "drawnSprites.Add(original)" `
+    "The physical-limb guard must run before an injected sprite can be drawn."
+Write-Host "PASS injected-sprite-draw-boundary"
+
+$fallbackDrawStart = $renderer.IndexOf(
+    "private static void DrawFashionWearable(",
+    [StringComparison]::Ordinal)
+$fallbackInvoke = $renderer.IndexOf(
+    "DrawWearableMethod.Invoke(",
+    $fallbackDrawStart,
+    [StringComparison]::Ordinal)
+if ($fallbackDrawStart -lt 0 -or $fallbackInvoke -le $fallbackDrawStart) {
+    throw "Could not isolate fallback DrawWearable boundary."
+}
+$fallbackDrawPolicy = $renderer.Substring($fallbackDrawStart, $fallbackInvoke - $fallbackDrawStart)
+Assert-Contains $fallbackDrawPolicy "if (!SpriteBelongsToLimb(wearable, limb.type)) { return; }" `
+    "Fallback sprites must fail closed before invoking the engine renderer."
+Write-Host "PASS fallback-sprite-draw-boundary"
+
+$compatibilityStart = $renderer.IndexOf(
+    "private static bool IsFashionSpriteCompatibleWithLimb(",
+    [StringComparison]::Ordinal)
+$compatibilityEnd = $renderer.IndexOf(
+    "private static LimbType GetFallbackAnchorLimb(",
+    [StringComparison]::Ordinal)
+if ($compatibilityStart -lt 0 -or $compatibilityEnd -le $compatibilityStart) {
+    throw "Could not isolate targeted None-limb compatibility policy."
+}
+$compatibilityPolicy = $renderer.Substring(
+    $compatibilityStart,
+    $compatibilityEnd - $compatibilityStart)
+foreach ($requiredScope in @(
+    'descriptor.SourceIdentifier, "sexy_exosuit_plus"',
+    '"/3156077899/"',
+    '"/exo_milker2.png"',
+    '"automilker LeftBreast"',
+    'limb.type == LimbType.None',
+    'limb.Params?.ID == 17')) {
+    Assert-Contains $compatibilityPolicy $requiredScope `
+        "Targeted None-limb compatibility policy is missing scope: $requiredScope"
+}
+$compatibilityGuard = 'if (!IsFashionSpriteCompatibleWithLimb(session, original, limb))'
+Assert-Contains $drawWearableOverride $compatibilityGuard `
+    "The common DrawWearable boundary must reject the target sprite on the wrong None limb."
+Assert-Before $drawWearableOverride $compatibilityGuard "if (transaction.IsDrawingStoredFashion)" `
+    "The target guard must run for both injected and fallback fashion draws."
+$guardStart = $drawWearableOverride.IndexOf($compatibilityGuard, [StringComparison]::Ordinal)
+$guardEnd = $drawWearableOverride.IndexOf(
+    "if (transaction.IsDrawingStoredFashion)",
+    $guardStart,
+    [StringComparison]::Ordinal)
+$guardPolicy = $drawWearableOverride.Substring($guardStart, $guardEnd - $guardStart)
+Assert-Contains $guardPolicy "transaction.DrawnSprites.Add(original);" `
+    "Rejected sprites must be marked handled so fallback does not retry them."
+Assert-Contains $guardPolicy "skipOriginal = true;" `
+    "Rejected sprites must not reach the engine renderer."
+Assert-NotContains $renderer "RecordFashionDrawResult" `
+    "One-time source-rectangle diagnostics must be removed after identifying the root cause."
+Write-Host "PASS targeted-none-limb-binding"
+
+$candidateStart = $renderer.IndexOf(
+    "private static IEnumerable<FashionSpriteDescriptor> EnumerateFashionSpriteCandidates(",
+    [StringComparison]::Ordinal)
+$candidateEnd = $renderer.IndexOf(
+    "private static string DescribeFashionSprites(",
+    [StringComparison]::Ordinal)
+if ($candidateStart -lt 0 -or $candidateEnd -le $candidateStart) {
+    throw "Could not isolate fashion sprite candidate selection."
+}
+$candidatePolicy = $renderer.Substring($candidateStart, $candidateEnd - $candidateStart)
+Assert-Contains $candidatePolicy "SpriteBelongsToLimb(" `
+    "Exact and fallback candidates must share the explicit-limb policy."
+Write-Host "PASS explicit-none-limb-binding"
+
 # Attachment visibility is an independent draw-time policy. Force-show must win
 # over force-hide, which in turn wins over the appearance item's XML auto mask.
 Assert-Contains $renderer "public static bool SetAttachmentVisibility(" `

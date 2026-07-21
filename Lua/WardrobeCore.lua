@@ -112,6 +112,8 @@ local function shallowCopy(source)
     return copy
 end
 
+-- copySlots is currently unused; keep it disabled while confirming safe removal.
+--[[
 local function copySlots(source)
     local copy = {}
     source = source or {}
@@ -122,6 +124,7 @@ local function copySlots(source)
     end
     return copy
 end
+]]
 
 local function checkBoundedString(value, field, maximum, allowEmpty)
     if type(value) ~= "string" then

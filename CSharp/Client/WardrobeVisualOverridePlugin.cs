@@ -1767,6 +1767,15 @@ namespace BaroWardrobeSwitcher
             {
                 return false;
             }
+            // This item's left-breast sprite uses LimbType.None, which is also used by
+            // rotating appendages in the same ragdoll. Keep the visual on the actual
+            // LeftBoobs limb without changing None handling for any other content.
+            if (!IsFashionSpriteCompatibleWithLimb(session, original, limb))
+            {
+                transaction.DrawnSprites.Add(original);
+                skipOriginal = true;
+                return true;
+            }
             if (transaction.IsDrawingStoredFashion) { return false; }
             if (!IsEquipmentSprite(original))
             {
@@ -1786,6 +1795,14 @@ namespace BaroWardrobeSwitcher
             HashSet<WearableSprite> drawnSprites = transaction.DrawnSprites;
             if (transaction.InjectedSprites.Contains(original))
             {
+                // Fail closed at the actual draw boundary. A stale dictionary key or
+                // interrupted render transaction must never draw one limb's sprite on
+                // another physical limb.
+                if (!SpriteBelongsToLimb(original, limb.type))
+                {
+                    skipOriginal = true;
+                    return true;
+                }
                 drawnSprites.Add(original);
                 drawOverrideHitCount++;
                 return false;
@@ -1946,7 +1963,7 @@ namespace BaroWardrobeSwitcher
                 {
                     WearableSprite sprite = pair.Value?.Sprite;
                     if (sprite == null || drawnSprites.Contains(sprite)) { continue; }
-                    if (!ShouldFallbackDrawMissingFashionSprite(sprite, limb.type)) { continue; }
+                    if (!SpriteBelongsToLimb(sprite, limb.type)) { continue; }
 
                     drawnSprites.Add(sprite);
                     fallbackDrawnFashionSpriteCount++;
@@ -1969,6 +1986,7 @@ namespace BaroWardrobeSwitcher
             SpriteBatch spriteBatch,
             Color? overrideColor)
         {
+            if (!SpriteBelongsToLimb(wearable, limb.type)) { return; }
             Color color = overrideColor.GetValueOrDefault(Color.White);
             color *= limb.Alpha;
             if (color.A <= 0) { return; }
@@ -2607,7 +2625,7 @@ namespace BaroWardrobeSwitcher
                     pair.Value != null &&
                     (pair.Key.Item2 == limbType || pair.Key.Item2 == LimbType.None))
                 .SelectMany(pair => pair.Value
-                    .Where(descriptor => descriptor?.Sprite != null && SpriteBelongsToLimb(descriptor.Sprite, pair.Key.Item2, limbType))
+                    .Where(descriptor => descriptor?.Sprite != null && SpriteBelongsToLimb(descriptor.Sprite, limbType))
                     .Select(descriptor => new KeyValuePair<Tuple<WearableType, LimbType>, FashionSpriteDescriptor>(pair.Key, descriptor)))
                 .OrderBy(pair => GetFashionLayerSortKey(pair.Value))
                 .ThenByDescending(pair => pair.Value.Sprite?.Sprite?.Depth ?? 0.0f);
@@ -2693,21 +2711,45 @@ namespace BaroWardrobeSwitcher
                    sprite.WearableComponent.AllowedSlots.Contains(slot);
         }
 
-        private static bool ShouldFallbackDrawMissingFashionSprite(WearableSprite sprite, LimbType limbType)
+        private static bool SpriteBelongsToLimb(WearableSprite sprite, LimbType limbType)
         {
             if (sprite == null) { return false; }
-            if (sprite.Limb != LimbType.None)
+            // The initialized sprite limb is authoritative. An explicit None is a
+            // real custom-ragdoll binding; only a legacy unbound None uses a slot anchor.
+            if (sprite.Limb != LimbType.None || HasExplicitLimbBinding(sprite))
             {
                 return sprite.Limb == limbType;
             }
             return GetFallbackAnchorLimb(sprite) == limbType;
         }
 
-        private static bool SpriteBelongsToLimb(WearableSprite sprite, LimbType spriteLimb, LimbType limbType)
+        private static bool HasExplicitLimbBinding(WearableSprite sprite)
         {
-            if (sprite == null) { return false; }
-            if (spriteLimb != LimbType.None) { return spriteLimb == limbType; }
-            return GetFallbackAnchorLimb(sprite) == limbType;
+            return sprite?.SourceElement?.GetAttribute("limb") != null;
+        }
+
+        private static bool IsFashionSpriteCompatibleWithLimb(
+            RenderSession session,
+            WearableSprite sprite,
+            Limb limb)
+        {
+            if (session == null || sprite == null || limb == null || sprite.Limb != LimbType.None ||
+                !session.TryGetDescriptor(sprite, out FashionSpriteDescriptor descriptor) ||
+                !string.Equals(descriptor.SourceIdentifier, "sexy_exosuit_plus", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            string path = (descriptor.ResolvedSpritePath ?? string.Empty).Replace('\\', '/');
+            string name = sprite.SourceElement?.GetAttribute("name")?.Value ?? string.Empty;
+            if (path.IndexOf("/3156077899/", StringComparison.OrdinalIgnoreCase) < 0 ||
+                !path.EndsWith("/exo_milker2.png", StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(name, "automilker LeftBreast", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            return limb.type == LimbType.None && limb.Params?.ID == 17;
         }
 
         private static LimbType GetFallbackAnchorLimb(WearableSprite sprite)
@@ -3012,9 +3054,12 @@ namespace BaroWardrobeSwitcher
 
             if (spritesBySlot.TryGetValue(Tuple.Create(type, limbType), out List<FashionSpriteDescriptor> exactSprites) && exactSprites != null)
             {
-                foreach (FashionSpriteDescriptor sprite in exactSprites)
+                foreach (FashionSpriteDescriptor descriptor in exactSprites)
                 {
-                    yield return sprite;
+                    if (descriptor?.Sprite != null && SpriteBelongsToLimb(descriptor.Sprite, limbType))
+                    {
+                        yield return descriptor;
+                    }
                 }
             }
 
@@ -3023,9 +3068,12 @@ namespace BaroWardrobeSwitcher
             {
                 yield break;
             }
-            foreach (FashionSpriteDescriptor sprite in wildcardSprites)
+            foreach (FashionSpriteDescriptor descriptor in wildcardSprites)
             {
-                yield return sprite;
+                if (descriptor?.Sprite != null && SpriteBelongsToLimb(descriptor.Sprite, limbType))
+                {
+                    yield return descriptor;
+                }
             }
         }
 
@@ -3281,6 +3329,7 @@ namespace BaroWardrobeSwitcher
             wearable = replacement;
             return true;
         }
+
     }
 
     internal static class LimbDrawPatch
