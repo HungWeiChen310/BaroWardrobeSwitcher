@@ -1423,9 +1423,31 @@ local function broadcastState(revision, characterId, active, look)
     for _, client in ipairs(connectedClients()) do sendStateTo(client, revision, characterId, active, look) end
 end
 
+local activateRuntime
+
 local function sendActiveSnapshot(client)
+    local reboundCharacterIds = {}
+    -- Round transitions can clear the runtime index before every Client.Character
+    -- is rebound. Rebuild missing active entries from authoritative sessions when
+    -- a ready client asks for a snapshot, then notify every negotiated peer once.
+    for _, owner in ipairs(connectedClients()) do
+        local ownerSession = sessionFor(owner)
+        local character = clientCharacter(owner)
+        local characterId = characterEntityId(character)
+        if ownerSession ~= nil and ownerSession.active and ownerSession.savedLook ~= nil and characterId > 0 then
+            local runtime = activeByCharacterId[characterId]
+            if tonumber(ownerSession.activeCharacterId) ~= characterId or runtime == nil or
+                runtime.session ~= ownerSession or runtime.revision ~= ownerSession.revision then
+                if activateRuntime(ownerSession, character, ownerSession.savedLook) then
+                    reboundCharacterIds[characterId] = true
+                end
+            end
+        end
+    end
     for characterId, active in pairs(activeByCharacterId) do
-        sendStateTo(client, active.revision, characterId, true, active.look)
+        if reboundCharacterIds[characterId] ~= true then
+            sendStateTo(client, active.revision, characterId, true, active.look)
+        end
     end
 end
 
@@ -1449,7 +1471,7 @@ local function clearActiveRuntime(session, shouldBroadcast)
     return characterId
 end
 
-local function activateRuntime(session, character, look)
+activateRuntime = function(session, character, look)
     local characterId = characterEntityId(character)
     if session == nil or characterId <= 0 or look == nil then return false end
     if session.activeCharacterId ~= nil and tonumber(session.activeCharacterId) ~= characterId then

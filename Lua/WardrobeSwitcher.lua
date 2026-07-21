@@ -3799,6 +3799,9 @@ function Helpers.handleControlledCharacterChange(character)
         active = activeLook == true,
         autoApply = autoApplyLook == true
     })
+    -- If the first hello completed before Character.Controlled was assigned,
+    -- ask again now that own/remote state can be classified and rendered safely.
+    Helpers.sendV2Hello(true)
     pendingSinglePlayerTransferSourceKey = nil
     Helpers.pruneVisualOverrides()
 end
@@ -5061,9 +5064,6 @@ end)
 
 Hook.Add("roundStart", "barowardrobeswitcher.notice", function()
     Helpers.startInitialEquipGate()
-    -- Existing multiplayer connections do not renegotiate between rounds. Reuse
-    -- the v2 hello as an idempotent request for the server's active-look snapshot.
-    Helpers.sendV2Hello(true)
     if isSinglePlayerClient() then
         pendingSinglePlayerRestores = {}
         singlePlayerRoundScanned = false

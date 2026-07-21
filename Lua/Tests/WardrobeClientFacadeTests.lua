@@ -794,7 +794,21 @@ do
     assert(helloBeforeRound ~= nil, "initial v2 hello was not sent")
     local initialSessionId = assert(WardrobeCore.readClientHello(helloBeforeRound)).clientSessionId
     hooks.roundEnd()
+    Character.Controlled = nil
     hooks.roundStart()
+    local helloCountBeforeCharacterReady = 0
+    for _, message in ipairs(networkSent) do
+        if message.name == WardrobeCore.NET.V2_HELLO then
+            helloCountBeforeCharacterReady = helloCountBeforeCharacterReady + 1
+        end
+    end
+    assert(helloCountBeforeCharacterReady == helloCountBeforeRound,
+        "round start requested a wardrobe snapshot before the controlled Character was ready")
+
+    local nextRoundCharacter = makeCharacter(902, 902, "Late Local Player", false)
+    Character.Controlled = nextRoundCharacter
+    Character.CharacterList[#Character.CharacterList + 1] = nextRoundCharacter
+    hooks.think()
     local helloAfterRound = nil
     local helloCountAfterRound = 0
     for _, message in ipairs(networkSent) do
@@ -804,7 +818,7 @@ do
         end
     end
     assert(helloCountAfterRound == helloCountBeforeRound + 1,
-        "multiplayer round start did not request exactly one fresh state snapshot")
+        "a ready controlled Character did not request exactly one fresh state snapshot")
     assert(assert(WardrobeCore.readClientHello(helloAfterRound)).clientSessionId == initialSessionId,
         "round snapshot request replaced the negotiated client session")
 end

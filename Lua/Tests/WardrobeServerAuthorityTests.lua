@@ -271,22 +271,47 @@ local reboundState = assert(Core.readState(Networking.sent[#Networking.sent].mes
 assert(reboundState.active and reboundState.revision == 4 and reboundState.characterId == 43,
     "character replacement must rebind the active look without changing revision")
 
--- A slower client can finish loading after the next round has already rebound
--- active sessions. Its v2 hello must return a snapshot with the new entity ID.
+-- A slower client can finish loading after round start missed another active
+-- player's Character assignment. Its hello must rebuild the authoritative
+-- runtime entry and return that player's saved active look with the new ID.
 do
     Hook.handlers.roundEnd()
-    client.Character = { ID = 143, Name = "Tester Next Round" }
+    client.Character = nil
     Hook.handlers.roundStart()
+    client.Character = { ID = 143, Name = "Tester Next Round" }
     local lateClient = { Connection = {}, Character = { ID = 144, Name = "Late Player" } }
     connectedClients[2] = lateClient
+    local sentBeforeLateHello = #Networking.sent
     local lateHello = newBuffer()
     assert(Core.writeClientHello(lateHello, "late-client-session"))
     Networking.handlers[Core.NET.V2_HELLO](lateHello, lateClient)
-    local lateSnapshot = assert(Core.readState(
-        assert(lastSentMessage(Core.NET.V2_STATE, lateClient.Connection))))
+    local lateStates = {}
+    for index = sentBeforeLateHello + 1, #Networking.sent do
+        local sent = Networking.sent[index]
+        if sent.connection == lateClient.Connection and sent.message.name == Core.NET.V2_STATE then
+            lateStates[#lateStates + 1] = assert(Core.readState(sent.message))
+        end
+    end
+    assert(#lateStates == 1, "a player without a saved look received an unexpected own state")
+    local lateSnapshot = lateStates[1]
     assert(lateSnapshot.active and lateSnapshot.revision == 4 and
         lateSnapshot.characterId == 143 and lateSnapshot.look.slots.Head == "helmet",
         "a late client did not receive the active next-round wardrobe snapshot")
+
+    local sentBeforeOwnHello = #Networking.sent
+    local ownHello = newBuffer()
+    assert(Core.writeClientHello(ownHello, "client-session"))
+    Networking.handlers[Core.NET.V2_HELLO](ownHello, client)
+    local ownSnapshot = nil
+    for index = sentBeforeOwnHello + 1, #Networking.sent do
+        local sent = Networking.sent[index]
+        if sent.connection == client.Connection and sent.message.name == Core.NET.V2_STATE then
+            local state = assert(Core.readState(sent.message))
+            if state.characterId == 143 then ownSnapshot = state end
+        end
+    end
+    assert(ownSnapshot ~= nil and ownSnapshot.active and ownSnapshot.revision == 4,
+        "a ready client did not receive its own saved active wardrobe snapshot")
     connectedClients[2] = nil
 end
 
@@ -297,6 +322,21 @@ local clearStoredApply = sendCommand({
     kind = Core.COMMAND.Clear
 })
 assert(clearStoredApply.accepted and clearStoredApply.revision == 5)
+
+do
+    local observer = { Connection = {}, Character = { ID = 145, Name = "Inactive Observer" } }
+    connectedClients[2] = observer
+    local sentBeforeObserverHello = #Networking.sent
+    local observerHello = newBuffer()
+    assert(Core.writeClientHello(observerHello, "inactive-observer-session"))
+    Networking.handlers[Core.NET.V2_HELLO](observerHello, observer)
+    for index = sentBeforeObserverHello + 1, #Networking.sent do
+        local sent = Networking.sent[index]
+        assert(sent.connection ~= observer.Connection or sent.message.name ~= Core.NET.V2_STATE,
+            "a saved-but-cleared look was incorrectly activated for another client")
+    end
+    connectedClients[2] = nil
+end
 
 local look = assert(Core.newLook(true, false, { Head = "helmet" }))
 local stale = sendCommand({
