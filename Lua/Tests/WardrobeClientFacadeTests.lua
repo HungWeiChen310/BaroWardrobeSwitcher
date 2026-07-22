@@ -48,6 +48,24 @@ for _, forbidden in ipairs({
 }) do
     assert(not clientSource:find(forbidden, 1, true), "facade state mirror returned: " .. forbidden)
 end
+
+local localizedText = {}
+local textFile = nil
+for _, candidate in ipairs({ "Texts.xml", testDirectory .. "../../Texts.xml", "../../Texts.xml" }) do
+    textFile = io.open(candidate, "r")
+    if textFile ~= nil then break end
+end
+local textXml = assert(textFile, "could not load Texts.xml"):read("*a")
+textFile:close()
+for tag, value in textXml:gmatch("<([^>]+)>([^<]*)</[^>]+>") do
+    if tag:find("barowardrobeswitcher.", 1, true) == 1 then localizedText[tag] = value end
+end
+TextManager = {
+    ContainsTag = function(tag) return localizedText[tostring(tag)] ~= nil end,
+    Get = function(tag) return localizedText[tostring(tag)] end
+}
+assert(TextManager.ContainsTag("barowardrobeswitcher.button.save"))
+assert(not TextManager.ContainsTag("barowardrobeswitcher.button.hide_hair"))
 SERVER = false
 CLIENT = true
 InvSlotType = {
@@ -224,6 +242,7 @@ end
 
 LuaUserData = {
     CreateStatic = function(name)
+        if name == "Barotrauma.TextManager" then return TextManager end
         if name == "BaroWardrobeSwitcher.WardrobePersistence" then return persistence end
         if name == "BaroWardrobeSwitcher.WardrobeFileLogger" then return fileLogger end
         if name == "BaroWardrobeSwitcher.VisualOverride" then return visualOverride end
@@ -264,44 +283,12 @@ Hook = {
 }
 local networkHandlers = {}
 local networkSent = {}
-local function newNetworkBuffer(name)
-    local values, readIndex = {}, 1
-    local buffer = { name = name, LengthBits = 0, BitPosition = 0 }
-    local function bitLength(kind, value)
-        if kind == "u16" then return 16 end
-        if kind == "u32" then return 32 end
-        if kind == "byte" then return 8 end
-        if kind == "bool" then return 1 end
-        if kind == "string" then return 16 + #(tostring(value or "")) * 8 end
-        return 0
-    end
-    local function write(kind, value)
-        values[#values + 1] = { kind = kind, value = value }
-        buffer.LengthBits = buffer.LengthBits + bitLength(kind, value)
-    end
-    local function read(kind)
-        local entry = assert(values[readIndex], "read beyond network test buffer")
-        assert(entry.kind == kind, "expected " .. kind .. ", got " .. tostring(entry.kind))
-        readIndex = readIndex + 1
-        buffer.BitPosition = buffer.BitPosition + bitLength(kind, entry.value)
-        return entry.value
-    end
-    buffer.WriteUInt16 = function(value) write("u16", value) end
-    buffer.ReadUInt16 = function() return read("u16") end
-    buffer.WriteUInt32 = function(value) write("u32", value) end
-    buffer.ReadUInt32 = function() return read("u32") end
-    buffer.WriteByte = function(value) write("byte", value) end
-    buffer.ReadByte = function() return read("byte") end
-    buffer.WriteBoolean = function(value) write("bool", value) end
-    buffer.ReadBoolean = function() return read("bool") end
-    buffer.WriteString = function(value) write("string", value) end
-    buffer.ReadString = function() return read("string") end
-    buffer.FinalizeForTransport = function()
-        buffer.LengthBits = math.ceil(buffer.LengthBits / 8) * 8
-        return buffer
-    end
-    return buffer
-end
+local newNetworkBuffer = assert(loadFirst({
+    "Lua/Tests/TestBuffer.lua",
+    testDirectory .. "TestBuffer.lua",
+    "TestBuffer.lua"
+}))
+
 Networking = {
     Receive = function(name, handler) networkHandlers[name] = handler end,
     Start = function(name) return newNetworkBuffer(name) end,
@@ -836,7 +823,47 @@ do
         "a ready controlled Character did not request exactly one fresh state snapshot")
     assert(assert(WardrobeCore.readClientHello(helloAfterRound)).clientSessionId == initialSessionId,
         "round snapshot request replaced the negotiated client session")
+
+    local beforeDeferredV2 = activationCount
+    local nextRoundLook = assert(WardrobeCore.newLook(true, false, { Head = "helmet" }))
+    deliverState({ revision = 20, characterId = nextRoundCharacter.ID, active = true, look = nextRoundLook })
+    assert(activationCount == beforeDeferredV2,
+        "a v2 round-start snapshot bypassed the initial equipment gate")
+    for _ = 1, 15 do hooks.think() end
+    assert(activationCount == beforeDeferredV2 + 1,
+        "a deferred v2 round-start snapshot was not applied exactly once")
+    deliverState({ revision = 20, characterId = nextRoundCharacter.ID, active = true, look = nextRoundLook })
+    deliverState({ revision = 19, characterId = nextRoundCharacter.ID, active = true, look = nextRoundLook })
+    assert(activationCount == beforeDeferredV2 + 1,
+        "duplicate or stale deferred v2 state rendered again")
 end
+
+-- Reload an isolated probing client to cover the compatibility bridge. The
+-- deferred v1 frame must be consumed once when the same equipment gate opens.
+persistence.LoadClientLook = function() return "" end
+local v1Character = makeCharacter(903, 903, "Late Legacy Player", false)
+Character.Controlled = v1Character
+Character.CharacterList = { v1Character }
+assert(dofile(clientPath) == nil)
+hooks.roundStart()
+local deferredV1 = newNetworkBuffer(WardrobeCore.NET.V1_LOOK_APPLY)
+deferredV1.WriteUInt16(v1Character.ID)
+for index = 1, 6 do
+    deferredV1.WriteBoolean(index == 1)
+    if index == 1 then
+        deferredV1.WriteUInt16(0)
+        deferredV1.WriteString("helmet")
+        deferredV1.WriteString("Helmet")
+    end
+end
+deferredV1.FinalizeForTransport()
+local beforeDeferredV1 = activationCount
+networkHandlers[WardrobeCore.NET.V1_LOOK_APPLY](deferredV1)
+assert(activationCount == beforeDeferredV1,
+    "a v1 round-start frame bypassed the initial equipment gate")
+for _ = 1, 20 do hooks.think() end
+assert(activationCount == beforeDeferredV1 + 1,
+    "a deferred v1 round-start frame was not applied exactly once")
 
 assert(#messages == 0,
     "routine wardrobe diagnostics leaked into the Lua console")

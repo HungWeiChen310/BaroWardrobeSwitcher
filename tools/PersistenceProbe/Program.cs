@@ -174,7 +174,7 @@ void TestPrivateFileLog()
 void TestDiagnosticContract()
 {
     _ = NewCaseDirectory("diagnostic-contract");
-    Assert(string.Equals((string?)Invoke(getVersion), "0.5.1", StringComparison.Ordinal),
+    Assert(string.Equals((string?)Invoke(getVersion), "0.5.2", StringComparison.Ordinal),
         "WardrobePersistence did not report the current plugin version.");
 
     AppContext.SetData(FailurePointKey, "BeforeReplace");

@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<infotexts language="Simplified Chinese">
+  <entityname.barowardrobeswitcher>衣柜（测试版）</entityname.barowardrobeswitcher>
+  <barowardrobeswitcher.notice.open_panel>按 F8 可打开衣柜控制面板。</barowardrobeswitcher.notice.open_panel>
+  <barowardrobeswitcher.panel.title>衣柜切换器</barowardrobeswitcher.panel.title>
+  <barowardrobeswitcher.panel.saved_look>已保存外观</barowardrobeswitcher.panel.saved_look>
+  <barowardrobeswitcher.panel.look>外观</barowardrobeswitcher.panel.look>
+  <barowardrobeswitcher.panel.active>启用</barowardrobeswitcher.panel.active>
+  <barowardrobeswitcher.panel.inactive>未启用</barowardrobeswitcher.panel.inactive>
+  <barowardrobeswitcher.panel.last>上次操作</barowardrobeswitcher.panel.last>
+  <barowardrobeswitcher.panel.current>当前</barowardrobeswitcher.panel.current>
+  <barowardrobeswitcher.panel.saved>已保存</barowardrobeswitcher.panel.saved>
+  <barowardrobeswitcher.panel.result>结果</barowardrobeswitcher.panel.result>
+  <barowardrobeswitcher.panel.diagnostics>诊断</barowardrobeswitcher.panel.diagnostics>
+  <barowardrobeswitcher.panel.character>角色</barowardrobeswitcher.panel.character>
+  <barowardrobeswitcher.panel.profile>角色配置</barowardrobeswitcher.panel.profile>
+  <barowardrobeswitcher.panel.attachment_layers>外观图层</barowardrobeswitcher.panel.attachment_layers>
+  <barowardrobeswitcher.panel.attachment_help>角色模组可能重用这些穿戴槽位作为头部组件。自动会遵循外观物品 XML；显示可覆盖装备的隐藏规则。</barowardrobeswitcher.panel.attachment_help>
+  <barowardrobeswitcher.panel.debug_log_hint>诊断会写入 WardrobeClient.log，不再刷满游戏控制台。</barowardrobeswitcher.panel.debug_log_hint>
+  <barowardrobeswitcher.panel.log_file>衣柜日志</barowardrobeswitcher.panel.log_file>
+  <barowardrobeswitcher.panel.saved_file>保存外观文件</barowardrobeswitcher.panel.saved_file>
+  <barowardrobeswitcher.button.save>保存当前服装</barowardrobeswitcher.button.save>
+  <barowardrobeswitcher.button.apply>套用已保存外观</barowardrobeswitcher.button.apply>
+  <barowardrobeswitcher.button.clear>清除外观</barowardrobeswitcher.button.clear>
+  <barowardrobeswitcher.button.forget>忘记已保存外观</barowardrobeswitcher.button.forget>
+  <barowardrobeswitcher.button.attachment_layers>外观图层…</barowardrobeswitcher.button.attachment_layers>
+  <barowardrobeswitcher.button.hide_standard_hair>隐藏标准头发</barowardrobeswitcher.button.hide_standard_hair>
+  <barowardrobeswitcher.button.all_auto>全部自动</barowardrobeswitcher.button.all_auto>
+  <barowardrobeswitcher.button.back>返回</barowardrobeswitcher.button.back>
+  <barowardrobeswitcher.button.enable_transfer>启用外观沿用</barowardrobeswitcher.button.enable_transfer>
+  <barowardrobeswitcher.button.disable_transfer>停用外观沿用</barowardrobeswitcher.button.disable_transfer>
+  <barowardrobeswitcher.button.diagnostics>诊断</barowardrobeswitcher.button.diagnostics>
+  <barowardrobeswitcher.button.hide_diagnostics>隐藏诊断</barowardrobeswitcher.button.hide_diagnostics>
+  <barowardrobeswitcher.button.dump_debug>输出诊断到日志</barowardrobeswitcher.button.dump_debug>
+  <barowardrobeswitcher.button.more_options>更多选项…</barowardrobeswitcher.button.more_options>
+  <barowardrobeswitcher.button.less_options>收起更多选项</barowardrobeswitcher.button.less_options>
+  <barowardrobeswitcher.button.close>关闭</barowardrobeswitcher.button.close>
+  <barowardrobeswitcher.slot.head>头部</barowardrobeswitcher.slot.head>
+  <barowardrobeswitcher.slot.headset>耳机</barowardrobeswitcher.slot.headset>
+  <barowardrobeswitcher.slot.inner>内衣</barowardrobeswitcher.slot.inner>
+  <barowardrobeswitcher.slot.outer>外衣</barowardrobeswitcher.slot.outer>
+  <barowardrobeswitcher.slot.bag>背包</barowardrobeswitcher.slot.bag>
+  <barowardrobeswitcher.slot.health>医疗接口</barowardrobeswitcher.slot.health>
+  <barowardrobeswitcher.attachment.hair>头发</barowardrobeswitcher.attachment.hair>
+  <barowardrobeswitcher.attachment.beard>胡须</barowardrobeswitcher.attachment.beard>
+  <barowardrobeswitcher.attachment.moustache>上唇胡</barowardrobeswitcher.attachment.moustache>
+  <barowardrobeswitcher.attachment.face>脸部附件</barowardrobeswitcher.attachment.face>
+  <barowardrobeswitcher.visibility.auto>自动</barowardrobeswitcher.visibility.auto>
+  <barowardrobeswitcher.visibility.hide>隐藏</barowardrobeswitcher.visibility.hide>
+  <barowardrobeswitcher.visibility.show>显示</barowardrobeswitcher.visibility.show>
+  <barowardrobeswitcher.summary.none>无</barowardrobeswitcher.summary.none>
+  <barowardrobeswitcher.summary.empty>空服装</barowardrobeswitcher.summary.empty>
+  <barowardrobeswitcher.summary.slot>个栏位</barowardrobeswitcher.summary.slot>
+  <barowardrobeswitcher.summary.slots>个栏位</barowardrobeswitcher.summary.slots>
+  <barowardrobeswitcher.status.ready>就绪。</barowardrobeswitcher.status.ready>
+  <barowardrobeswitcher.status.empty>空</barowardrobeswitcher.status.empty>
+  <barowardrobeswitcher.status.already_handled>已处理</barowardrobeswitcher.status.already_handled>
+  <barowardrobeswitcher.status.server_removal_requested>已保存；已请求服务器移除</barowardrobeswitcher.status.server_removal_requested>
+  <barowardrobeswitcher.status.saved_removed>已保存并移除</barowardrobeswitcher.status.saved_removed>
+  <barowardrobeswitcher.status.synced_server>已从服务器同步</barowardrobeswitcher.status.synced_server>
+  <barowardrobeswitcher.status.saved_applied_sync>已从多人同步套用保存的外观。</barowardrobeswitcher.status.saved_applied_sync>
+  <barowardrobeswitcher.status.auto_applied>已自动套用保存的外观。</barowardrobeswitcher.status.auto_applied>
+  <barowardrobeswitcher.status.still_equipped_in>仍装备于 </barowardrobeswitcher.status.still_equipped_in>
+  <barowardrobeswitcher.status.look_cleared_sync>外观已由多人同步清除。</barowardrobeswitcher.status.look_cleared_sync>
+  <barowardrobeswitcher.status.round_ended>回合结束。</barowardrobeswitcher.status.round_ended>
+  <barowardrobeswitcher.status.next_scene_preserved>保存的外观会在下一个场景重新套用。</barowardrobeswitcher.status.next_scene_preserved>
+  <barowardrobeswitcher.status.refreshed>装备改变，已刷新保存的外观。</barowardrobeswitcher.status.refreshed>
+  <barowardrobeswitcher.status.restored_character>已恢复此角色保存的外观。</barowardrobeswitcher.status.restored_character>
+  <barowardrobeswitcher.status.apply_again>保存的外观需要重新套用。</barowardrobeswitcher.status.apply_again>
+  <barowardrobeswitcher.status.character_changed>控制角色已改变。请为此角色保存新的服装。</barowardrobeswitcher.status.character_changed>
+  <barowardrobeswitcher.status.profile_unavailable>仅保存在内存</barowardrobeswitcher.status.profile_unavailable>
+  <barowardrobeswitcher.status.profile_collision>角色身份重复；已停用自动恢复</barowardrobeswitcher.status.profile_collision>
+  <barowardrobeswitcher.status.saved_cleared>已清除保存的外观。</barowardrobeswitcher.status.saved_cleared>
+  <barowardrobeswitcher.status.none>无</barowardrobeswitcher.status.none>
+</infotexts>

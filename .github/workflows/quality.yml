@@ -9,11 +9,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
       - name: Verify metadata and source-only package
-        run: python scripts/verify_package.py
+        run: python3 scripts/verify_package.py
       - name: Run renderer crash characterization contracts
         shell: pwsh
         run: ./scripts/Test-RendererContracts.ps1

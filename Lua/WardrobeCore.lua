@@ -3,7 +3,7 @@
 
 local Core = {}
 
-Core.MOD_VERSION = "0.5.1"
+Core.MOD_VERSION = "0.5.2"
 Core.PROTOCOL_VERSION = 2
 Core.LOOK_SCHEMA_VERSION = 2
 Core.PERSISTENCE_VERSION = 3
@@ -178,10 +178,6 @@ function Core.validateAttachmentVisibility(value, legacyHideHair)
         result[key] = state
     end
     return result
-end
-
-function Core.copyAttachmentVisibility(value)
-    return Core.validateAttachmentVisibility(value, false)
 end
 
 function Core.legacyHideHair(value)
@@ -581,12 +577,6 @@ function Core.readLook(message)
     })
 end
 
-function Core.tryReadLook(message)
-    local ok, look, reason = pcall(Core.readLook, message)
-    if not ok then return nil, "malformed look payload: " .. tostring(look) end
-    return look, reason
-end
-
 function Core.writeClientHello(message, clientSessionId)
     local sessionId, reason = checkBoundedString(
         clientSessionId,
@@ -869,7 +859,7 @@ end
 local function attachmentVisibilityEffect(kind, look)
     return effect(kind, {
         attachmentVisibility = look ~= nil and
-            Core.copyAttachmentVisibility(look.attachmentVisibility) or
+            Core.validateAttachmentVisibility(look.attachmentVisibility, false) or
             Core.attachmentVisibilityFromLegacy(false)
     })
 end
@@ -1215,7 +1205,6 @@ function Core.reduce(currentState, event)
     if event.type == "CommandSendSucceeded" then
         if event.operationId ~= nil and state.pendingOperationId ~= nil and
             event.operationId ~= state.pendingOperationId then
-            effects[#effects + 1] = effect("IgnoredForeignSend", { operationId = event.operationId })
             return state, effects
         end
         if state.pendingKind == Core.COMMAND.Save and event.awaitAck ~= true then
@@ -1278,31 +1267,6 @@ function Core.reduce(currentState, event)
         effects[#effects + 1] = effect("ClearRender", {
             forget = event.type == "LocalForgetRequested"
         })
-        return state, effects
-    end
-
-    if event.type == "ClearSucceeded" then
-        state.active = false
-        state.autoApply = false
-        state.phase = Core.hasLook(state.look) and Core.PHASE.SavedInactive or Core.PHASE.Idle
-        clearPending(state)
-        clearRollback(state)
-        effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
-        return state, effects
-    end
-
-    if event.type == "ForgetSucceeded" then
-        state.look = nil
-        state.active = false
-        state.autoApply = false
-        if event.preservePending == true then
-            state.phase = Core.PHASE.ClearPending
-        else
-            state.phase = state.characterKey ~= nil and Core.PHASE.Idle or Core.PHASE.NoCharacter
-            clearPending(state)
-        end
-        clearRollback(state)
-        effects[#effects + 1] = effect("ClearPersistence")
         return state, effects
     end
 
@@ -1458,7 +1422,6 @@ function Core.reduce(currentState, event)
     if event.type == "RenderSucceeded" then
         local revision = tonumber(event.revision)
         if revision ~= nil and revision < state.revision then
-            effects[#effects + 1] = effect("IgnoredStaleRender", { revision = revision })
             return state, effects
         end
         state.phase = Core.PHASE.Active
@@ -1642,20 +1605,7 @@ function Core.reduce(currentState, event)
         return state, effects
     end
 
-    if event.type == "Reset" then
-        return Core.newClientState({
-            clientSessionId = state.clientSessionId,
-            sessionKey = event.sessionKey,
-            characterKey = event.characterKey
-        }), effects
-    end
-
     error("unknown reducer event " .. tostring(event.type))
-end
-
-function Core.copyClientState(state)
-    if type(state) ~= "table" then return nil end
-    return copyClientState(state)
 end
 
 -- UI permissions are derived from the phase rather than maintained separately,

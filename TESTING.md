@@ -1,6 +1,6 @@
 # Release test matrix
 
-This checklist is the release gate for v0.5.1. Automated checks must pass before packaging, and the single-player crew-profile matrix below must be completed in game before release. The pinned 1.13.4.0 compatibility target retains its previously verified renderer and multiplayer matrix.
+This checklist is the release gate for v0.5.2. Automated checks must pass before packaging, and the single-player crew-profile matrix below must be completed in game before release. The pinned 1.13.4.0 compatibility target retains its previously verified renderer and multiplayer matrix.
 
 ## Automated checks
 
@@ -33,9 +33,9 @@ Expected:
 
 Run single-player, Windows host, and Linux dedicated server with at least two clients.
 
-- v0.5.1 client ↔ v0.5.1 server negotiates v2.
-- v0.5.1 client ↔ v1 server falls back after five seconds.
-- v1 client ↔ v0.5.1 server continues through the six old message names.
+- v0.5.2 client ↔ v0.5.2 server negotiates v2.
+- v0.5.2 client ↔ v1 server falls back after five seconds.
+- v1 client ↔ v0.5.2 server continues through the six old message names.
 - Duplicate operation IDs return the original result without applying twice.
 - Out-of-order state is ignored; clear/forget followed by a late stale apply stays cleared.
 - Join, reconnect, round start/end, death/respawn, character replacement, and campaign/server changes preserve the documented intent.

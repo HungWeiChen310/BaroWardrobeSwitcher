@@ -2,7 +2,7 @@
 
 LuaCsForBarotrauma client-side wardrobe switcher for real equipment plus stored fashion visuals.
 
-Version 0.5.1 targets the verified Barotrauma 1.13.4.0 and LuaCs contracts. It adds campaign-scoped single-player crew profiles, automatic NPC restoration, and four-layer appearance visibility without changing protocol version 2 or wire look schema 2. See [ARCHITECTURE.md](ARCHITECTURE.md) for component boundaries and [COMPATIBILITY.md](COMPATIBILITY.md) for the pinned game/LuaCs contracts and release gates.
+Version 0.5.2 targets the verified Barotrauma 1.13.4.0 and LuaCs contracts. It retains campaign-scoped single-player crew profiles, automatic NPC restoration, and four-layer appearance visibility without changing protocol version 2 or wire look schema 2. See [ARCHITECTURE.md](ARCHITECTURE.md) for component boundaries and [COMPATIBILITY.md](COMPATIBILITY.md) for the pinned game/LuaCs contracts and release gates.
 
 ## Design
 
@@ -35,9 +35,9 @@ Version 0.5.1 targets the verified Barotrauma 1.13.4.0 and LuaCs contracts. It a
 - Enable `LuaCsForBarotrauma` together with this mod.
 - Enable CSharp scripting in the LuaCs Settings menu and accept/enable this mod's C# run prompt; the visual override patch is client-side C#.
 - The C# compatibility adapter is compiled from the source-only `CSharp/Client` folder by LuaCs.
-- At the start of each round, the mod posts an English in-game notice that the wardrobe control panel opens with `F8`.
+- At the start of each round, the mod posts a localized in-game notice that the wardrobe control panel opens with `F8`.
 - A successful C# load prints:
-  - `[Baro Wardrobe Switcher] C# visual override v0.5.1 initializing.`
+  - `[Baro Wardrobe Switcher] C# visual override v0.5.2 initializing.`
   - `[Baro Wardrobe Switcher] C# visual override loaded: ready.`
 - If the panel says `C#: unavailable` or `C#: missing required hooks`, enable C# scripting in LuaCs, accept this mod's C# prompt, and reload before saving or applying a look.
 - Multiplayer client looks use persistence schema-v3 `ClientLook.json`. Single-player crew profiles use schema-v2 `SinglePlayerProfiles.json`, scoped by a SHA-256 hash of the campaign save path and a SHA-256 hash of the character fingerprint. Both formats store the complete four-layer visibility object. Valid client v2 and single-player v1 files migrate automatically and retain `.v2.bak` / `.v1.bak` backups. Writes are atomic, corrupt files are quarantined, and raw campaign paths are never written to disk.
@@ -56,7 +56,7 @@ Version 0.5.1 targets the verified Barotrauma 1.13.4.0 and LuaCs contracts. It a
 - Server persistence uses schema-v3 `ServerLooks.json` and stable `Client.AccountId` representations. Valid v2 files migrate with a `.v2.bak`; authoritative JSON no longer stores `hideHair`. Anonymous clients can sync during the current server session but are never persisted by display name.
 - In multiplayer, `Clear Look` only deactivates the current visual look while keeping the saved look. `Forget Saved Look` also asks the server to delete the saved look for that client, so it will not be restored by later round-start or reconnect sync.
 - Saving a new outfit while an old multiplayer look is active clears the old server-side active look before storing the new saved identifiers, preventing other clients from keeping stale visuals.
-- Protocol 2 adds hello negotiation, operation IDs, revisions, acknowledgements, idempotent retry, and stale-command rejection. The original six message names remain as a v1 bridge in v0.5.1 and are scheduled for removal in v0.6.0.
+- Protocol 2 adds hello negotiation, operation IDs, revisions, acknowledgements, idempotent retry, and stale-command rejection. The original six message names remain as a v1 bridge in v0.5.2 and are scheduled for removal in v0.6.0.
 - Updated protocol-2 peers advertise attachment-visibility capability `0x01`. A complete four-byte optional look tail carries force-hide/show masks. Older v2 peers ignore the tail; when the server does not advertise support, the client keeps the detailed policy locally and sends only the safe legacy `hideHair` projection.
 - Server synchronization is event-driven: connect sends a targeted snapshot and accepted state changes broadcast once. There is no steady-state heartbeat or per-frame full-client scan; clients still hold early apply/clear messages briefly while a target character entity is spawning.
 

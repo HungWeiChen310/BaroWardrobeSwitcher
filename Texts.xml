@@ -1,4 +1,75 @@
 <?xml version="1.0" encoding="utf-8"?>
 <infotexts language="English">
   <entityname.barowardrobeswitcher>Wardrobe(Beta)</entityname.barowardrobeswitcher>
+  <barowardrobeswitcher.notice.open_panel>Wardrobe control panel can be opened by pressing F8.</barowardrobeswitcher.notice.open_panel>
+  <barowardrobeswitcher.panel.title>Wardrobe Switcher</barowardrobeswitcher.panel.title>
+  <barowardrobeswitcher.panel.saved_look>Saved look</barowardrobeswitcher.panel.saved_look>
+  <barowardrobeswitcher.panel.look>Look</barowardrobeswitcher.panel.look>
+  <barowardrobeswitcher.panel.active>active</barowardrobeswitcher.panel.active>
+  <barowardrobeswitcher.panel.inactive>inactive</barowardrobeswitcher.panel.inactive>
+  <barowardrobeswitcher.panel.last>Last</barowardrobeswitcher.panel.last>
+  <barowardrobeswitcher.panel.current>Current</barowardrobeswitcher.panel.current>
+  <barowardrobeswitcher.panel.saved>Saved</barowardrobeswitcher.panel.saved>
+  <barowardrobeswitcher.panel.result>Result</barowardrobeswitcher.panel.result>
+  <barowardrobeswitcher.panel.diagnostics>Diagnostics</barowardrobeswitcher.panel.diagnostics>
+  <barowardrobeswitcher.panel.character>Character</barowardrobeswitcher.panel.character>
+  <barowardrobeswitcher.panel.profile>Character profile</barowardrobeswitcher.panel.profile>
+  <barowardrobeswitcher.panel.attachment_layers>Appearance Layers</barowardrobeswitcher.panel.attachment_layers>
+  <barowardrobeswitcher.panel.attachment_help>Character mods may reuse these wearable slots for head parts. Auto follows the appearance item's XML; Show overrides equipment hiding.</barowardrobeswitcher.panel.attachment_help>
+  <barowardrobeswitcher.panel.debug_log_hint>Diagnostics are written to WardrobeClient.log without filling the game console.</barowardrobeswitcher.panel.debug_log_hint>
+  <barowardrobeswitcher.panel.log_file>Wardrobe log</barowardrobeswitcher.panel.log_file>
+  <barowardrobeswitcher.panel.saved_file>Saved-look file</barowardrobeswitcher.panel.saved_file>
+  <barowardrobeswitcher.button.save>Save Current Outfit</barowardrobeswitcher.button.save>
+  <barowardrobeswitcher.button.apply>Apply Saved Look</barowardrobeswitcher.button.apply>
+  <barowardrobeswitcher.button.clear>Clear Look</barowardrobeswitcher.button.clear>
+  <barowardrobeswitcher.button.forget>Forget Saved Look</barowardrobeswitcher.button.forget>
+  <barowardrobeswitcher.button.attachment_layers>Appearance Layers...</barowardrobeswitcher.button.attachment_layers>
+  <barowardrobeswitcher.button.hide_standard_hair>Hide Standard Hair</barowardrobeswitcher.button.hide_standard_hair>
+  <barowardrobeswitcher.button.all_auto>All Auto</barowardrobeswitcher.button.all_auto>
+  <barowardrobeswitcher.button.back>Back</barowardrobeswitcher.button.back>
+  <barowardrobeswitcher.button.enable_transfer>Enable Appearance Transfer</barowardrobeswitcher.button.enable_transfer>
+  <barowardrobeswitcher.button.disable_transfer>Disable Appearance Transfer</barowardrobeswitcher.button.disable_transfer>
+  <barowardrobeswitcher.button.diagnostics>Diagnostics</barowardrobeswitcher.button.diagnostics>
+  <barowardrobeswitcher.button.hide_diagnostics>Hide Diagnostics</barowardrobeswitcher.button.hide_diagnostics>
+  <barowardrobeswitcher.button.dump_debug>Dump Debug Log</barowardrobeswitcher.button.dump_debug>
+  <barowardrobeswitcher.button.more_options>More Options...</barowardrobeswitcher.button.more_options>
+  <barowardrobeswitcher.button.less_options>Hide Additional Options</barowardrobeswitcher.button.less_options>
+  <barowardrobeswitcher.button.close>Close</barowardrobeswitcher.button.close>
+  <barowardrobeswitcher.slot.head>Head</barowardrobeswitcher.slot.head>
+  <barowardrobeswitcher.slot.headset>Headset</barowardrobeswitcher.slot.headset>
+  <barowardrobeswitcher.slot.inner>Inner</barowardrobeswitcher.slot.inner>
+  <barowardrobeswitcher.slot.outer>Outer</barowardrobeswitcher.slot.outer>
+  <barowardrobeswitcher.slot.bag>Bag</barowardrobeswitcher.slot.bag>
+  <barowardrobeswitcher.slot.health>Health</barowardrobeswitcher.slot.health>
+  <barowardrobeswitcher.attachment.hair>Hair</barowardrobeswitcher.attachment.hair>
+  <barowardrobeswitcher.attachment.beard>Beard</barowardrobeswitcher.attachment.beard>
+  <barowardrobeswitcher.attachment.moustache>Moustache</barowardrobeswitcher.attachment.moustache>
+  <barowardrobeswitcher.attachment.face>Face Attachment</barowardrobeswitcher.attachment.face>
+  <barowardrobeswitcher.visibility.auto>Auto</barowardrobeswitcher.visibility.auto>
+  <barowardrobeswitcher.visibility.hide>Hide</barowardrobeswitcher.visibility.hide>
+  <barowardrobeswitcher.visibility.show>Show</barowardrobeswitcher.visibility.show>
+  <barowardrobeswitcher.summary.none>none</barowardrobeswitcher.summary.none>
+  <barowardrobeswitcher.summary.empty>empty outfit</barowardrobeswitcher.summary.empty>
+  <barowardrobeswitcher.summary.slot>slot</barowardrobeswitcher.summary.slot>
+  <barowardrobeswitcher.summary.slots>slots</barowardrobeswitcher.summary.slots>
+  <barowardrobeswitcher.status.ready>Ready.</barowardrobeswitcher.status.ready>
+  <barowardrobeswitcher.status.empty>Empty</barowardrobeswitcher.status.empty>
+  <barowardrobeswitcher.status.already_handled>Already handled</barowardrobeswitcher.status.already_handled>
+  <barowardrobeswitcher.status.server_removal_requested>Saved; server removal requested</barowardrobeswitcher.status.server_removal_requested>
+  <barowardrobeswitcher.status.saved_removed>Saved and removed</barowardrobeswitcher.status.saved_removed>
+  <barowardrobeswitcher.status.synced_server>Synced from server</barowardrobeswitcher.status.synced_server>
+  <barowardrobeswitcher.status.saved_applied_sync>Saved look applied from multiplayer sync.</barowardrobeswitcher.status.saved_applied_sync>
+  <barowardrobeswitcher.status.auto_applied>Saved look auto-applied.</barowardrobeswitcher.status.auto_applied>
+  <barowardrobeswitcher.status.still_equipped_in>Still equipped in </barowardrobeswitcher.status.still_equipped_in>
+  <barowardrobeswitcher.status.look_cleared_sync>Look cleared from multiplayer sync.</barowardrobeswitcher.status.look_cleared_sync>
+  <barowardrobeswitcher.status.round_ended>Round ended.</barowardrobeswitcher.status.round_ended>
+  <barowardrobeswitcher.status.next_scene_preserved>Saved look will be reapplied in the next scene.</barowardrobeswitcher.status.next_scene_preserved>
+  <barowardrobeswitcher.status.refreshed>Saved look refreshed for changed equipment.</barowardrobeswitcher.status.refreshed>
+  <barowardrobeswitcher.status.restored_character>Saved look restored for this character.</barowardrobeswitcher.status.restored_character>
+  <barowardrobeswitcher.status.apply_again>Saved look needs to be applied again.</barowardrobeswitcher.status.apply_again>
+  <barowardrobeswitcher.status.character_changed>Controlled character changed. Save a new outfit for this character.</barowardrobeswitcher.status.character_changed>
+  <barowardrobeswitcher.status.profile_unavailable>memory only</barowardrobeswitcher.status.profile_unavailable>
+  <barowardrobeswitcher.status.profile_collision>ambiguous identity; automatic restore disabled</barowardrobeswitcher.status.profile_collision>
+  <barowardrobeswitcher.status.saved_cleared>Saved look cleared.</barowardrobeswitcher.status.saved_cleared>
+  <barowardrobeswitcher.status.none>none</barowardrobeswitcher.status.none>
 </infotexts>

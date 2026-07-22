@@ -103,22 +103,6 @@ local function messageLengthBytes(message)
     return nil
 end
 
-local function attachmentVisibilityFromLegacy(hideHair)
-    return Core.attachmentVisibilityFromLegacy(hideHair == true)
-end
-
-local function validateAttachmentVisibility(value, legacyHideHair)
-    return Core.validateAttachmentVisibility(value, legacyHideHair == true)
-end
-
-local function copyAttachmentVisibility(value, legacyHideHair)
-    local visibility = validateAttachmentVisibility(value, legacyHideHair)
-    if visibility == nil then return attachmentVisibilityFromLegacy(legacyHideHair) end
-    local copy = {}
-    for _, key in ipairs(ATTACHMENT_KEYS) do copy[key] = visibility[key] end
-    return copy
-end
-
 local function legacyHideHair(value)
     return Core.legacyHideHair(value)
 end
@@ -126,7 +110,8 @@ end
 local function cloneLook(look)
     if look == nil then return nil end
     local attachmentVisibility =
-        copyAttachmentVisibility(look.attachmentVisibility, look.hideHair == true)
+        Core.validateAttachmentVisibility(look.attachmentVisibility, look.hideHair == true) or
+        Core.attachmentVisibilityFromLegacy(look.hideHair == true)
     local cloned = {
         schemaVersion = LOOK_SCHEMA_VERSION,
         captured = look.captured == true,
@@ -470,7 +455,8 @@ local function hasOnlyFields(value, allowed)
 end
 
 local function encodeAttachmentVisibilityJson(visibility)
-    local canonical = copyAttachmentVisibility(visibility, false)
+    local canonical = Core.validateAttachmentVisibility(visibility, false) or
+        Core.attachmentVisibilityFromLegacy(false)
     local members = {}
     for _, key in ipairs(ATTACHMENT_KEYS) do
         members[#members + 1] = '"' .. key .. '":"' .. jsonEscape(canonical[key]) .. '"'
@@ -567,7 +553,7 @@ local function parseLegacyDocument(text)
             schemaVersion = LOOK_SCHEMA_VERSION,
             captured = true,
             hideHair = false,
-            attachmentVisibility = attachmentVisibilityFromLegacy(false),
+            attachmentVisibility = Core.attachmentVisibilityFromLegacy(false),
             slots = {}
         }
         for part in line:gmatch("[^|]+") do
@@ -622,7 +608,7 @@ local function validateStoredLook(raw, persistenceVersion)
         }) or raw.hideHair ~= nil or type(raw.attachmentVisibility) ~= "table" then
             return nil
         end
-        visibility = validateAttachmentVisibility(raw.attachmentVisibility, false)
+        visibility = Core.validateAttachmentVisibility(raw.attachmentVisibility, false)
     elseif persistenceVersion == 2 then
         if not hasOnlyFields(raw, {
             schemaVersion = true,
@@ -632,7 +618,7 @@ local function validateStoredLook(raw, persistenceVersion)
         }) or type(raw.hideHair) ~= "boolean" then
             return nil
         end
-        visibility = attachmentVisibilityFromLegacy(raw.hideHair == true)
+        visibility = Core.attachmentVisibilityFromLegacy(raw.hideHair == true)
     else
         return nil
     end
@@ -723,10 +709,6 @@ local function loadJsonPersistence(path)
         end
         loaded[accountId] = record
     end
-    if document.migratedLegacySteamIds ~= nil and type(document.migratedLegacySteamIds) ~= "table" then
-        quarantine(path, "invalid_migrated_legacy_ids")
-        return false
-    end
     local loadedMigrated = {}
     for _, steamId in ipairs(document.migratedLegacySteamIds or {}) do
         if type(steamId) ~= "string" then
@@ -741,10 +723,6 @@ local function loadJsonPersistence(path)
         loadedMigrated[steamId] = true
     end
     local pendingLegacy = {}
-    if document.pendingLegacySteamRecords ~= nil and type(document.pendingLegacySteamRecords) ~= "table" then
-        quarantine(path, "invalid_pending_legacy_records")
-        return false
-    end
     for _, raw in ipairs(document.pendingLegacySteamRecords or {}) do
         local steamId = type(raw) == "table" and trim(raw.steamId) or nil
         local record = decodeStoredRecord(raw, documentVersion, "steamId")
@@ -990,7 +968,7 @@ local function canonicalizeLook(raw, requireCaptured)
     end
     if requireCaptured and raw.captured ~= true then return nil, "look_not_captured" end
     local attachmentVisibility, visibilityReason =
-        validateAttachmentVisibility(raw.attachmentVisibility, raw.hideHair == true)
+        Core.validateAttachmentVisibility(raw.attachmentVisibility, raw.hideHair == true)
     if attachmentVisibility == nil then return nil, visibilityReason end
     local canonical = {
         schemaVersion = LOOK_SCHEMA_VERSION,
@@ -1017,7 +995,7 @@ end
 
 local function captureAuthoritativeLook(character, clientLook)
     if character == nil then return nil, "character_unavailable" end
-    local attachmentVisibility, visibilityReason = validateAttachmentVisibility(
+    local attachmentVisibility, visibilityReason = Core.validateAttachmentVisibility(
         type(clientLook) == "table" and clientLook.attachmentVisibility or nil,
         type(clientLook) == "table" and clientLook.hideHair == true
     )
@@ -1430,14 +1408,15 @@ local function commitVisibility(session, requestedLook)
     if session.savedLook == nil then return false, "look_unavailable" end
     if type(requestedLook) ~= "table" then return false, "visibility_unavailable" end
     local attachmentVisibility, visibilityReason =
-        validateAttachmentVisibility(requestedLook.attachmentVisibility, requestedLook.hideHair == true)
+        Core.validateAttachmentVisibility(requestedLook.attachmentVisibility, requestedLook.hideHair == true)
     if attachmentVisibility == nil then return false, visibilityReason or "invalid_attachment_visibility" end
 
     -- Only merge the visibility policy into the authoritative server capture.
     -- Client-supplied slots are deliberately ignored so this command cannot be
     -- used to replace or smuggle equipment identifiers.
     local merged = cloneLook(session.savedLook)
-    merged.attachmentVisibility = copyAttachmentVisibility(attachmentVisibility, false)
+    merged.attachmentVisibility = Core.validateAttachmentVisibility(attachmentVisibility, false) or
+        Core.attachmentVisibilityFromLegacy(false)
     merged.hideHair = legacyHideHair(merged.attachmentVisibility)
 
     local previous = snapshotCommitState(session)
@@ -1614,7 +1593,7 @@ local function readLegacyApplyLook(message)
             schemaVersion = LOOK_SCHEMA_VERSION,
             captured = true,
             hideHair = false,
-            attachmentVisibility = attachmentVisibilityFromLegacy(false),
+            attachmentVisibility = Core.attachmentVisibilityFromLegacy(false),
             slots = {}
         }
         local bytes = 1
@@ -1793,5 +1772,6 @@ end)
 
 loadPersistence()
 lastGameSessionKey = currentGameSessionKey()
-log("Server authority v0.5.1 loaded (protocol 2, look schema 2, persistence 3). Path: " ..
+log("Server authority v" .. tostring(Core.MOD_VERSION) ..
+    " loaded (protocol 2, look schema 2, persistence 3). Path: " ..
     tostring(storagePath("ServerLooks.json")))

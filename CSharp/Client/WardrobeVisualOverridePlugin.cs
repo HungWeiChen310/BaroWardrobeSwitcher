@@ -88,7 +88,7 @@ namespace BaroWardrobeSwitcher
 
     public static partial class WardrobePersistence
     {
-        public const string Version = "0.5.1";
+        public const string Version = "0.5.2";
         private const int PersistenceVersion = 3;
         private const string ModFolderName = "BaroWardrobeSwitcher";
         private const string ClientLookFileName = "ClientLook.json";
@@ -381,11 +381,7 @@ namespace BaroWardrobeSwitcher
                     {
                         File.Replace(tempPath, path, backupPath, ignoreMetadataErrors: true);
                     }
-                    catch (PlatformNotSupportedException)
-                    {
-                        ReplaceWithPortableFallback(tempPath, path, backupPath);
-                    }
-                    catch (IOException)
+                    catch (Exception exception) when (exception is PlatformNotSupportedException || exception is IOException)
                     {
                         ReplaceWithPortableFallback(tempPath, path, backupPath);
                     }
@@ -880,12 +876,6 @@ namespace BaroWardrobeSwitcher
             [JsonPropertyName("slots")]
             public Dictionary<string, string> Slots { get; set; }
 
-            [JsonIgnore]
-            public bool HideHair
-            {
-                get => LegacyHideHair(AttachmentVisibility);
-                set => AttachmentVisibility = CreateAttachmentVisibility(value);
-            }
         }
 
         private sealed class AttachmentVisibilityDocument
@@ -924,7 +914,7 @@ namespace BaroWardrobeSwitcher
     public static class VisualOverride
     {
 
-        public const string Version = "0.5.1";
+        public const string Version = "0.5.2";
 
         public static string GetVersion()
         {
@@ -1263,8 +1253,6 @@ namespace BaroWardrobeSwitcher
         public static void RestoreCharacterItemVisuals(Character character)
         {
             if (character == null) { return; }
-            ClearSuppressedEquipmentSounds(character);
-            ClearSuppressedEquipmentComponentSounds(character);
             if (RenderSessions.TryGetValue(character, out RenderSession session))
             {
                 session.SuppressedEquipmentSounds.Clear();
@@ -1874,15 +1862,14 @@ namespace BaroWardrobeSwitcher
 
                 int defaultDepthIndex = Math.Max((limb.WearingItems?.Count ?? 0) + DefaultFallbackDepthPadding, DefaultFallbackDepthPadding);
                 int recessedDepthIndex = RecessedFallbackDepthStart;
-                foreach (KeyValuePair<Tuple<WearableType, LimbType>, FashionSpriteDescriptor> pair in EnumerateFashionSpritesForLimb(session.SpritesBySlot, limb.type))
+                foreach (FashionSpriteDescriptor descriptor in EnumerateFashionSpritesForLimb(session.SpritesBySlot, limb.type))
                 {
-                    WearableSprite sprite = pair.Value?.Sprite;
-                    if (sprite == null || drawnSprites.Contains(sprite)) { continue; }
-                    if (!SpriteBelongsToLimb(sprite, limb.type)) { continue; }
+                    WearableSprite sprite = descriptor.Sprite;
+                    if (drawnSprites.Contains(sprite)) { continue; }
 
                     drawnSprites.Add(sprite);
                     fallbackDrawnFashionSpriteCount++;
-                    int depthIndex = UsesRecessedFashionLayer(pair.Value) ? recessedDepthIndex++ : defaultDepthIndex++;
+                    int depthIndex = UsesRecessedFashionLayer(descriptor) ? recessedDepthIndex++ : defaultDepthIndex++;
                     DrawFashionWearable(limb, transaction, sprite, depthIndex, spriteBatch, overrideColor);
                 }
             }
@@ -1959,7 +1946,7 @@ namespace BaroWardrobeSwitcher
                                         session.FashionAnimations.Count > 0;
             if (hasFashionAnimations) { return true; }
 
-            return !IsLargeEquipmentMovementAnimation(animationInfo);
+            return !FashionEffectPolicy.IsLargeEquipmentMovementAnimation(animationInfo);
         }
 
         private static void KeepFashionAnimationsAlive(AnimController animController)
@@ -2069,7 +2056,7 @@ namespace BaroWardrobeSwitcher
             if (session == null || item?.Components == null) { return 0; }
             if (!HasCapability("statusSound") ||
                 SoundsField == null ||
-                !FashionEffectPolicy.ShouldCaptureStatusSounds(item))
+                !FashionEffectPolicy.ShouldCaptureItemSounds(item))
             {
                 return 0;
             }
@@ -2100,7 +2087,7 @@ namespace BaroWardrobeSwitcher
                 item?.Components == null ||
                 !HasCapability("itemSound") ||
                 ComponentSoundsField == null ||
-                !FashionEffectPolicy.ShouldCaptureComponentSounds(item))
+                !FashionEffectPolicy.ShouldCaptureItemSounds(item))
             {
                 return 0;
             }
@@ -2168,22 +2155,6 @@ namespace BaroWardrobeSwitcher
                 if (IsFashionComponentSound(character, component)) { continue; }
                 if (!hasFashionSound && !HasAnyLoopingComponentSound(component)) { continue; }
                 session.SuppressedEquipmentComponentSounds.Add(component);
-            }
-        }
-
-        private static void ClearSuppressedEquipmentSounds(Character character)
-        {
-            if (character != null && RenderSessions.TryGetValue(character, out RenderSession session))
-            {
-                session.SuppressedEquipmentSounds.Clear();
-            }
-        }
-
-        private static void ClearSuppressedEquipmentComponentSounds(Character character)
-        {
-            if (character != null && RenderSessions.TryGetValue(character, out RenderSession session))
-            {
-                session.SuppressedEquipmentComponentSounds.Clear();
             }
         }
 
@@ -2531,7 +2502,7 @@ namespace BaroWardrobeSwitcher
             }
         }
 
-        private static IEnumerable<KeyValuePair<Tuple<WearableType, LimbType>, FashionSpriteDescriptor>> EnumerateFashionSpritesForLimb(
+        private static IEnumerable<FashionSpriteDescriptor> EnumerateFashionSpritesForLimb(
             Dictionary<Tuple<WearableType, LimbType>, List<FashionSpriteDescriptor>> spritesBySlot,
             LimbType limbType)
         {
@@ -2540,21 +2511,17 @@ namespace BaroWardrobeSwitcher
                     pair.Value != null &&
                     (pair.Key.Item2 == limbType || pair.Key.Item2 == LimbType.None))
                 .SelectMany(pair => pair.Value
-                    .Where(descriptor => descriptor?.Sprite != null && SpriteBelongsToLimb(descriptor.Sprite, limbType))
-                    .Select(descriptor => new KeyValuePair<Tuple<WearableType, LimbType>, FashionSpriteDescriptor>(pair.Key, descriptor)))
-                .OrderBy(pair => GetFashionLayerSortKey(pair.Value))
-                .ThenByDescending(pair => pair.Value.Sprite?.Sprite?.Depth ?? 0.0f);
+                    .Where(descriptor => descriptor?.Sprite != null && SpriteBelongsToLimb(descriptor.Sprite, limbType)))
+                .OrderBy(GetFashionLayerSortKey)
+                .ThenByDescending(descriptor => descriptor.Sprite?.Sprite?.Depth ?? 0.0f);
         }
 
         private static void SortWearablesForDraw(List<WearableSprite> wearingItems)
         {
             if (wearingItems == null) { return; }
             List<WearableSprite> sortedWearables = wearingItems
-                .Select((wearable, index) => new { Wearable = wearable, Index = index })
-                .OrderBy(entry => GetFashionLayerSortKey(entry.Wearable))
-                .ThenByDescending(entry => entry.Wearable?.Sprite?.Depth ?? 0.0f)
-                .ThenBy(entry => entry.Index)
-                .Select(entry => entry.Wearable)
+                .OrderBy(GetFashionLayerSortKey)
+                .ThenByDescending(wearable => wearable?.Sprite?.Depth ?? 0.0f)
                 .ToList();
 
             wearingItems.Clear();
@@ -2584,12 +2551,6 @@ namespace BaroWardrobeSwitcher
             return 5;
         }
 
-        private static bool UsesRecessedFashionLayer(WearableSprite sprite)
-        {
-            return SlotContains(sprite, InvSlotType.Bag) ||
-                   SlotContains(sprite, InvSlotType.HealthInterface);
-        }
-
         private static bool UsesRecessedFashionLayer(FashionSpriteDescriptor descriptor)
         {
             return descriptor != null &&
@@ -2612,12 +2573,6 @@ namespace BaroWardrobeSwitcher
         {
             return SlotContains(sprite, InvSlotType.Head) ||
                    SlotContains(sprite, InvSlotType.Headset);
-        }
-
-        private static bool IsHeadVisualSprite(WearableSprite sprite)
-        {
-            return IsHeadSlotSprite(sprite) ||
-                   sprite?.Limb == LimbType.Head;
         }
 
         private static bool SlotContains(WearableSprite sprite, InvSlotType slot)
@@ -2719,32 +2674,6 @@ namespace BaroWardrobeSwitcher
             }
         }
 
-        private static bool IsLargeEquipmentMovementAnimation(object animationInfo)
-        {
-            if (animationInfo == null) { return false; }
-            Type animationInfoType = animationInfo.GetType();
-            try
-            {
-                PropertyInfo typeProperty = animationInfoType.GetProperty("Type");
-                PropertyInfo fileProperty = animationInfoType.GetProperty("File");
-                string animationType = typeProperty?.GetValue(animationInfo)?.ToString();
-                if (!string.Equals(animationType, "Walk", StringComparison.OrdinalIgnoreCase) &&
-                    !string.Equals(animationType, "Run", StringComparison.OrdinalIgnoreCase))
-                {
-                    return false;
-                }
-
-                string file = fileProperty?.GetValue(animationInfo)?.ToString() ?? string.Empty;
-                return file.IndexOf("Exosuit", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                       file.IndexOf("DivingSuit", StringComparison.OrdinalIgnoreCase) >= 0;
-            }
-            catch (Exception ex)
-            {
-                LogAnimationError($"Failed to inspect temporary animation: {ex.GetType().Name}: {ex.Message}");
-                return false;
-            }
-        }
-
         private static void LogVirtualDrawError(string message)
         {
             if (virtualDrawErrorLogCount >= 6) { return; }
@@ -2764,11 +2693,6 @@ namespace BaroWardrobeSwitcher
             if (soundOverrideErrorLogCount >= 6) { return; }
             soundOverrideErrorLogCount++;
             LuaCsLogger.Log($"[Baro Wardrobe Switcher] {message}");
-        }
-
-        internal static MethodInfo FindLimbDrawMethod()
-        {
-            return LimbDrawMethod;
         }
 
         private static bool IsEquipmentSprite(WearableSprite sprite)
@@ -3099,8 +3023,7 @@ namespace BaroWardrobeSwitcher
                 }
 
                 List<FashionSpriteDescriptor> descriptors = EnumerateFashionSpritesForLimb(session.SpritesBySlot, limb.type)
-                    .Select(pair => pair.Value)
-                    .Where(descriptor => descriptor != null && !wearingItems.Contains(descriptor.Sprite))
+                    .Where(descriptor => !wearingItems.Contains(descriptor.Sprite))
                     .Distinct()
                     .ToList();
                 foreach (FashionSpriteDescriptor descriptor in descriptors)

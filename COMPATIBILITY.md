@@ -60,11 +60,11 @@ Run the contract probe on a machine with the game installed:
 
 ## Network compatibility
 
-Protocol 2 is used when both peers complete the v2 hello handshake. The six original v1 message names remain available in v0.5.1:
+Protocol 2 is used when both peers complete the v2 hello handshake. The six original v1 message names remain available in v0.5.2:
 
-- Old client with v0.5.1 server: v1.
-- v0.5.1 client with old server: v1 after the five-second hello timeout.
-- v0.5.1 client with v0.5.1 server: v2.
+- Old client with v0.5.2 server: v1.
+- v0.5.2 client with old server: v1 after the five-second hello timeout.
+- v0.5.2 client with v0.5.2 server: v2.
 
 The protocol number and wire look schema remain 2. Updated server hello messages may append `0x57, 1, capabilities`; capability bit `0x01` enables the `visibility` command and full four-layer synchronization. Updated look payloads may append `0x57, 1, forceHideMask, forceShowMask`. Updated readers reject partial, unknown-version, unknown-bit, or overlapping tails. Old v2 readers consume the unchanged prefix and ignore the tail.
 
@@ -74,12 +74,6 @@ The v1 bridge is scheduled for removal in v0.6.0. V2 state is revisioned; v1 rem
 
 ## Release gates
 
-1. Build the C# source against the installed 1.13.4.0 LuaCs Publicized assemblies with zero warnings and errors.
-2. Run the exact API probe with optional capabilities required.
-3. Run the renderer crash characterization contracts and executable client persistence probe.
-4. Parse every Lua file using the MoonSharp assembly shipped with Barotrauma and run all pure/authority tests.
-5. Run `python scripts/verify_package.py` and confirm the source-package/Git diff contains no generated outputs (ignored `artifacts/` build output may exist locally).
-6. Complete isolated single-player/host/dedicated testing, then the representative `Limb.Draw` conflict set described in the release checklist.
-7. Only after step 6 passes, set `declaredGameVersion` and `filelist.xml gameversion` to `1.13.4.0`, change `compatibilityStatus` to `verified`, and run `python scripts/verify_package.py --release`.
+Complete every applicable automated and in-game check in [TESTING.md](TESTING.md). For a new game target, retain the previously verified metadata until that matrix passes; then update `declaredGameVersion` and `filelist.xml` `gameversion`, set `compatibilityStatus` to `verified`, and run `python scripts/verify_package.py --release`.
 
 The `filelist.xml` `gameversion` value records the version actually verified; it is metadata, not proof of runtime compatibility.

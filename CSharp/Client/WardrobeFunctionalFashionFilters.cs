@@ -29,19 +29,11 @@ namespace BaroWardrobeSwitcher
                 : IsLargeEquipmentMovementAnimation(animationInfo));
         }
 
-        public static bool ShouldCaptureStatusSounds(Item item)
-        {
-            return !ShouldSuppressCosmeticSounds(item);
-        }
+        public static bool ShouldCaptureItemSounds(Item item) => !ShouldSuppressCosmeticSounds(item);
 
         public static bool ShouldCaptureStatusSound(StatusEffect statusEffect)
         {
             return !IsFunctionalEquipmentAlarm(statusEffect);
-        }
-
-        public static bool ShouldCaptureComponentSounds(Item item)
-        {
-            return !ShouldSuppressCosmeticSounds(item);
         }
 
         public static bool ShouldPreserveSealedSuitMasks(Item item)
@@ -120,15 +112,8 @@ namespace BaroWardrobeSwitcher
             }
         }
 
-        private static bool HasEntries(IEnumerable values)
-        {
-            if (values == null) { return false; }
-            foreach (object value in values)
-            {
-                if (value != null) { return true; }
-            }
-            return false;
-        }
+        private static bool HasEntries(IEnumerable values) =>
+            values?.Cast<object>().Any(value => value != null) ?? false;
 
         private static bool HasEntriesOrCannotInspect(FieldInfo field, StatusEffect statusEffect)
         {
@@ -199,7 +184,7 @@ namespace BaroWardrobeSwitcher
             }
         }
 
-        private static bool IsLargeEquipmentMovementAnimation(object animationInfo)
+        internal static bool IsLargeEquipmentMovementAnimation(object animationInfo)
         {
             if (!IsMovementAnimation(animationInfo)) { return false; }
             try
