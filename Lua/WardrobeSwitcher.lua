@@ -3175,7 +3175,9 @@ function Helpers.handleNoControlledCharacter()
 end
 
 function Helpers.handleControlledCharacterChange(character)
-    if character == nil or character == lastCharacter then return end
+    if character == nil then return end
+    local nextCharacterKey = characterStateKey(character)
+    if character == lastCharacter and reducerCharacterKey == nextCharacterKey then return end
     local bootstrapState = nil
     if lastCharacter == nil and reducerHasUnboundLook and Core.hasLook(reducerState.look) then
         bootstrapState = {
@@ -3197,7 +3199,7 @@ function Helpers.handleControlledCharacterChange(character)
         sourceState = characterStates[pendingSinglePlayerTransferSourceKey]
     end
 
-    reducerCharacterKey = characterStateKey(character)
+    reducerCharacterKey = nextCharacterKey
     dispatchReducer({ type = "CharacterReady", characterKey = reducerCharacterKey })
     local hadState
     if bootstrapState ~= nil then

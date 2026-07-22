@@ -866,6 +866,15 @@ for _ = 1, 20 do hooks.think() end
 assert(activationCount == beforeDeferredV1 + 1,
     "a deferred v1 round-start frame was not applied exactly once")
 
+openPanel = true
+hooks.think()
+assert(buttons["Save Current Outfit"].Enabled ~= false and
+       buttons["Apply Saved Look"].Enabled ~= false and
+       buttons["Clear Look"].Enabled ~= false,
+    "deferred round-start look left F8 actions unbound")
+openPanel = true
+hooks.think()
+
 -- P2P can replace the game session while retaining the same controlled
 -- Character object. The session reset must force CharacterReady to bind the
 -- fresh reducer instead of leaving all character-gated F8 actions disabled.
