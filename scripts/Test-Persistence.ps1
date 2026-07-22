@@ -16,10 +16,6 @@ $root = Split-Path -Parent $PSScriptRoot
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $project = Join-Path $root "tools/PersistenceProbe/PersistenceProbe.csproj"
-& dotnet build $project -c Release
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-$probe = Join-Path $root "artifacts/tools/PersistenceProbe/net8.0/PersistenceProbe.dll"
 $assembly = Join-Path $root "artifacts/bin/Release/BaroWardrobeSwitcher.dll"
-& dotnet $probe $assembly $BarotraumaInstallDir $LuaCsPublicizedDir
+& dotnet run --project $project -c Release -- $assembly $BarotraumaInstallDir $LuaCsPublicizedDir
 exit $LASTEXITCODE

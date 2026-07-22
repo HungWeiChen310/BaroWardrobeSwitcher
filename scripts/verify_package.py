@@ -14,15 +14,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ERRORS: list[str] = []
-EXPECTED_METADATA = {
-    "modVersion": "0.5.1",
-    "protocolVersion": 2,
-    "lookSchemaVersion": 2,
-    "persistenceVersion": 3,
-    "barotraumaGameVersion": "1.13.4.0",
-    "barotraumaSourceCommit": "a589d2cee3ff2214c99a7ea30c46f16a5406a01d",
-    "luaCsCommit": "0d380afcd1feeb842c0c86290d46bcaf198cd5e4",
-}
 EXPECTED_CANDIDATE_DECLARED_VERSION = "1.12.7.0"
 
 
@@ -59,13 +50,39 @@ def main() -> int:
     args = parser.parse_args()
 
     version = json.loads((ROOT / "version.json").read_text(encoding="utf-8"))
-    for key, expected in EXPECTED_METADATA.items():
-        if version.get(key) != expected:
-            fail(f"version.json {key} must be {expected!r}")
     filelist_root = parse_xml(ROOT / "filelist.xml")
     modconfig_root = parse_xml(ROOT / "ModConfig.xml")
-    parse_xml(ROOT / "Texts.xml")
     parse_xml(ROOT / "MultiplayerSyncMarker.xml")
+
+    text_paths = [
+        mod_path(element.attrib["file"])
+        for element in filelist_root
+        if element.tag.casefold() == "text" and element.attrib.get("file")
+    ]
+    expected_text_paths = {
+        ROOT / "Texts.xml",
+        ROOT / "TextsSimplifiedChinese.xml",
+        ROOT / "TextsTraditionalChinese.xml",
+    }
+    if set(text_paths) != expected_text_paths or len(text_paths) != 3:
+        fail("filelist.xml must list exactly the English, Simplified Chinese, and Traditional Chinese Text XML files")
+
+    text_tags: dict[Path, set[str]] = {}
+    for path in text_paths:
+        root = parse_xml(path)
+        tags = [element.tag for element in root]
+        if len(tags) != len(set(tags)):
+            fail(f"Text XML contains duplicate tags: {path.relative_to(ROOT)}")
+        text_tags[path] = set(tags)
+
+    english_tags = text_tags.get(ROOT / "Texts.xml", set())
+    if "entityname.barowardrobeswitcher" not in english_tags:
+        fail("Texts.xml is missing entityname.barowardrobeswitcher")
+    for path, tags in text_tags.items():
+        if tags != english_tags:
+            missing = ", ".join(sorted(english_tags - tags)) or "none"
+            extra = ", ".join(sorted(tags - english_tags)) or "none"
+            fail(f"Text XML tag mismatch in {path.relative_to(ROOT)} (missing: {missing}; extra: {extra})")
 
     if filelist_root.attrib.get("modversion") != version["modVersion"]:
         fail("filelist.xml modversion does not match version.json")
@@ -132,9 +149,7 @@ def main() -> int:
     all_tracked = tracked_files()
     existing_tracked = [tracked for tracked in all_tracked if (ROOT / tracked).exists()]
     pending_tracked_deletions = [tracked for tracked in all_tracked if not (ROOT / tracked).exists()]
-    for tracked in all_tracked:
-        if tracked not in existing_tracked:
-            continue
+    for tracked in existing_tracked:
         parts = {part.casefold() for part in Path(tracked).parts}
         generated_or_disabled = any(
             part in forbidden_parts

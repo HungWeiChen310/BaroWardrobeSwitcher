@@ -322,19 +322,16 @@ namespace BaroWardrobeSwitcher
 
         public HashSet<InvSlotType> SavedSlots { get; set; } = new HashSet<InvSlotType>();
 
-        public HashSet<WearableSprite> EquipmentMasksToSanitize { get; } = new HashSet<WearableSprite>();
-
         public List<object> FashionAnimations { get; } = new List<object>();
 
-        public List<FashionSoundEffect> FashionSounds { get; } = new List<FashionSoundEffect>();
+        public List<StatusEffect> FashionSounds { get; } = new List<StatusEffect>();
 
-        public List<FashionComponentSound> FashionComponentSounds { get; } = new List<FashionComponentSound>();
+        public List<(ItemComponent Component, ActionType ActionType)> FashionComponentSounds { get; } =
+            new List<(ItemComponent Component, ActionType ActionType)>();
 
         public HashSet<StatusEffect> SuppressedEquipmentSounds { get; } = new HashSet<StatusEffect>();
 
         public HashSet<ItemComponent> SuppressedEquipmentComponentSounds { get; } = new HashSet<ItemComponent>();
-
-        public FashionEffectPolicy EffectPolicy { get; } = new FashionEffectPolicy();
 
         public int FashionSoundCursor { get; set; }
 
@@ -488,7 +485,6 @@ namespace BaroWardrobeSwitcher
             }
             descriptorsBySprite.Clear();
             SpritesBySlot.Clear();
-            EquipmentMasksToSanitize.Clear();
             FashionAnimations.Clear();
             FashionSounds.Clear();
             FashionComponentSounds.Clear();
@@ -509,26 +505,4 @@ namespace BaroWardrobeSwitcher
         }
     }
 
-    internal sealed class FashionSoundEffect
-    {
-        public FashionSoundEffect(StatusEffect statusEffect)
-        {
-            StatusEffect = statusEffect;
-        }
-
-        public StatusEffect StatusEffect { get; }
-    }
-
-    internal sealed class FashionComponentSound
-    {
-        public FashionComponentSound(ItemComponent component, ActionType actionType)
-        {
-            Component = component;
-            ActionType = actionType;
-        }
-
-        public ItemComponent Component { get; }
-
-        public ActionType ActionType { get; }
-    }
 }

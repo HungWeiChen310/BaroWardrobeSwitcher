@@ -1,8 +1,9 @@
 local coreCandidates = { "Lua/WardrobeCore.lua", "../WardrobeCore.lua", "WardrobeCore.lua" }
+local testDirectory = ""
 if debug ~= nil and debug.getinfo ~= nil then
     local source = debug.getinfo(1, "S").source
     local testFile = source:sub(1, 1) == "@" and source:sub(2) or source
-    local testDirectory = testFile:match("^(.*[/\\])") or ""
+    testDirectory = testFile:match("^(.*[/\\])") or ""
     table.insert(coreCandidates, 1, testDirectory .. "../WardrobeCore.lua")
 end
 
@@ -16,56 +17,34 @@ for _, candidate in ipairs(coreCandidates) do
 end
 assert(Core ~= nil, "could not load Lua/WardrobeCore.lua")
 
-local function newBuffer()
-    local values = {}
-    local readIndex = 1
-    local buffer = { LengthBits = 0, BitPosition = 0 }
-
-    local function bitLength(kind, value)
-        if kind == "u16" then return 16 end
-        if kind == "u32" then return 32 end
-        if kind == "byte" then return 8 end
-        if kind == "bool" then return 1 end
-        if kind == "string" then return 16 + #(tostring(value or "")) * 8 end
-        return 0
+local newBuffer = nil
+for _, candidate in ipairs({
+    "Lua/Tests/TestBuffer.lua",
+    testDirectory .. "TestBuffer.lua",
+    "TestBuffer.lua"
+}) do
+    local ok, loaded = pcall(dofile, candidate)
+    if ok and type(loaded) == "function" then
+        newBuffer = loaded
+        break
     end
+end
+assert(newBuffer ~= nil, "could not load Lua/Tests/TestBuffer.lua")
 
-    local function write(kind, value)
-        values[#values + 1] = { kind = kind, value = value }
-        buffer.LengthBits = buffer.LengthBits + bitLength(kind, value)
-    end
-
-    local function read(kind)
-        local entry = values[readIndex]
-        assert(entry ~= nil, "attempted to read beyond buffer")
-        assert(entry.kind == kind, "expected " .. kind .. ", got " .. tostring(entry.kind))
-        readIndex = readIndex + 1
-        buffer.BitPosition = buffer.BitPosition + bitLength(kind, entry.value)
-        return entry.value
-    end
-
-    buffer.WriteUInt16 = function(value) write("u16", value) end
-    buffer.WriteUInt32 = function(value) write("u32", value) end
-    buffer.WriteByte = function(value) write("byte", value) end
-    buffer.WriteBoolean = function(value) write("bool", value) end
-    buffer.WriteString = function(value) write("string", value) end
-    buffer.ReadUInt16 = function() return read("u16") end
-    buffer.ReadUInt32 = function() return read("u32") end
-    buffer.ReadByte = function() return read("byte") end
-    buffer.ReadBoolean = function() return read("bool") end
-    buffer.ReadString = function() return read("string") end
-    buffer.FinalizeForTransport = function()
-        buffer.LengthBits = math.ceil(buffer.LengthBits / 8) * 8
-        return buffer
-    end
-    return buffer
+local function tryReadLook(message)
+    local ok, look, reason = pcall(Core.readLook, message)
+    if not ok then return nil, "malformed look payload: " .. tostring(look) end
+    return look, reason
 end
 
 local function assertEqual(actual, expected, message)
     assert(actual == expected, (message or "values differ") .. ": " .. tostring(actual) .. " ~= " .. tostring(expected))
 end
 
-assert(Core.selfTest())
+local emptyLook = assert(Core.newLook(true, false, {}))
+assert(Core.hasLook(emptyLook), "captured empty look must be preserved")
+assert(Core.validateLook({ schemaVersion = 99, slots = {} }) == nil)
+assert(Core.validateLook({ slots = { Unknown = "bad" } }) == nil)
 
 local allSlots = {
     Head = "helmet",
@@ -256,13 +235,13 @@ assert(Core.newLook(true, false, { Unknown = "x" }) == nil)
 
 local unknownVersionBuffer = newBuffer()
 unknownVersionBuffer.WriteUInt16(99)
-local unknownVersionLook, unknownVersionReason = Core.tryReadLook(unknownVersionBuffer)
+local unknownVersionLook, unknownVersionReason = tryReadLook(unknownVersionBuffer)
 assert(unknownVersionLook == nil)
 assert(tostring(unknownVersionReason):find("unsupported", 1, true) ~= nil)
 
 local truncatedBuffer = newBuffer()
 truncatedBuffer.WriteUInt16(Core.LOOK_SCHEMA_VERSION)
-local truncatedLook, truncatedReason = Core.tryReadLook(truncatedBuffer)
+local truncatedLook, truncatedReason = tryReadLook(truncatedBuffer)
 assert(truncatedLook == nil)
 assert(tostring(truncatedReason):find("malformed", 1, true) ~= nil)
 
@@ -275,7 +254,7 @@ duplicateSlotBuffer.WriteString("Head")
 duplicateSlotBuffer.WriteString("helmet")
 duplicateSlotBuffer.WriteString("Head")
 duplicateSlotBuffer.WriteString("anotherhelmet")
-local duplicateLook, duplicateReason = Core.tryReadLook(duplicateSlotBuffer)
+local duplicateLook, duplicateReason = tryReadLook(duplicateSlotBuffer)
 assert(duplicateLook == nil)
 assert(tostring(duplicateReason):find("duplicate", 1, true) ~= nil)
 

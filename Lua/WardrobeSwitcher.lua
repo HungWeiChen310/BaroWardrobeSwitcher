@@ -1,40 +1,32 @@
 -- Client facade: projects the pure Core state machine onto Barotrauma networking,
 -- persistence, renderer transactions and the in-game panel.
 local MOD_NAME = "Baro Wardrobe Switcher"
-local Core = WardrobeCore
-local coreAvailable = type(Core) == "table" and
-    tonumber(Core.PROTOCOL_VERSION) == 2 and
-    type(Core.NET) == "table"
-local EXPECTED_CSHARP_VERSION = coreAvailable and tostring(Core.MOD_VERSION or "0.5.1") or "0.5.1"
-local NET = coreAvailable and Core.NET or {}
-local NET_SAVE_REQUEST = NET.V1_SAVE_REQUEST or "barowardrobeswitcher.save"
-local NET_APPLY_REQUEST = NET.V1_APPLY_REQUEST or "barowardrobeswitcher.apply"
-local NET_CLEAR_REQUEST = NET.V1_CLEAR_REQUEST or "barowardrobeswitcher.clear"
-local NET_FORGET_REQUEST = NET.V1_FORGET_REQUEST or "barowardrobeswitcher.forget"
-local NET_LOOK_APPLY = NET.V1_LOOK_APPLY or "barowardrobeswitcher.look.apply"
-local NET_LOOK_CLEAR = NET.V1_LOOK_CLEAR or "barowardrobeswitcher.look.clear"
-local NET_V2_HELLO = NET.V2_HELLO or "barowardrobeswitcher.v2.hello"
-local NET_V2_COMMAND = NET.V2_COMMAND or "barowardrobeswitcher.v2.command"
-local NET_V2_STATE = NET.V2_STATE or "barowardrobeswitcher.v2.state"
-local NET_V2_ACK = NET.V2_ACK or "barowardrobeswitcher.v2.ack"
-local COMMAND_SAVE = coreAvailable and Core.COMMAND.Save or "save"
-local COMMAND_APPLY = coreAvailable and Core.COMMAND.Apply or "apply"
-local COMMAND_CLEAR = coreAvailable and Core.COMMAND.Clear or "clear"
-local COMMAND_FORGET = coreAvailable and Core.COMMAND.Forget or "forget"
-local COMMAND_VISIBILITY = coreAvailable and Core.COMMAND.Visibility or "visibility"
-local ATTACHMENT_KEYS = coreAvailable and Core.ATTACHMENT_KEYS or {
-    "Hair",
-    "Beard",
-    "Moustache",
-    "FaceAttachment"
-}
-local ATTACHMENT_VISIBILITY = coreAvailable and Core.ATTACHMENT_VISIBILITY or {
-    Auto = "auto",
-    Hide = "hide",
-    Show = "show"
-}
-local CAPABILITY_ATTACHMENT_VISIBILITY =
-    coreAvailable and Core.CAPABILITY ~= nil and Core.CAPABILITY.AttachmentVisibility or 0x01
+local Core = assert(
+    type(WardrobeCore) == "table" and
+    tonumber(WardrobeCore.PROTOCOL_VERSION) == 2 and
+    type(WardrobeCore.NET) == "table" and
+    WardrobeCore,
+    "Baro Wardrobe Switcher requires WardrobeCore protocol 2")
+local EXPECTED_CSHARP_VERSION = tostring(Core.MOD_VERSION)
+local NET = Core.NET
+local NET_SAVE_REQUEST = NET.V1_SAVE_REQUEST
+local NET_APPLY_REQUEST = NET.V1_APPLY_REQUEST
+local NET_CLEAR_REQUEST = NET.V1_CLEAR_REQUEST
+local NET_FORGET_REQUEST = NET.V1_FORGET_REQUEST
+local NET_LOOK_APPLY = NET.V1_LOOK_APPLY
+local NET_LOOK_CLEAR = NET.V1_LOOK_CLEAR
+local NET_V2_HELLO = NET.V2_HELLO
+local NET_V2_COMMAND = NET.V2_COMMAND
+local NET_V2_STATE = NET.V2_STATE
+local NET_V2_ACK = NET.V2_ACK
+local COMMAND_SAVE = Core.COMMAND.Save
+local COMMAND_APPLY = Core.COMMAND.Apply
+local COMMAND_CLEAR = Core.COMMAND.Clear
+local COMMAND_FORGET = Core.COMMAND.Forget
+local COMMAND_VISIBILITY = Core.COMMAND.Visibility
+local ATTACHMENT_KEYS = Core.ATTACHMENT_KEYS
+local ATTACHMENT_VISIBILITY = Core.ATTACHMENT_VISIBILITY
+local CAPABILITY_ATTACHMENT_VISIBILITY = Core.CAPABILITY.AttachmentVisibility
 
 if SERVER then return end
 
@@ -68,258 +60,21 @@ local TextManager = TextManager
 pcall(function()
     TextManager = LuaUserData.CreateStatic("Barotrauma.TextManager", true)
 end)
-local GameSettings = GameSettings
-pcall(function()
-    GameSettings = LuaUserData.CreateStatic("Barotrauma.GameSettings", true)
-end)
 local VisualOverride = nil
 local visualOverrideFailure = nil
 local visualOverrideDiagnostics = nil
 local WardrobePersistence = nil
 local wardrobePersistenceFailure = nil
 
-local translations = {
-    en = {
-        ["notice.open_panel"] = "Wardrobe control panel can be opened by pressing F8.",
-        ["panel.title"] = "Wardrobe Switcher",
-        ["panel.saved_look"] = "Saved look",
-        ["panel.look"] = "Look",
-        ["panel.active"] = "active",
-        ["panel.inactive"] = "inactive",
-        ["panel.last"] = "Last",
-        ["panel.current"] = "Current",
-        ["panel.saved"] = "Saved",
-        ["panel.result"] = "Result",
-        ["panel.diagnostics"] = "Diagnostics",
-        ["panel.character"] = "Character",
-        ["panel.profile"] = "Character profile",
-        ["panel.transfer"] = "Transfer to unconfigured characters",
-        ["panel.attachment_layers"] = "Appearance Layers",
-        ["panel.attachment_help"] = "Character mods may reuse these wearable slots for head parts. Auto follows the appearance item's XML; Show overrides equipment hiding.",
-        ["panel.visibility"] = "Visibility",
-        ["panel.debug_log_hint"] = "Diagnostics are written to WardrobeClient.log without filling the game console.",
-        ["panel.log_file"] = "Wardrobe log",
-        ["panel.saved_file"] = "Saved-look file",
-        ["button.save"] = "Save Current Outfit",
-        ["button.apply"] = "Apply Saved Look",
-        ["button.clear"] = "Clear Look",
-        ["button.forget"] = "Forget Saved Look",
-        ["button.hide_hair"] = "Hide Hair",
-        ["button.show_hair"] = "Show Hair",
-        ["button.attachment_layers"] = "Appearance Layers...",
-        ["button.hide_standard_hair"] = "Hide Standard Hair",
-        ["button.all_auto"] = "All Auto",
-        ["button.back"] = "Back",
-        ["button.enable_transfer"] = "Enable Appearance Transfer",
-        ["button.disable_transfer"] = "Disable Appearance Transfer",
-        ["button.diagnostics"] = "Diagnostics",
-        ["button.hide_diagnostics"] = "Hide Diagnostics",
-        ["button.dump_debug"] = "Dump Debug Log",
-        ["button.more_options"] = "More Options...",
-        ["button.less_options"] = "Hide Additional Options",
-        ["button.close"] = "Close",
-        ["slot.head"] = "Head",
-        ["slot.headset"] = "Headset",
-        ["slot.inner"] = "Inner",
-        ["slot.outer"] = "Outer",
-        ["slot.bag"] = "Bag",
-        ["slot.health"] = "Health",
-        ["attachment.hair"] = "Hair",
-        ["attachment.beard"] = "Beard",
-        ["attachment.moustache"] = "Moustache",
-        ["attachment.face"] = "Face Attachment",
-        ["visibility.auto"] = "Auto",
-        ["visibility.hide"] = "Hide",
-        ["visibility.show"] = "Show",
-        ["summary.none"] = "none",
-        ["summary.empty"] = "empty outfit",
-        ["summary.slot"] = "slot",
-        ["summary.slots"] = "slots",
-        ["status.ready"] = "Ready.",
-        ["status.empty"] = "Empty",
-        ["status.already_handled"] = "Already handled",
-        ["status.server_removal_requested"] = "Saved; server removal requested",
-        ["status.saved_removed"] = "Saved and removed",
-        ["status.synced_server"] = "Synced from server",
-        ["status.saved_applied_sync"] = "Saved look applied from multiplayer sync.",
-        ["status.auto_applied"] = "Saved look auto-applied.",
-        ["status.multiplayer_sync_failed"] = "Multiplayer wardrobe sync failed; make sure every client has the fashion items and C# scripting enabled.",
-        ["status.still_equipped_in"] = "Still equipped in ",
-        ["status.look_cleared_sync"] = "Look cleared from multiplayer sync.",
-        ["status.round_ended"] = "Round ended.",
-        ["status.next_scene_preserved"] = "Saved look will be reapplied in the next scene.",
-        ["status.refreshed"] = "Saved look refreshed for changed equipment.",
-        ["status.restored_character"] = "Saved look restored for this character.",
-        ["status.apply_again"] = "Saved look needs to be applied again.",
-        ["status.character_changed"] = "Controlled character changed. Save a new outfit for this character.",
-        ["status.profile_unavailable"] = "memory only",
-        ["status.profile_collision"] = "ambiguous identity; automatic restore disabled",
-        ["status.enabled"] = "enabled",
-        ["status.disabled"] = "disabled",
-        ["status.saved_cleared"] = "Saved look cleared.",
-        ["status.none"] = "none"
-    },
-    zh_hans = {
-        ["notice.open_panel"] = "按 F8 可打开衣柜控制面板。",
-        ["panel.title"] = "衣柜切换器",
-        ["panel.saved_look"] = "已保存外观",
-        ["panel.look"] = "外观",
-        ["panel.active"] = "启用",
-        ["panel.inactive"] = "未启用",
-        ["panel.last"] = "上次操作",
-        ["panel.current"] = "当前",
-        ["panel.saved"] = "已保存",
-        ["panel.result"] = "结果",
-        ["panel.diagnostics"] = "诊断",
-        ["panel.character"] = "角色",
-        ["panel.profile"] = "角色配置",
-        ["panel.transfer"] = "沿用外观至未设置角色",
-        ["panel.attachment_layers"] = "外观图层",
-        ["panel.attachment_help"] = "角色模组可能重用这些穿戴槽位作为头部组件。自动会遵循外观物品 XML；显示可覆盖装备的隐藏规则。",
-        ["panel.visibility"] = "可见性",
-        ["panel.debug_log_hint"] = "诊断会写入 WardrobeClient.log，不再刷满游戏控制台。",
-        ["panel.log_file"] = "衣柜日志",
-        ["panel.saved_file"] = "保存外观文件",
-        ["button.save"] = "保存当前服装",
-        ["button.apply"] = "套用已保存外观",
-        ["button.clear"] = "清除外观",
-        ["button.forget"] = "忘记已保存外观",
-        ["button.hide_hair"] = "隐藏头发",
-        ["button.show_hair"] = "显示头发",
-        ["button.attachment_layers"] = "外观图层…",
-        ["button.hide_standard_hair"] = "隐藏标准头发",
-        ["button.all_auto"] = "全部自动",
-        ["button.back"] = "返回",
-        ["button.enable_transfer"] = "启用外观沿用",
-        ["button.disable_transfer"] = "停用外观沿用",
-        ["button.diagnostics"] = "诊断",
-        ["button.hide_diagnostics"] = "隐藏诊断",
-        ["button.dump_debug"] = "输出诊断到日志",
-        ["button.more_options"] = "更多选项…",
-        ["button.less_options"] = "收起更多选项",
-        ["button.close"] = "关闭",
-        ["slot.head"] = "头部",
-        ["slot.headset"] = "耳机",
-        ["slot.inner"] = "内衣",
-        ["slot.outer"] = "外衣",
-        ["slot.bag"] = "背包",
-        ["slot.health"] = "医疗接口",
-        ["attachment.hair"] = "头发",
-        ["attachment.beard"] = "胡须",
-        ["attachment.moustache"] = "上唇胡",
-        ["attachment.face"] = "脸部附件",
-        ["visibility.auto"] = "自动",
-        ["visibility.hide"] = "隐藏",
-        ["visibility.show"] = "显示",
-        ["summary.none"] = "无",
-        ["summary.empty"] = "空服装",
-        ["summary.slot"] = "个栏位",
-        ["summary.slots"] = "个栏位",
-        ["status.ready"] = "就绪。",
-        ["status.empty"] = "空",
-        ["status.already_handled"] = "已处理",
-        ["status.server_removal_requested"] = "已保存；已请求服务器移除",
-        ["status.saved_removed"] = "已保存并移除",
-        ["status.synced_server"] = "已从服务器同步",
-        ["status.saved_applied_sync"] = "已从多人同步套用保存的外观。",
-        ["status.auto_applied"] = "已自动套用保存的外观。",
-        ["status.multiplayer_sync_failed"] = "多人衣柜同步失败；请确认每位客户端都有这些时装物品并已启用 C# 脚本。",
-        ["status.still_equipped_in"] = "仍装备于 ",
-        ["status.look_cleared_sync"] = "外观已由多人同步清除。",
-        ["status.round_ended"] = "回合结束。",
-        ["status.next_scene_preserved"] = "保存的外观会在下一个场景重新套用。",
-        ["status.refreshed"] = "装备改变，已刷新保存的外观。",
-        ["status.restored_character"] = "已恢复此角色保存的外观。",
-        ["status.apply_again"] = "保存的外观需要重新套用。",
-        ["status.character_changed"] = "控制角色已改变。请为此角色保存新的服装。",
-        ["status.profile_unavailable"] = "仅保存在内存",
-        ["status.profile_collision"] = "角色身份重复；已停用自动恢复",
-        ["status.enabled"] = "启用",
-        ["status.disabled"] = "停用",
-        ["status.saved_cleared"] = "已清除保存的外观。",
-        ["status.none"] = "无"
-    },
-    zh_hant = {
-        ["notice.open_panel"] = "按 F8 可開啟衣櫃控制面板。",
-        ["panel.title"] = "衣櫃切換器",
-        ["panel.saved_look"] = "已儲存外觀",
-        ["panel.look"] = "外觀",
-        ["panel.active"] = "啟用",
-        ["panel.inactive"] = "未啟用",
-        ["panel.last"] = "上次操作",
-        ["panel.current"] = "目前",
-        ["panel.saved"] = "已儲存",
-        ["panel.result"] = "結果",
-        ["panel.diagnostics"] = "診斷",
-        ["panel.character"] = "角色",
-        ["panel.profile"] = "角色設定檔",
-        ["panel.transfer"] = "沿用外觀至未設定角色",
-        ["panel.attachment_layers"] = "外觀圖層",
-        ["panel.attachment_help"] = "角色模組可能重用這些穿戴槽位作為頭部組件。自動會遵循外觀物品 XML；顯示可覆寫裝備的隱藏規則。",
-        ["panel.visibility"] = "可見性",
-        ["panel.debug_log_hint"] = "診斷會寫入 WardrobeClient.log，不再洗滿遊戲控制台。",
-        ["panel.log_file"] = "衣櫃日誌",
-        ["panel.saved_file"] = "儲存外觀檔案",
-        ["button.save"] = "儲存目前服裝",
-        ["button.apply"] = "套用已儲存外觀",
-        ["button.clear"] = "清除外觀",
-        ["button.forget"] = "忘記已儲存外觀",
-        ["button.hide_hair"] = "隱藏頭髮",
-        ["button.show_hair"] = "顯示頭髮",
-        ["button.attachment_layers"] = "外觀圖層…",
-        ["button.hide_standard_hair"] = "隱藏標準頭髮",
-        ["button.all_auto"] = "全部自動",
-        ["button.back"] = "返回",
-        ["button.enable_transfer"] = "啟用外觀沿用",
-        ["button.disable_transfer"] = "停用外觀沿用",
-        ["button.diagnostics"] = "診斷",
-        ["button.hide_diagnostics"] = "隱藏診斷",
-        ["button.dump_debug"] = "輸出診斷到日誌",
-        ["button.more_options"] = "更多選項…",
-        ["button.less_options"] = "收合更多選項",
-        ["button.close"] = "關閉",
-        ["slot.head"] = "頭部",
-        ["slot.headset"] = "耳機",
-        ["slot.inner"] = "內衣",
-        ["slot.outer"] = "外衣",
-        ["slot.bag"] = "背包",
-        ["slot.health"] = "醫療介面",
-        ["attachment.hair"] = "頭髮",
-        ["attachment.beard"] = "鬍鬚",
-        ["attachment.moustache"] = "上唇鬍",
-        ["attachment.face"] = "臉部附件",
-        ["visibility.auto"] = "自動",
-        ["visibility.hide"] = "隱藏",
-        ["visibility.show"] = "顯示",
-        ["summary.none"] = "無",
-        ["summary.empty"] = "空服裝",
-        ["summary.slot"] = "個欄位",
-        ["summary.slots"] = "個欄位",
-        ["status.ready"] = "就緒。",
-        ["status.empty"] = "空",
-        ["status.already_handled"] = "已處理",
-        ["status.server_removal_requested"] = "已儲存；已要求伺服器移除",
-        ["status.saved_removed"] = "已儲存並移除",
-        ["status.synced_server"] = "已從伺服器同步",
-        ["status.saved_applied_sync"] = "已從多人同步套用儲存外觀。",
-        ["status.auto_applied"] = "已自動套用儲存外觀。",
-        ["status.multiplayer_sync_failed"] = "多人衣櫃同步失敗；請確認每位客戶端都有這些時裝物品並已啟用 C# 腳本。",
-        ["status.still_equipped_in"] = "仍裝備於 ",
-        ["status.look_cleared_sync"] = "外觀已由多人同步清除。",
-        ["status.round_ended"] = "回合結束。",
-        ["status.next_scene_preserved"] = "儲存外觀會在下一個場景重新套用。",
-        ["status.refreshed"] = "裝備改變，已重新套用儲存外觀。",
-        ["status.restored_character"] = "已恢復此角色儲存外觀。",
-        ["status.apply_again"] = "儲存外觀需要重新套用。",
-        ["status.character_changed"] = "控制角色已改變。請為此角色儲存新的服裝。",
-        ["status.profile_unavailable"] = "僅保存在記憶體",
-        ["status.profile_collision"] = "角色身分重複；已停用自動恢復",
-        ["status.enabled"] = "啟用",
-        ["status.disabled"] = "停用",
-        ["status.saved_cleared"] = "已清除儲存的外觀。",
-        ["status.none"] = "無"
-    }
-}
+local function tr(key, fallback)
+    local tag = "barowardrobeswitcher." .. tostring(key)
+    local ok, localized = pcall(function()
+        if TextManager == nil or not TextManager.ContainsTag(tag) then return nil end
+        return TextManager.Get(tag)
+    end)
+    if ok and localized ~= nil then return tostring(localized) end
+    return fallback or key
+end
 
 local statusKeys = {
     ["Ready."] = "status.ready",
@@ -330,7 +85,6 @@ local statusKeys = {
     ["Synced from server"] = "status.synced_server",
     ["Saved look applied from multiplayer sync."] = "status.saved_applied_sync",
     ["Saved look auto-applied."] = "status.auto_applied",
-    ["Multiplayer wardrobe sync failed; make sure every client has the fashion items and C# scripting enabled."] = "status.multiplayer_sync_failed",
     ["Look cleared from multiplayer sync."] = "status.look_cleared_sync",
     ["Round ended."] = "status.round_ended",
     ["Saved look will be reapplied in the next scene."] = "status.next_scene_preserved",
@@ -340,62 +94,6 @@ local statusKeys = {
     ["Controlled character changed. Save a new outfit for this character."] = "status.character_changed",
     ["Saved look cleared."] = "status.saved_cleared"
 }
-
-local function normalizeLanguage(value)
-    if value == nil then return nil end
-    local text = tostring(value):lower()
-    if text:find("traditional", 1, true) or text:find("tchinese", 1, true) or
-        text:find("zh%-hant") or text:find("zh_hant", 1, true) or
-        text:find("zhtw", 1, true) or text:find("zh%-tw") or
-        text:find("繁", 1, true) or text:find("語言", 1, true) then
-        return "zh_hant"
-    end
-    if text:find("simplified", 1, true) or text:find("schinese", 1, true) or
-        text:find("zh%-hans") or text:find("zh_hans", 1, true) or
-        text:find("zhcn", 1, true) or text:find("zh%-cn") or
-        text:find("简", 1, true) or text:find("语言", 1, true) then
-        return "zh_hans"
-    end
-    if text == "chinese" or text == "中文" then
-        return "zh_hant"
-    end
-    if text == "english" or text == "en" or text:find("english", 1, true) then
-        return "en"
-    end
-    return nil
-end
-
-local function languageFromCandidate(getter)
-    local ok, value = pcall(getter)
-    if not ok or value == nil then return nil end
-    return normalizeLanguage(value)
-end
-
-local function currentLanguage()
-    local candidates = {
-        function() return TextManager ~= nil and TextManager.CurrentLanguage or nil end,
-        function() return TextManager ~= nil and TextManager.Language or nil end,
-        function() return TextManager ~= nil and TextManager.SelectedLanguage or nil end,
-        function() return GameSettings ~= nil and GameSettings.CurrentConfig ~= nil and GameSettings.CurrentConfig.Language or nil end,
-        function() return GameSettings ~= nil and GameSettings.CurrentConfig ~= nil and GameSettings.CurrentConfig.SelectedLanguage or nil end,
-        function() return TextManager ~= nil and TextManager.Get ~= nil and TextManager.Get("language") or nil end
-    }
-
-    for _, getter in ipairs(candidates) do
-        local language = languageFromCandidate(getter)
-        if language ~= nil then return language end
-    end
-    return "en"
-end
-
-local function tr(key, fallback)
-    local language = currentLanguage()
-    local localized = translations[language] ~= nil and translations[language][key] or nil
-    if localized ~= nil then return localized end
-    localized = translations.en[key]
-    if localized ~= nil then return localized end
-    return fallback or key
-end
 
 local function localizedStatus(value)
     local text = tostring(value)
@@ -430,18 +128,7 @@ local visualCarrierPriority = {
     HealthInterface = 6
 }
 
-local savedLook = {}
 local legacyLookMetadata = {}
-local savedLookCaptured = false
-local activeLook = false
-local autoApplyLook = false
-local hideHair = false
-local attachmentVisibility = {
-    Hair = ATTACHMENT_VISIBILITY.Auto,
-    Beard = ATTACHMENT_VISIBILITY.Auto,
-    Moustache = ATTACHMENT_VISIBILITY.Auto,
-    FaceAttachment = ATTACHMENT_VISIBILITY.Auto
-}
 local characterStates = {}
 local transferToUnconfiguredCharacter = false
 local singlePlayerTransferSettingLoaded = false
@@ -477,9 +164,6 @@ local getSlotItem
 local isInAnyWearableSlot
 local roundStartNoticeSent = false
 local lastServerAutoApplySignature = nil
-local pendingServerApplyRequestKey = nil
-local pendingServerApplyLastRequestTick = 0
-local pendingServerApplyAttempts = 0
 local globalTick = 0
 local initialEquipGateActive = false
 local initialEquipGateStartedTick = 0
@@ -493,7 +177,7 @@ local pendingRoundStartNetworkLook = nil
 local pendingRoundStartNetworkCharacterKey = nil
 local pendingRoundStartNetworkRevision = nil
 local pendingRoundStartHideHair = false
-local pendingRoundStartAttachmentVisibility = nil
+local pendingRoundStartProtocolLook = nil
 local pendingNetworkAppliesByCharacterId = {}
 local pendingNetworkClearsByCharacterId = {}
 local lastAppliedNetworkLookSignatureByCharacterKey = {}
@@ -505,7 +189,7 @@ local persistClientLook
 local clearPersistentClientLook
 local ensureWardrobePersistence
 local persistenceFailureReason
-local protocolMode = coreAvailable and "probing" or "v1"
+local protocolMode = "probing"
 local serverCapabilities = 0
 local visibilitySyncPendingNegotiation = false
 local protocolHelloSentAt = nil
@@ -513,11 +197,9 @@ local protocolCommandQueue = {}
 local inFlightV2Command = nil
 local protocolOperationCounter = 0
 local reducerCharacterKey = nil
+local reducerHasUnboundLook = false
 local remoteRevisionByCharacterId = {}
 local clientEffectAdapters = {}
-local applyReducerProjection = nil
-local syncControlledCharacterState = nil
-local suppressControlledCharacterStateSync = false
 
 local function protocolClock()
     local ok, value = pcall(function()
@@ -536,11 +218,11 @@ local function createClientSessionId()
 end
 
 local clientSessionId = createClientSessionId()
-local reducerState = coreAvailable and Core.newClientState({ clientSessionId = clientSessionId }) or nil
+local reducerState = Core.newClientState({ clientSessionId = clientSessionId })
 local clientController = nil
 
 local function createClientController(state)
-    if not coreAvailable or state == nil then return nil end
+    if state == nil then return nil end
     return Core.createClientController(state, {
         run = function(currentEffect, viewModel)
             local adapter = clientEffectAdapters[currentEffect.type]
@@ -554,10 +236,9 @@ end
 
 clientController = createClientController(reducerState)
 
--- This is the single state projection point. Marking the panel dirty here keeps
--- asynchronous ACK/state changes from leaving stale enabled/disabled buttons.
+-- Every event refreshes the facade's only authoritative state snapshot. Marking
+-- the panel dirty here keeps asynchronous ACK/state changes out of the UI cache.
 local function dispatchReducer(event)
-    if not coreAvailable or clientController == nil then return {} end
     local ok, effects, feedback = pcall(clientController.dispatch, event)
     if not ok then
         local message = "reducer rejected event " .. tostring(event and event.type) .. ": " .. tostring(effects)
@@ -566,8 +247,6 @@ local function dispatchReducer(event)
         return {}
     end
     reducerState = clientController.getState()
-    if applyReducerProjection ~= nil then applyReducerProjection(reducerState) end
-    if syncControlledCharacterState ~= nil then syncControlledCharacterState() end
     windowNeedsRefresh = true
     return effects or {}
 end
@@ -582,7 +261,6 @@ end
 local InitialEquipStableTicks = 12
 local InitialEquipFallbackTicks = 120
 local ServerApplyRetryTicks = 30
-local ServerApplyMaxAttempts = 10
 local PendingLegacyNetworkMessageMaxTicks = 300
 local NetworkApplySuppressTicks = PendingLegacyNetworkMessageMaxTicks
 
@@ -603,78 +281,8 @@ local function copyLookData(lookData)
     return copy
 end
 
-local function attachmentVisibilityFromLegacy(hairHidden)
-    if coreAvailable and type(Core.attachmentVisibilityFromLegacy) == "function" then
-        return Core.attachmentVisibilityFromLegacy(hairHidden == true)
-    end
-    local hidden = hairHidden == true
-    return {
-        Hair = hidden and ATTACHMENT_VISIBILITY.Hide or ATTACHMENT_VISIBILITY.Auto,
-        Beard = hidden and ATTACHMENT_VISIBILITY.Hide or ATTACHMENT_VISIBILITY.Auto,
-        Moustache = hidden and ATTACHMENT_VISIBILITY.Hide or ATTACHMENT_VISIBILITY.Auto,
-        FaceAttachment = ATTACHMENT_VISIBILITY.Auto
-    }
-end
-
-local function validateAttachmentVisibility(value, legacyHairHidden)
-    if coreAvailable and type(Core.validateAttachmentVisibility) == "function" then
-        return Core.validateAttachmentVisibility(value, legacyHairHidden == true)
-    end
-    if value == nil then return attachmentVisibilityFromLegacy(legacyHairHidden) end
-    if type(value) ~= "table" then return nil, "attachment visibility must be a table" end
-    local expected = {}
-    for _, key in ipairs(ATTACHMENT_KEYS) do expected[key] = true end
-    for key in pairs(value) do
-        if expected[key] ~= true then return nil, "unknown attachment layer " .. tostring(key) end
-    end
-    local result = {}
-    for _, key in ipairs(ATTACHMENT_KEYS) do
-        local state = value[key]
-        if state ~= ATTACHMENT_VISIBILITY.Auto and
-            state ~= ATTACHMENT_VISIBILITY.Hide and
-            state ~= ATTACHMENT_VISIBILITY.Show then
-            return nil, "invalid attachment visibility for " .. tostring(key)
-        end
-        result[key] = state
-    end
-    return result
-end
-
-local function copyAttachmentVisibility(value, legacyHairHidden)
-    local valid = validateAttachmentVisibility(value, legacyHairHidden)
-    if valid == nil then valid = attachmentVisibilityFromLegacy(legacyHairHidden) end
-    local copy = {}
-    for _, key in ipairs(ATTACHMENT_KEYS) do copy[key] = valid[key] end
-    return copy
-end
-
 local function legacyHideHairForVisibility(value)
-    if coreAvailable and type(Core.legacyHideHair) == "function" then
-        return Core.legacyHideHair(value)
-    end
-    local valid = validateAttachmentVisibility(value, false)
-    return valid ~= nil and
-        valid.Hair == ATTACHMENT_VISIBILITY.Hide and
-        valid.Beard == ATTACHMENT_VISIBILITY.Hide and
-        valid.Moustache == ATTACHMENT_VISIBILITY.Hide
-end
-
-local function attachmentVisibilityMasks(value)
-    if coreAvailable and type(Core.attachmentVisibilityMasks) == "function" then
-        return Core.attachmentVisibilityMasks(value)
-    end
-    local valid, reason = validateAttachmentVisibility(value, false)
-    if valid == nil then return nil, nil, reason end
-    local bits = { Hair = 0x01, Beard = 0x02, Moustache = 0x04, FaceAttachment = 0x08 }
-    local forceHide, forceShow = 0, 0
-    for _, key in ipairs(ATTACHMENT_KEYS) do
-        if valid[key] == ATTACHMENT_VISIBILITY.Hide then
-            forceHide = forceHide + bits[key]
-        elseif valid[key] == ATTACHMENT_VISIBILITY.Show then
-            forceShow = forceShow + bits[key]
-        end
-    end
-    return forceHide, forceShow
+    return Core.legacyHideHair(value)
 end
 
 local function serverSupportsAttachmentVisibility()
@@ -694,7 +302,8 @@ end
 local function lookDataSignature(lookData, captured, visibility)
     local parts = { "captured=" .. tostring(captured == true) }
     if visibility ~= nil then
-        local canonical = copyAttachmentVisibility(visibility, false)
+        local canonical = Core.validateAttachmentVisibility(visibility, false) or
+            Core.attachmentVisibilityFromLegacy(false)
         for _, key in ipairs(ATTACHMENT_KEYS) do
             parts[#parts + 1] = "visibility." .. key .. "=" .. canonical[key]
         end
@@ -732,7 +341,6 @@ local function rememberLegacyLookMetadata(lookData)
 end
 
 local function domainLookFromLegacy(lookData, captured, hairHidden, visibility)
-    if not coreAvailable then return nil end
     local look = Core.fromLegacyLook(
         lookData or {},
         captured == true,
@@ -743,33 +351,16 @@ local function domainLookFromLegacy(lookData, captured, hairHidden, visibility)
 end
 
 local function currentDomainLook()
-    return domainLookFromLegacy(
-        savedLook,
-        savedLookCaptured,
-        hideHair,
-        attachmentVisibility
-    )
+    return Core.copyLook(reducerState.look)
 end
 
-local function syncReducerLook()
-    if not coreAvailable then return end
-    local look = currentDomainLook()
-    if look ~= nil and Core.hasLook(look) then
-        dispatchReducer({
-            type = "RestoreLook",
-            look = look,
-            active = activeLook == true,
-            autoApply = autoApplyLook == true
-        })
-    end
-end
-
-local function legacyLookFromDomain(look)
-    if not coreAvailable or look == nil then return {} end
+local function legacyLookFromDomain(look, metadataBySlot)
+    if look == nil then return {} end
     local projected = Core.toLegacyLook(look) or {}
+    metadataBySlot = metadataBySlot or legacyLookMetadata
     for _, entry in ipairs(slots) do
         local value = projected[entry.key]
-        local metadata = legacyLookMetadata[entry.key]
+        local metadata = metadataBySlot[entry.key]
         if value ~= nil and metadata ~= nil and
             tostring(metadata.identifier or "") == tostring(value.identifier or "") then
             value.itemId = tonumber(metadata.itemId) or 0
@@ -779,22 +370,16 @@ local function legacyLookFromDomain(look)
     return projected
 end
 
+local function currentLegacyLook()
+    return legacyLookFromDomain(reducerState.look)
+end
 
-applyReducerProjection = function(state)
-    if not coreAvailable or type(state) ~= "table" then return end
-    local projected = legacyLookFromDomain(state.look)
-    savedLook = projected
-    savedLookCaptured = state.look ~= nil and state.look.captured == true
-    activeLook = state.active == true
-    autoApplyLook = state.autoApply == true
-    if state.look ~= nil then
-        attachmentVisibility =
-            copyAttachmentVisibility(state.look.attachmentVisibility, state.look.hideHair == true)
-        hideHair = legacyHideHairForVisibility(attachmentVisibility)
-    else
-        attachmentVisibility = attachmentVisibilityFromLegacy(false)
-        hideHair = false
-    end
+local function currentAttachmentVisibility()
+    local look = reducerState.look
+    return look ~= nil and
+        (Core.validateAttachmentVisibility(look.attachmentVisibility, look.hideHair == true) or
+            Core.attachmentVisibilityFromLegacy(look.hideHair == true)) or
+        Core.attachmentVisibilityFromLegacy(false)
 end
 
 local function nextOperationId()
@@ -835,50 +420,35 @@ local function characterStateKey(character)
 end
 
 local function applyCharacterState(state)
-    if state == nil then
-        savedLook = {}
-        savedLookCaptured = false
-        activeLook = false
-        autoApplyLook = false
-        hideHair = false
-        attachmentVisibility = attachmentVisibilityFromLegacy(false)
-        lastEquipmentSignature = nil
-        slotResults = {}
-        lastNetworkApplyDiagnostics = {}
-        return
-    end
-    savedLook = copyLookData(state.savedLook)
-    savedLookCaptured = state.savedLookCaptured == true
-    activeLook = state.activeLook == true
-    autoApplyLook = state.autoApplyLook == true
-    attachmentVisibility = copyAttachmentVisibility(
-        state.attachmentVisibility,
-        state.hideHair == true
-    )
-    hideHair = legacyHideHairForVisibility(attachmentVisibility)
-    lastEquipmentSignature = state.lastEquipmentSignature
-    slotResults = state.slotResults or {}
-    lastNetworkApplyDiagnostics = state.lastNetworkApplyDiagnostics or {}
+    legacyLookMetadata = copyLookData(state ~= nil and state.legacyLookMetadata or nil)
+    lastEquipmentSignature = state ~= nil and state.lastEquipmentSignature or nil
+    slotResults = state ~= nil and state.slotResults or {}
+    lastNetworkApplyDiagnostics = state ~= nil and state.lastNetworkApplyDiagnostics or {}
+    dispatchReducer({
+        type = "RestoreLook",
+        look = state ~= nil and state.look or nil,
+        active = state ~= nil and state.active == true,
+        autoApply = state ~= nil and state.autoApply == true
+    })
 end
 
 local function saveCharacterState(character)
     local key = characterStateKey(character)
     if key == nil then return end
+    local state = reducerState
     if isSinglePlayerClient() and
-        not lookDataHasSavedLook(savedLook, savedLookCaptured) and
-        not activeLook and
-        not autoApplyLook then
+        not Core.hasLook(state.look) and
+        not state.active and
+        not state.autoApply then
         characterStates[key] = nil
         return
     end
     local previous = characterStates[key] or {}
     characterStates[key] = {
-        savedLook = copyLookData(savedLook),
-        savedLookCaptured = savedLookCaptured == true,
-        hideHair = hideHair == true,
-        attachmentVisibility = copyAttachmentVisibility(attachmentVisibility, hideHair),
-        activeLook = activeLook,
-        autoApplyLook = autoApplyLook,
+        look = Core.copyLook(state.look),
+        active = state.active == true,
+        autoApply = state.autoApply == true,
+        legacyLookMetadata = copyLookData(legacyLookMetadata),
         lastEquipmentSignature = lastEquipmentSignature,
         slotResults = slotResults,
         lastNetworkApplyDiagnostics = lastNetworkApplyDiagnostics,
@@ -889,53 +459,15 @@ local function saveCharacterState(character)
     }
 end
 
-syncControlledCharacterState = function()
-    if isSinglePlayerClient() and not suppressControlledCharacterStateSync then
-        local character = controlled ~= nil and controlled() or nil
-        if character ~= nil then saveCharacterState(character) end
-    end
-end
-
 local function loadCharacterState(character)
     local key = characterStateKey(character)
     local state = key ~= nil and characterStates[key] or nil
-    if isSinglePlayerClient() then
-        if state == nil and type(loadSinglePlayerProfileState) == "function" then
-            state = loadSinglePlayerProfileState(character)
-            if state ~= nil and key ~= nil then characterStates[key] = state end
-        end
-        applyCharacterState(state)
-        return state ~= nil and
-            lookDataHasSavedLook(state.savedLook, state.savedLookCaptured)
+    if key ~= nil then characterStates[key] = nil end
+    if isSinglePlayerClient() and state == nil and type(loadSinglePlayerProfileState) == "function" then
+        state = loadSinglePlayerProfileState(character)
     end
-
-    if state == nil then
-        activeLook = false
-        lastEquipmentSignature = nil
-        lastNetworkApplyDiagnostics = {}
-        if lookDataHasSavedLook(savedLook, savedLookCaptured) then
-            return false
-        end
-        savedLook = {}
-        savedLookCaptured = false
-        autoApplyLook = false
-        slotResults = {}
-        return false
-    end
-    if not lookDataHasSavedLook(savedLook, savedLookCaptured) then
-        activeLook = false
-        autoApplyLook = false
-        lastEquipmentSignature = nil
-        slotResults = {}
-        lastNetworkApplyDiagnostics = {}
-        return false
-    end
-    activeLook = state.activeLook == true
-    autoApplyLook = state.autoApplyLook == true
-    lastEquipmentSignature = state.lastEquipmentSignature
-    slotResults = state.slotResults or {}
-    lastNetworkApplyDiagnostics = state.lastNetworkApplyDiagnostics or {}
-    return true
+    applyCharacterState(state)
+    return state ~= nil and Core.hasLook(state.look)
 end
 
 -- Keep later helpers on one table so standard Lua compilers stay below
@@ -1099,17 +631,19 @@ function Helpers.currentSinglePlayerCampaignKey()
 end
 
 function Helpers.encodePersistentClientLook(lookData, captured, active, auto, visibilityValue)
-    lookData = lookData or savedLook
-    if captured == nil then captured = savedLookCaptured == true end
-    if active == nil then active = activeLook == true end
-    if auto == nil then auto = autoApplyLook == true end
+    local state = reducerState
+    lookData = lookData or currentLegacyLook()
+    if captured == nil then captured = state.look ~= nil and state.look.captured == true end
+    if active == nil then active = state.active == true end
+    if auto == nil then auto = state.autoApply == true end
     local visibility
     if type(visibilityValue) == "table" then
-        visibility = copyAttachmentVisibility(visibilityValue, false)
+        visibility = Core.validateAttachmentVisibility(visibilityValue, false) or
+            Core.attachmentVisibilityFromLegacy(false)
     elseif type(visibilityValue) == "boolean" then
-        visibility = attachmentVisibilityFromLegacy(visibilityValue)
+        visibility = Core.attachmentVisibilityFromLegacy(visibilityValue)
     else
-        visibility = copyAttachmentVisibility(attachmentVisibility, hideHair)
+        visibility = currentAttachmentVisibility()
     end
     local hairHidden = legacyHideHairForVisibility(visibility)
     local parts = {
@@ -1182,7 +716,6 @@ function Helpers.singlePlayerCharacterDisplayName(character)
 end
 
 function Helpers.singlePlayerProfileLineState(line)
-    if not coreAvailable or type(Core.parseLegacyClientLookLine) ~= "function" then return nil end
     local parsed, reason = Core.parseLegacyClientLookLine(tostring(line or ""))
     if parsed == nil or parsed.look == nil then
         Helpers.debugLog("Rejected single-player wardrobe profile: " .. tostring(reason))
@@ -1199,15 +732,10 @@ function Helpers.singlePlayerProfileLineState(line)
             "Saved look needs to be applied again." or "Empty"
     end
     return {
-        savedLook = legacyLook,
-        savedLookCaptured = parsed.look.captured == true,
-        hideHair = parsed.look.hideHair == true,
-        attachmentVisibility = copyAttachmentVisibility(
-            parsed.look.attachmentVisibility,
-            parsed.look.hideHair == true
-        ),
-        activeLook = false,
-        autoApplyLook = parsed.autoApply == true or parsed.active == true,
+        look = Core.copyLook(parsed.look),
+        active = false,
+        autoApply = parsed.autoApply == true or parsed.active == true,
+        legacyLookMetadata = copyLookData(legacyLook),
         lastEquipmentSignature = nil,
         slotResults = results,
         lastNetworkApplyDiagnostics = {},
@@ -1375,12 +903,10 @@ function Helpers.readLegacyPersistentClientLookLine()
 end
 
 function Helpers.restorePersistentClientLookLine(line, source)
-    if coreAvailable and type(Core.parseLegacyClientLookLine) == "function" then
-        local parsed, parseReason = Core.parseLegacyClientLookLine(tostring(line or ""))
-        if parsed == nil then
-            Helpers.debugLog("Rejected persistent client look: " .. tostring(parseReason))
-            return false
-        end
+    local parsed, parseReason = Core.parseLegacyClientLookLine(tostring(line or ""))
+    if parsed == nil then
+        Helpers.debugLog("Rejected persistent client look: " .. tostring(parseReason))
+        return false
     end
     local restoredLook = {}
     local captured = nil
@@ -1474,24 +1000,23 @@ function Helpers.restorePersistentClientLookLine(line, source)
         return false
     end
     rememberLegacyLookMetadata(restoredLook)
-    savedLook = copyLookData(restoredLook)
     persistentClientLookLoaded = true
-    savedLookCaptured = true
-    activeLook = false
-    autoApplyLook = active == true or auto == true
-    attachmentVisibility = copyAttachmentVisibility(
-        domainLook.attachmentVisibility,
-        domainLook.hideHair == true
-    )
-    hideHair = legacyHideHairForVisibility(attachmentVisibility)
     lastEquipmentSignature = nil
     lastServerAutoApplySignature = nil
     slotResults = {}
     for _, entry in ipairs(slots) do
-        slotResults[entry.key] = savedLook[entry.key] ~= nil and "Saved look needs to be applied again." or "Empty"
+        slotResults[entry.key] = restoredLook[entry.key] ~= nil and "Saved look needs to be applied again." or "Empty"
     end
-    lastOperation = autoApplyLook and "Saved look will be reapplied in the next scene." or "Saved look needs to be applied again."
-    syncReducerLook()
+    dispatchReducer({
+        type = "RestoreLook",
+        look = domainLook,
+        active = false,
+        autoApply = active == true or auto == true
+    })
+    reducerHasUnboundLook = true
+    lastOperation = reducerState.autoApply and
+        "Saved look will be reapplied in the next scene." or
+        "Saved look needs to be applied again."
     Helpers.debugLog("Loaded persistent client wardrobe look from " .. tostring(source or "C# persistence") .. ".")
     return true
 end
@@ -1512,12 +1037,13 @@ persistenceFailureReason = function(fallback)
 end
 
 persistClientLook = function(domainLook, viewModel)
-    local lookData = savedLook
-    local captured = savedLookCaptured == true
-    local active = activeLook == true
-    local auto = autoApplyLook == true
-    local visibility = copyAttachmentVisibility(attachmentVisibility, hideHair)
-    if domainLook ~= nil and coreAvailable then
+    domainLook = domainLook or currentDomainLook()
+    local lookData = currentLegacyLook()
+    local captured = domainLook ~= nil and domainLook.captured == true
+    local active = reducerState.active == true
+    local auto = reducerState.autoApply == true
+    local visibility = currentAttachmentVisibility()
+    if domainLook ~= nil then
         lookData = Core.toLegacyLook(domainLook) or {}
         for _, entry in ipairs(slots) do
             local value = lookData[entry.key]
@@ -1528,10 +1054,10 @@ persistClientLook = function(domainLook, viewModel)
             end
         end
         captured = domainLook.captured == true
-        visibility = copyAttachmentVisibility(
+        visibility = Core.validateAttachmentVisibility(
             domainLook.attachmentVisibility,
             domainLook.hideHair == true
-        )
+        ) or Core.attachmentVisibilityFromLegacy(domainLook.hideHair == true)
         if viewModel ~= nil then
             active = viewModel.active == true
             auto = viewModel.autoApply == true
@@ -2029,15 +1555,11 @@ function Helpers.itemStableId(item)
 end
 
 function Helpers.hasSavedLook()
-    if clientController ~= nil then
-        return Core.hasLook(clientController.getState().look)
-    end
-    return lookDataHasSavedLook(savedLook, savedLookCaptured)
+    return Core.hasLook(reducerState.look)
 end
 
 function Helpers.stateHasSavedLook(state)
-    if state == nil then return false end
-    return lookDataHasSavedLook(state.savedLook, state.savedLookCaptured)
+    return state ~= nil and Core.hasLook(state.look)
 end
 
 function Helpers.deactivateCachedCharacterStates(character, preserveAutoApply)
@@ -2045,16 +1567,16 @@ function Helpers.deactivateCachedCharacterStates(character, preserveAutoApply)
         local key = characterStateKey(character)
         local state = key ~= nil and characterStates[key] or nil
         if state ~= nil then
-            state.activeLook = false
-            if preserveAutoApply ~= true then state.autoApplyLook = false end
+            state.active = false
+            if preserveAutoApply ~= true then state.autoApply = false end
             state.lastEquipmentSignature = nil
         end
         return
     end
     for _, state in pairs(characterStates) do
-        state.activeLook = false
+        state.active = false
         if preserveAutoApply ~= true then
-            state.autoApplyLook = false
+            state.autoApply = false
         end
         state.lastEquipmentSignature = nil
     end
@@ -2075,7 +1597,7 @@ function Helpers.clearLocalPendingNetworkState(character)
             pendingRoundStartNetworkCharacterKey = nil
             pendingRoundStartNetworkRevision = nil
             pendingRoundStartHideHair = false
-            pendingRoundStartAttachmentVisibility = nil
+            pendingRoundStartProtocolLook = nil
         end
         Helpers.clearPendingNetworkApplyForCharacterId(key)
     end
@@ -2142,18 +1664,19 @@ function Helpers.networkApplySuppressedForCharacter(characterId, character)
 end
 
 function Helpers.preserveSceneTransitionLookIntent()
-    local shouldReapplyCurrentLook = Helpers.hasSavedLook() and (activeLook or autoApplyLook)
+    local shouldReapplyCurrentLook = Helpers.hasSavedLook() and
+        (reducerState.active or reducerState.autoApply)
     dispatchReducer({ type = "PrepareSceneTransition", reapply = shouldReapplyCurrentLook })
     lastEquipmentSignature = nil
     lastServerAutoApplySignature = nil
 
     for _, state in pairs(characterStates) do
-        if Helpers.stateHasSavedLook(state) and (state.activeLook == true or state.autoApplyLook == true) then
-            state.activeLook = false
-            state.autoApplyLook = true
+        if Helpers.stateHasSavedLook(state) and (state.active == true or state.autoApply == true) then
+            state.active = false
+            state.autoApply = true
             state.lastEquipmentSignature = nil
         else
-            state.activeLook = false
+            state.active = false
             state.lastEquipmentSignature = nil
         end
     end
@@ -2162,8 +1685,8 @@ function Helpers.preserveSceneTransitionLookIntent()
 end
 
 function Helpers.savedLookSummary(lookData, captured)
-    lookData = lookData or savedLook
-    if captured == nil then captured = savedLookCaptured end
+    lookData = lookData or currentLegacyLook()
+    if captured == nil then captured = reducerState.look ~= nil and reducerState.look.captured == true end
     if not lookDataHasSavedLook(lookData, captured) then return tr("summary.none") end
     local count = 0
     for _, entry in ipairs(slots) do
@@ -2173,9 +1696,6 @@ function Helpers.savedLookSummary(lookData, captured)
     end
     if count == 0 then return tr("summary.empty") end
     local slotKey = count == 1 and "summary.slot" or "summary.slots"
-    if currentLanguage() == "en" then
-        return tostring(count) .. " " .. tr(slotKey)
-    end
     return tostring(count) .. " " .. tr(slotKey)
 end
 
@@ -2253,21 +1773,8 @@ function Helpers.serverAutoApplyRequestKey(character)
     return tostring(characterStateKey(character) or "unknown") .. "|" .. Helpers.equipmentSignature(character)
 end
 
-function Helpers.clearPendingServerApplyRequest()
-    lastServerAutoApplySignature = nil
-    pendingServerApplyRequestKey = nil
-    pendingServerApplyLastRequestTick = 0
-    pendingServerApplyAttempts = 0
-end
-
 function Helpers.markServerApplyRequested(character)
     local requestKey = Helpers.serverAutoApplyRequestKey(character)
-    if pendingServerApplyRequestKey ~= requestKey then
-        pendingServerApplyAttempts = 0
-    end
-    pendingServerApplyRequestKey = requestKey
-    pendingServerApplyLastRequestTick = globalTick
-    pendingServerApplyAttempts = pendingServerApplyAttempts + 1
     lastServerAutoApplySignature = requestKey
     return requestKey
 end
@@ -2415,33 +1922,11 @@ function Helpers.clearAllVisualOverrides()
     end)
 end
 
-function Helpers.restoreItemVisuals(character)
-    if Helpers.ensureVisualOverride() == nil then return end
-    if character ~= nil then
-        local ok = pcall(function()
-            VisualOverride.RestoreCharacterItemVisuals(character)
-        end)
-        if ok then return end
-    end
-    pcall(function()
-        VisualOverride.RestoreItemVisuals()
-    end)
-end
-
 function Helpers.pruneVisualOverrides()
     if Helpers.ensureVisualOverride() == nil then return end
     pcall(function()
         VisualOverride.PruneStaleCharacters()
     end)
-end
-
-function Helpers.captureVisualOverride(character, item)
-    if Helpers.ensureVisualOverride() == nil or character == nil or item == nil then return 0 end
-    local ok, count = pcall(function()
-        return VisualOverride.CaptureFashionItem(character, item)
-    end)
-    if ok and count ~= nil then return count end
-    return 0
 end
 
 function Helpers.tryRestoreItemVisuals(character)
@@ -2502,15 +1987,6 @@ function Helpers.tryCaptureVisualOverride(character, item)
     return true, tonumber(count) or 0
 end
 
-function Helpers.captureVisualOverridePrefab(character, identifier)
-    if Helpers.ensureVisualOverride() == nil or character == nil or identifier == nil or identifier == "" then return 0 end
-    local ok, count = pcall(function()
-        return VisualOverride.CaptureFashionPrefab(character, tostring(identifier))
-    end)
-    if ok and count ~= nil then return count end
-    return 0
-end
-
 function Helpers.tryCaptureVisualOverridePrefab(character, identifier)
     if Helpers.ensureVisualOverride() == nil or character == nil or identifier == nil or identifier == "" then
         return false, 0, "fashion prefab identifier is empty"
@@ -2523,21 +1999,13 @@ function Helpers.tryCaptureVisualOverridePrefab(character, identifier)
     return true, tonumber(count) or 0
 end
 
-function Helpers.captureEmptyVisualOverride(character)
-    if Helpers.ensureVisualOverride() == nil or character == nil then return false end
-    local ok, result = pcall(function()
-        return VisualOverride.CaptureEmptyFashion(character)
-    end)
-    return ok and result == true
-end
-
 -- Missing entries are explicit saved-empty slots, not "leave current equipment
 -- alone". The renderer uses this mask to hide items equipped after the capture.
 function Helpers.setFashionSlotMask(character, lookData)
     if Helpers.ensureVisualOverride() == nil or character == nil then return false end
     local savedSlots = {}
     local emptySlots = {}
-    lookData = lookData or savedLook
+    lookData = lookData or currentLegacyLook()
     for _, entry in ipairs(slots) do
         if lookData[entry.key] ~= nil then
             savedSlots[#savedSlots + 1] = entry.key
@@ -2555,13 +2023,14 @@ function Helpers.setAttachmentVisibilityVisual(character, value)
     if Helpers.ensureVisualOverride() == nil or character == nil then return false end
     local visibility
     if type(value) == "table" then
-        visibility = copyAttachmentVisibility(value, false)
+        visibility = Core.validateAttachmentVisibility(value, false) or
+            Core.attachmentVisibilityFromLegacy(false)
     elseif type(value) == "boolean" then
-        visibility = attachmentVisibilityFromLegacy(value)
+        visibility = Core.attachmentVisibilityFromLegacy(value)
     else
-        visibility = copyAttachmentVisibility(attachmentVisibility, hideHair)
+        visibility = currentAttachmentVisibility()
     end
-    local forceHide, forceShow, maskReason = attachmentVisibilityMasks(visibility)
+    local forceHide, forceShow, maskReason = Core.attachmentVisibilityMasks(visibility)
     if forceHide == nil or forceShow == nil then
         Helpers.log("Appearance-layer update failed: " .. tostring(maskReason or "invalid visibility policy"))
         return false
@@ -2695,7 +2164,7 @@ function Helpers.writeProjectedV2Look(message, look)
 end
 
 function Helpers.writeAndSendV2Command(command, baseRevision)
-    if not coreAvailable or Networking == nil or command == nil then return false end
+    if Networking == nil or command == nil then return false end
     local ok, reason = pcall(function()
         local message = Networking.Start(NET_V2_COMMAND)
         if serverSupportsAttachmentVisibility() then
@@ -2772,7 +2241,7 @@ function Helpers.sendNextProtocolCommand()
 end
 
 function Helpers.sendV2Hello(forceSnapshot)
-    if not coreAvailable or not Helpers.isMultiplayerClient() or Networking == nil then return false end
+    if not Helpers.isMultiplayerClient() or Networking == nil then return false end
     local probing = protocolMode == "probing" and protocolHelloSentAt == nil
     local requestingSnapshot = forceSnapshot == true and protocolMode == "v2"
     if not probing and not requestingSnapshot then return false end
@@ -2804,16 +2273,10 @@ function Helpers.selectV1Protocol(reason)
 end
 
 function Helpers.selectV2Protocol(revision, capabilities)
-    if not coreAvailable then return false end
     protocolMode = "v2"
     serverCapabilities = tonumber(capabilities) or 0
     local serverRevision = tonumber(revision) or 0
-    if clientController == nil then
-        reducerState = Core.newClientState({ clientSessionId = clientSessionId, revision = serverRevision })
-        clientController = createClientController(reducerState)
-    else
-        dispatchReducer({ type = "RevisionObserved", revision = serverRevision })
-    end
+    dispatchReducer({ type = "RevisionObserved", revision = serverRevision })
     Helpers.debugLog("Negotiated wardrobe protocol v2 at revision " .. tostring(serverRevision) ..
         " with capabilities 0x" .. string.format("%02X", serverCapabilities) .. ".")
     Helpers.sendNextProtocolCommand()
@@ -2826,12 +2289,12 @@ function Helpers.flushPendingVisibilitySync()
         visibilitySyncPendingNegotiation = false
         return false
     end
-    local state = clientController ~= nil and clientController.getState() or reducerState
+    local state = reducerState
     if state == nil or state.pendingKind ~= nil then return false end
     visibilitySyncPendingNegotiation = false
     dispatchReducer({
         type = "SetAttachmentVisibility",
-        attachmentVisibility = copyAttachmentVisibility(attachmentVisibility, hideHair),
+        attachmentVisibility = currentAttachmentVisibility(),
         remote = true,
         operationId = nextOperationId()
     })
@@ -2844,7 +2307,7 @@ end
 function Helpers.queueProtocolCommand(kind, lookData, captured, operationId, reducerOwned, domainLookOverride)
     if not Helpers.isMultiplayerClient() or Networking == nil then return false end
     local domainLook = nil
-    if coreAvailable and kind == COMMAND_VISIBILITY then
+    if kind == COMMAND_VISIBILITY then
         if not serverSupportsAttachmentVisibility() then
             Helpers.debugLog("Kept attachment visibility local because the server did not advertise support.")
             return false
@@ -2854,13 +2317,14 @@ function Helpers.queueProtocolCommand(kind, lookData, captured, operationId, red
             Helpers.debugLog("Refused to queue invalid attachment visibility.")
             return false
         end
-    elseif coreAvailable and (kind == COMMAND_SAVE or kind == COMMAND_APPLY) then
+    elseif kind == COMMAND_SAVE or kind == COMMAND_APPLY then
+        local visibility = currentAttachmentVisibility()
         domainLook = domainLookOverride ~= nil and Core.copyLook(domainLookOverride) or
             domainLookFromLegacy(
                 lookData or {},
                 captured == true,
-                hideHair == true,
-                attachmentVisibility
+                legacyHideHairForVisibility(visibility),
+                visibility
             )
         if domainLook == nil then
             Helpers.debugLog("Refused to queue invalid wardrobe look for " .. tostring(kind) .. ".")
@@ -2868,7 +2332,7 @@ function Helpers.queueProtocolCommand(kind, lookData, captured, operationId, red
         end
     end
 
-    if kind == COMMAND_APPLY and coreAvailable and reducerOwned ~= true then
+    if kind == COMMAND_APPLY and reducerOwned ~= true then
         local signature = Core.lookSignature(domainLook)
         for _, queued in ipairs(protocolCommandQueue) do
             if queued.kind == COMMAND_APPLY and Core.lookSignature(queued.look) == signature then
@@ -2959,29 +2423,6 @@ function Helpers.processProtocolNegotiation()
             end
         end
     end
-end
-
-function Helpers.requestServerSaveFashion()
-    return Helpers.queueProtocolCommand(COMMAND_SAVE, savedLook, savedLookCaptured == true)
-end
-
-function Helpers.requestServerApplyFashion(lookData, captured)
-    return Helpers.queueProtocolCommand(COMMAND_APPLY, lookData, captured == true)
-end
-
-function Helpers.requestServerApplyForCharacter(character)
-    if character == nil then return false end
-    if not Helpers.requestServerApplyFashion(savedLook, savedLookCaptured == true) then return false end
-    Helpers.markServerApplyRequested(character)
-    return true
-end
-
-function Helpers.requestServerClearFashion()
-    return Helpers.queueProtocolCommand(COMMAND_CLEAR, nil, false)
-end
-
-function Helpers.requestServerForgetFashion()
-    return Helpers.queueProtocolCommand(COMMAND_FORGET, nil, false)
 end
 
 function Helpers.readNetworkLook(message)
@@ -3129,7 +2570,7 @@ end
 function Helpers.applyCapturedFashionToCharacterEquipment(character, lookData, recapturePayload, visibilityValue)
     if character == nil then return false, 0 end
 
-    local look = lookData or savedLook
+    local look = lookData or currentLegacyLook()
     if recapturePayload ~= false then
         local begun, beginReason = Helpers.beginFashionTransaction(character)
         if not begun then return false, 0, beginReason end
@@ -3245,11 +2686,12 @@ clientEffectAdapters.Capture = function(currentEffect)
 
     local startingItems = Helpers.snapshot(character)
     local lookData = Helpers.visualSnapshot(character)
+    local visibility = currentAttachmentVisibility()
     local domainLook, lookReason = domainLookFromLegacy(
         lookData,
         true,
-        hideHair == true,
-        attachmentVisibility
+        legacyHideHairForVisibility(visibility),
+        visibility
     )
     if domainLook == nil then return false, tostring(lookReason or "captured look failed schema v2 validation") end
     rememberLegacyLookMetadata(lookData)
@@ -3291,7 +2733,7 @@ clientEffectAdapters.Capture = function(currentEffect)
             end
         end
         if not Helpers.setFashionSlotMask(character, lookData) or
-            not Helpers.setAttachmentVisibilityVisual(character, attachmentVisibility) then
+            not Helpers.setAttachmentVisibilityVisual(character, visibility) then
             Helpers.abortFashionTransaction(character)
             return false, "renderer rejected staged slot or attachment metadata"
         end
@@ -3390,7 +2832,6 @@ clientEffectAdapters.Unequip = function()
     lastCharacter = context.character
     lastEquipmentSignature = nil
     lastServerAutoApplySignature = nil
-    Helpers.clearPendingServerApplyRequest()
     Helpers.clearNetworkApplySuppressionForCharacter(context.character)
     local message
     if context.startingItemCount == 0 then
@@ -3430,7 +2871,6 @@ clientEffectAdapters.SendCommand = function(currentEffect)
         lastCharacter = context.character
         lastEquipmentSignature = nil
         lastServerAutoApplySignature = nil
-        Helpers.clearPendingServerApplyRequest()
         Helpers.log("Saved current outfit; server-side removal requested for multiplayer.")
         pendingSaveContext = nil
     end
@@ -3492,7 +2932,7 @@ clientEffectAdapters.Render = function(currentEffect)
         slotResults[entry.key] = lookData[entry.key] ~= nil and
             (currentEffect.characterId ~= nil and "Synced from server" or "Saved and applied") or "Empty"
     end
-    Helpers.clearPendingServerApplyRequest()
+    lastServerAutoApplySignature = nil
     if currentEffect.characterId ~= nil then
         lastOperation = "Saved look applied from multiplayer sync."
     else
@@ -3529,12 +2969,11 @@ clientEffectAdapters.ClearRender = function(currentEffect)
     Helpers.clearLocalPendingNetworkState(character)
     lastEquipmentSignature = nil
     lastServerAutoApplySignature = nil
-    Helpers.clearPendingServerApplyRequest()
     pendingRoundStartNetworkLook = nil
     pendingRoundStartNetworkCharacterKey = nil
     pendingRoundStartNetworkRevision = nil
     pendingRoundStartHideHair = false
-    pendingRoundStartAttachmentVisibility = nil
+    pendingRoundStartProtocolLook = nil
     if currentEffect.forget == true then
         if isSinglePlayerClient() then
             local key = characterStateKey(character)
@@ -3592,7 +3031,7 @@ function Helpers.saveFashionAndUnequip()
         remote = remote,
         operationId = operationId
     })
-    local state = clientController ~= nil and clientController.getState() or reducerState
+    local state = reducerState
     if state ~= nil and state.phase == Core.PHASE.Faulted then
         Helpers.log("Save failed: " .. tostring(state.error or "unknown adapter failure"))
         return false
@@ -3635,7 +3074,7 @@ function Helpers.applyFashionToCurrentEquipment(silent)
     else
         dispatchReducer({ type = "LocalApplyRequested", look = domainLook })
     end
-    local state = clientController ~= nil and clientController.getState() or reducerState
+    local state = reducerState
     if state ~= nil and state.phase == Core.PHASE.Faulted then
         if not silent then Helpers.log("Saved look could not be applied: " .. tostring(state.error)) end
         return false
@@ -3658,7 +3097,7 @@ function Helpers.clearActiveLook()
     end
     Helpers.clearLocalPendingNetworkState(character)
     Helpers.suppressNetworkAppliesForCharacter(character)
-    local state = clientController ~= nil and clientController.getState() or reducerState
+    local state = reducerState
     if state ~= nil and state.phase == Core.PHASE.Faulted then
         Helpers.log("Look clear failed: " .. tostring(state.error))
     elseif multiplayerClearRequested then
@@ -3672,7 +3111,7 @@ end
 -- originals that its saved/empty slot masks must cover. Reapply only when the
 -- stable equipment signature changes.
 function Helpers.refreshActiveLookIfNeeded(character)
-    if character == nil or not activeLook or not Helpers.hasSavedLook() then return end
+    if character == nil or not reducerState.active or not Helpers.hasSavedLook() then return end
     local signature = Helpers.equipmentSignature(character)
     if lastEquipmentSignature == signature then return end
     if Helpers.applyFashionToCurrentEquipment(true) then
@@ -3684,15 +3123,15 @@ function Helpers.refreshActiveLookIfNeeded(character)
 end
 
 function Helpers.autoApplySavedLookIfNeeded(character)
-    if character == nil or activeLook or not autoApplyLook or not Helpers.hasSavedLook() then return end
+    if character == nil or reducerState.active or not reducerState.autoApply or not Helpers.hasSavedLook() then return end
     if isSinglePlayerClient() and singlePlayerAutomaticRestoreAllowed ~= nil and
         not singlePlayerAutomaticRestoreAllowed(character) then
         return
     end
     if Helpers.isMultiplayerClient() and
         lastServerAutoApplySignature == Helpers.serverAutoApplyRequestKey(character) then return end
-    local view = clientController ~= nil and clientController.getViewModel() or nil
-    if view ~= nil and view.busy then return end
+    local view = Core.clientViewModel(reducerState)
+    if view.busy then return end
     if Helpers.applyFashionToCurrentEquipment(true) then
         lastOperation = "Saved look auto-applied."
     end
@@ -3706,10 +3145,16 @@ function Helpers.handleNoControlledCharacter()
         end
     end
 
-    local shouldReapplySavedLook = Helpers.hasSavedLook() and (activeLook or autoApplyLook)
+    if reducerCharacterKey ~= nil then
+        dispatchReducer({ type = "CharacterLost" })
+        reducerCharacterKey = nil
+    end
+    reducerHasUnboundLook = false
+
+    local shouldReapplySavedLook = Helpers.hasSavedLook() and
+        (reducerState.active or reducerState.autoApply)
     lastEquipmentSignature = nil
     lastServerAutoApplySignature = nil
-    Helpers.clearPendingServerApplyRequest()
     lastCharacter = nil
 
     if Helpers.hasSavedLook() then
@@ -3718,8 +3163,9 @@ function Helpers.handleNoControlledCharacter()
             lastOperation = "Saved look will be reapplied in the next scene."
         end
         if next(slotResults) == nil then
+            local lookData = currentLegacyLook()
             for _, entry in ipairs(slots) do
-                slotResults[entry.key] = savedLook[entry.key] ~= nil and "Saved look needs to be applied again." or "Empty"
+                slotResults[entry.key] = lookData[entry.key] ~= nil and "Saved look needs to be applied again." or "Empty"
             end
         end
     else
@@ -3729,7 +3175,21 @@ function Helpers.handleNoControlledCharacter()
 end
 
 function Helpers.handleControlledCharacterChange(character)
-    if character == nil or character == lastCharacter then return end
+    if character == nil then return end
+    local nextCharacterKey = characterStateKey(character)
+    if character == lastCharacter and reducerCharacterKey == nextCharacterKey then return end
+    local bootstrapState = nil
+    if lastCharacter == nil and reducerHasUnboundLook and Core.hasLook(reducerState.look) then
+        bootstrapState = {
+            look = Core.copyLook(reducerState.look),
+            active = reducerState.active == true,
+            autoApply = reducerState.autoApply == true,
+            legacyLookMetadata = copyLookData(legacyLookMetadata),
+            lastEquipmentSignature = lastEquipmentSignature,
+            slotResults = slotResults,
+            lastNetworkApplyDiagnostics = lastNetworkApplyDiagnostics
+        }
+    end
     local sourceState = nil
     if lastCharacter ~= nil then
         saveCharacterState(lastCharacter)
@@ -3739,26 +3199,30 @@ function Helpers.handleControlledCharacterChange(character)
         sourceState = characterStates[pendingSinglePlayerTransferSourceKey]
     end
 
-    local hadState = loadCharacterState(character)
+    reducerCharacterKey = nextCharacterKey
+    dispatchReducer({ type = "CharacterReady", characterKey = reducerCharacterKey })
+    local hadState
+    if bootstrapState ~= nil then
+        applyCharacterState(bootstrapState)
+        reducerHasUnboundLook = false
+        hadState = true
+    else
+        hadState = loadCharacterState(character)
+    end
     local transferred = false
     if isSinglePlayerClient() and not hadState and
         transferToUnconfiguredCharacter and
         Helpers.stateHasSavedLook(sourceState) and
-        (sourceState.activeLook == true or sourceState.autoApplyLook == true) then
+        (sourceState.active == true or sourceState.autoApply == true) then
         local targetKey = characterStateKey(character)
         local targetProfileKey = Helpers.singlePlayerCharacterProfileKey(character)
         if targetKey ~= nil and targetProfileKey ~= nil and
             not singlePlayerAmbiguousFingerprints[targetProfileKey] then
             local transferredState = {
-                savedLook = copyLookData(sourceState.savedLook),
-                savedLookCaptured = sourceState.savedLookCaptured == true,
-                hideHair = sourceState.hideHair == true,
-                attachmentVisibility = copyAttachmentVisibility(
-                    sourceState.attachmentVisibility,
-                    sourceState.hideHair == true
-                ),
-                activeLook = false,
-                autoApplyLook = true,
+                look = Core.copyLook(sourceState.look),
+                active = false,
+                autoApply = true,
+                legacyLookMetadata = copyLookData(sourceState.legacyLookMetadata),
                 lastEquipmentSignature = nil,
                 slotResults = {},
                 lastNetworkApplyDiagnostics = {},
@@ -3767,38 +3231,30 @@ function Helpers.handleControlledCharacterChange(character)
                 persistent = false,
                 profileAmbiguous = false
             }
+            local transferredLook = Core.toLegacyLook(transferredState.look) or {}
             for _, entry in ipairs(slots) do
                 transferredState.slotResults[entry.key] =
-                    transferredState.savedLook[entry.key] ~= nil and
+                    transferredLook[entry.key] ~= nil and
                     "Saved look needs to be applied again." or "Empty"
             end
-            characterStates[targetKey] = transferredState
             applyCharacterState(transferredState)
             transferred = true
         end
     end
-
     if transferred then
         lastOperation = "Current look will be applied to this unconfigured character."
     elseif hadState then
         lastOperation = Helpers.hasSavedLook() and "Saved look restored for this character." or "Controlled character changed."
     else
         lastServerAutoApplySignature = nil
-        Helpers.clearPendingServerApplyRequest()
         if Helpers.hasSavedLook() then
-            lastOperation = autoApplyLook and
+            lastOperation = reducerState.autoApply and
                 "Saved look will be reapplied for the new character." or
                 "Saved look needs to be applied again."
         else
             lastOperation = "Controlled character changed. Save a new outfit for this character."
         end
     end
-    dispatchReducer({
-        type = "RestoreLook",
-        look = currentDomainLook(),
-        active = activeLook == true,
-        autoApply = autoApplyLook == true
-    })
     -- If the first hello completed before Character.Controlled was assigned,
     -- ask again now that own/remote state can be classified and rendered safely.
     Helpers.sendV2Hello(true)
@@ -3872,18 +3328,14 @@ function Helpers.queueSinglePlayerProfileRestore(character)
     state.profileKey = Helpers.singlePlayerCharacterProfileKey(character)
     state.displayName = Helpers.singlePlayerCharacterDisplayName(character)
     if character == controlled() then
+        if character ~= lastCharacter then return true end
+        characterStates[runtimeKey] = nil
         applyCharacterState(state)
-        dispatchReducer({
-            type = "RestoreLook",
-            look = currentDomainLook(),
-            active = state.activeLook == true,
-            autoApply = state.autoApplyLook == true
-        })
         return true
     end
-    if state.autoApplyLook ~= true then return false end
+    if state.autoApply ~= true then return false end
 
-    state.activeLook = false
+    state.active = false
     state.lastEquipmentSignature = nil
 
     pendingSinglePlayerRestores[runtimeKey] = {
@@ -3978,29 +3430,27 @@ function Helpers.processPendingSinglePlayerRestores()
         else
             local state = characterStates[runtimeKey]
             if state == nil or not Helpers.stateHasSavedLook(state) or
-                state.autoApplyLook ~= true or
+                state.autoApply ~= true or
                 not singlePlayerAutomaticRestoreAllowed(character) then
                 pendingSinglePlayerRestores[runtimeKey] = nil
             elseif globalTick >= pending.nextAttemptTick and Helpers.singlePlayerRestoreReady(pending) then
                 pending.attempts = pending.attempts + 1
+                local lookData = legacyLookFromDomain(state.look, state.legacyLookMetadata)
                 local applied, _, reason = Helpers.applyCapturedFashionToCharacterEquipment(
                     character,
-                    state.savedLook,
+                    lookData,
                     true,
-                    copyAttachmentVisibility(
-                        state.attachmentVisibility,
-                        state.hideHair == true
-                    )
+                    state.look.attachmentVisibility
                 )
                 if applied then
-                    state.activeLook = true
-                    state.autoApplyLook = true
+                    state.active = true
+                    state.autoApply = true
                     state.lastEquipmentSignature = Helpers.equipmentSignature(character)
                     state.lastNetworkApplyDiagnostics = {}
                     state.slotResults = {}
                     for _, entry in ipairs(slots) do
                         state.slotResults[entry.key] =
-                            state.savedLook[entry.key] ~= nil and "Saved and applied" or "Empty"
+                            lookData[entry.key] ~= nil and "Saved and applied" or "Empty"
                     end
                     pendingSinglePlayerRestores[runtimeKey] = nil
                     Helpers.debugLog(
@@ -4009,7 +3459,7 @@ function Helpers.processPendingSinglePlayerRestores()
                         "."
                     )
                 elseif pending.attempts >= 3 then
-                    state.activeLook = false
+                    state.active = false
                     state.lastNetworkApplyDiagnostics = { tostring(reason or "renderer activation failed") }
                     pendingSinglePlayerRestores[runtimeKey] = nil
                     Helpers.debugLog(
@@ -4038,7 +3488,7 @@ function Helpers.clearSavedLook()
     else
         dispatchReducer({ type = "LocalForgetRequested" })
     end
-    local state = clientController ~= nil and clientController.getState() or reducerState
+    local state = reducerState
     if state ~= nil and state.phase == Core.PHASE.Faulted then
         Helpers.log("Saved look was not forgotten: " .. tostring(state.error))
         return false
@@ -4066,9 +3516,7 @@ function Helpers.deferRoundStartNetworkLook(
     pendingRoundStartNetworkCharacterKey = characterStateKey(character)
     pendingRoundStartNetworkRevision = protocolRevision
     pendingRoundStartHideHair = hairHidden == true
-    pendingRoundStartAttachmentVisibility = protocolLook ~= nil and
-        copyAttachmentVisibility(protocolLook.attachmentVisibility, protocolLook.hideHair == true) or
-        nil
+    pendingRoundStartProtocolLook = Core.copyLook(protocolLook)
     slotResults = {}
     lastNetworkApplyDiagnostics = { "waiting for initial equipment to finish equipping" }
     for _, entry in ipairs(slots) do
@@ -4084,67 +3532,20 @@ function Helpers.applyPendingRoundStartNetworkLook(character)
     local networkLook = copyLookData(pendingRoundStartNetworkLook)
     local protocolRevision = pendingRoundStartNetworkRevision
     local hairHidden = pendingRoundStartHideHair
-    local pendingVisibility = pendingRoundStartAttachmentVisibility
+    local protocolLook = Core.copyLook(pendingRoundStartProtocolLook)
     pendingRoundStartNetworkLook = nil
     pendingRoundStartNetworkCharacterKey = nil
     pendingRoundStartNetworkRevision = nil
     pendingRoundStartHideHair = false
-    pendingRoundStartAttachmentVisibility = nil
+    pendingRoundStartProtocolLook = nil
 
-    if protocolRevision ~= nil then
-        local domainLook = domainLookFromLegacy(
-            networkLook,
-            true,
-            hairHidden,
-            pendingVisibility
-        )
-        rememberLegacyLookMetadata(networkLook)
-        local effects = dispatchReducer({
-            type = "RemoteStateReceived",
-            revision = protocolRevision,
-            characterId = Helpers.characterEntityId(character),
-            active = true,
-            look = domainLook
-        })
-        if effectsContain(effects, "IgnoredStaleState") or
-            effectsContain(effects, "IgnoredSupersededState") then
-            return false
-        end
-        local acceptedState = clientController ~= nil and clientController.getState() or reducerState
-        if acceptedState ~= nil and acceptedState.phase == Core.PHASE.Active then
-            local key = characterStateKey(character)
-            if key ~= nil then
-                lastAppliedNetworkLookSignatureByCharacterKey[key] =
-                    key .. "|" .. lookDataSignature(networkLook, true, pendingVisibility) ..
-                    "|" .. Helpers.equipmentSignature(character)
-            end
-            lastOperation = "Saved look applied from multiplayer sync after initial equipment."
-        else
-            lastOperation = "Multiplayer wardrobe sync failed after initial equipment; dump debug log."
-        end
-        return true
-    end
-
-    local domainLook = domainLookFromLegacy(
+    return Helpers.handleNetworkLookApply(
+        Helpers.characterEntityId(character),
         networkLook,
-        true,
-        hideHair,
-        attachmentVisibility
+        protocolRevision,
+        hairHidden,
+        protocolLook
     )
-    rememberLegacyLookMetadata(networkLook)
-    dispatchReducer({ type = "LocalApplyRequested", look = domainLook })
-    local acceptedState = clientController ~= nil and clientController.getState() or reducerState
-    if acceptedState ~= nil and acceptedState.phase == Core.PHASE.Active then
-        local key = characterStateKey(character)
-        if key ~= nil then
-            lastAppliedNetworkLookSignatureByCharacterKey[key] =
-                key .. "|" .. lookDataSignature(networkLook, true) .. "|" .. Helpers.equipmentSignature(character)
-        end
-        lastOperation = "Saved look applied from multiplayer sync after initial equipment."
-    else
-        lastOperation = "Multiplayer wardrobe sync failed after initial equipment; dump debug log."
-    end
-    return true
 end
 
 function Helpers.networkApplySignature(character, networkLook, protocolLook)
@@ -4175,9 +3576,9 @@ function Helpers.storePendingNetworkApply(characterId, networkLook, protocolRevi
         protocolRevision = protocolRevision,
         hideHair = hairHidden == true,
         attachmentVisibility = protocolLook ~= nil and
-            copyAttachmentVisibility(protocolLook.attachmentVisibility, protocolLook.hideHair == true) or
-            nil,
-        protocolLook = coreAvailable and Core.copyLook(protocolLook) or nil
+            (Core.validateAttachmentVisibility(protocolLook.attachmentVisibility, protocolLook.hideHair == true) or
+                Core.attachmentVisibilityFromLegacy(protocolLook.hideHair == true)) or nil,
+        protocolLook = Core.copyLook(protocolLook)
     }
 end
 
@@ -4186,7 +3587,7 @@ function Helpers.storePendingNetworkClear(characterId, protocolRevision, protoco
     pendingNetworkClearsByCharacterId[characterId] = {
         receivedTick = globalTick,
         protocolRevision = protocolRevision,
-        protocolLook = coreAvailable and Core.copyLook(protocolLook) or nil
+        protocolLook = Core.copyLook(protocolLook)
     }
 end
 
@@ -4236,7 +3637,7 @@ function Helpers.handleNetworkLookApply(characterId, networkLook, protocolRevisi
             return false
         end
         if effectsContain(effects, "IgnoredDuplicateState") then return true end
-        local acceptedState = clientController ~= nil and clientController.getState() or reducerState
+        local acceptedState = reducerState
         if acceptedState ~= nil and acceptedState.phase == Core.PHASE.Active then
             Helpers.rememberNetworkLookApplied(character, networkLook, protocolLook)
             return true
@@ -4249,15 +3650,16 @@ function Helpers.handleNetworkLookApply(characterId, networkLook, protocolRevisi
             Helpers.debugLog("Ignored suppressed multiplayer wardrobe apply for characterId=" .. tostring(characterId) .. ".")
             return false
         end
+        local visibility = currentAttachmentVisibility()
         local domainLook = domainLookFromLegacy(
             networkLook,
             true,
-            hideHair,
-            attachmentVisibility
+            legacyHideHairForVisibility(visibility),
+            visibility
         )
         rememberLegacyLookMetadata(networkLook)
         dispatchReducer({ type = "LocalApplyRequested", look = domainLook })
-        local acceptedState = clientController ~= nil and clientController.getState() or reducerState
+        local acceptedState = reducerState
         if acceptedState ~= nil and acceptedState.phase == Core.PHASE.Active then
             Helpers.rememberNetworkLookApplied(character, networkLook)
             return true
@@ -4278,7 +3680,7 @@ function Helpers.handleNetworkLookApply(characterId, networkLook, protocolRevisi
     if protocolRevision ~= nil then
         networkVisibility = protocolLook ~= nil and
             protocolLook.attachmentVisibility or
-            attachmentVisibilityFromLegacy(hairHidden == true)
+            Core.attachmentVisibilityFromLegacy(hairHidden == true)
     end
     local applied, diagnostics = Helpers.applyNetworkLook(character, networkLook, networkVisibility)
     if applied then
@@ -4309,7 +3711,7 @@ function Helpers.handleNetworkLookClear(characterId, protocolRevision, protocolL
             look = protocolLook
         })
         if effectsContain(effects, "IgnoredStaleState") then return false end
-        local acceptedState = clientController ~= nil and clientController.getState() or reducerState
+        local acceptedState = reducerState
         if acceptedState ~= nil and acceptedState.phase == Core.PHASE.Faulted then
             return false
         end
@@ -4317,7 +3719,7 @@ function Helpers.handleNetworkLookClear(characterId, protocolRevision, protocolL
         return true
     end
     if protocolRevision == nil and character == controlled() then
-        local currentState = clientController ~= nil and clientController.getState() or reducerState
+        local currentState = reducerState
         if currentState ~= nil and Core.hasLook(currentState.look) and currentState.active then
             dispatchReducer({ type = "LocalClearRequested" })
         else
@@ -4377,8 +3779,7 @@ if Networking ~= nil then
         Helpers.handleNetworkLookClear(characterId)
     end)
 
-    if coreAvailable then
-        Networking.Receive(NET_V2_HELLO, function(message)
+    Networking.Receive(NET_V2_HELLO, function(message)
             local ok, response, reason = pcall(Core.readServerHello, message)
             if not ok or response == nil then
                 Helpers.debugLog("Ignored malformed v2 hello response: " .. tostring(ok and reason or response))
@@ -4439,14 +3840,12 @@ if Networking ~= nil then
             if belongsToControlledCharacter and
                 not serverSupportsAttachmentVisibility() and
                 state.look ~= nil then
-                local localLook = clientController ~= nil and
-                    clientController.getState().look or
-                    currentDomainLook()
+                local localLook = currentDomainLook()
                 if localLook ~= nil then
-                    state.look.attachmentVisibility = copyAttachmentVisibility(
+                    state.look.attachmentVisibility = Core.validateAttachmentVisibility(
                         localLook.attachmentVisibility,
                         localLook.hideHair == true
-                    )
+                    ) or Core.attachmentVisibilityFromLegacy(localLook.hideHair == true)
                     state.look.hideHair =
                         legacyHideHairForVisibility(state.look.attachmentVisibility)
                 end
@@ -4488,7 +3887,6 @@ if Networking ~= nil then
                 Helpers.handleNetworkLookClear(characterId, state.revision, state.look)
             end
         end)
-    end
 end
 
 function Helpers.clientLookStoragePath()
@@ -4530,7 +3928,9 @@ function Helpers.dumpDebugLog()
     end
     emit("---- wardrobe diagnostic dump begin ----")
     emit("lastOperation=" .. tostring(lastOperation))
-    emit("savedLookCaptured=" .. tostring(savedLookCaptured) .. ", activeLook=" .. tostring(activeLook) .. ", autoApplyLook=" .. tostring(autoApplyLook))
+    emit("savedLookCaptured=" .. tostring(reducerState.look ~= nil and reducerState.look.captured == true) ..
+        ", activeLook=" .. tostring(reducerState.active) ..
+        ", autoApplyLook=" .. tostring(reducerState.autoApply))
     emit("sessionKey=" .. tostring(Helpers.currentSessionKey()))
     emit("singlePlayerProfile=" .. tostring(Helpers.singlePlayerProfileLabel(character)))
     emit("transferToUnconfiguredCharacter=" .. tostring(transferToUnconfiguredCharacter))
@@ -4538,9 +3938,10 @@ function Helpers.dumpDebugLog()
     emit("overrideLabel=" .. tostring(overrideState.label) .. ", overrideDetails=" .. tostring(overrideState.details))
     emit("persistence=" .. tostring(Helpers.clientLookStoragePath()))
     emit("character=" .. tostring(character) .. ", equipmentSignature=" .. tostring(character ~= nil and Helpers.equipmentSignature(character) or "no-character"))
+    local projectedLook = currentLegacyLook()
     for _, entry in ipairs(slots) do
         local current = character ~= nil and getSlotItem(character, entry.slot) or nil
-        local saved = savedLook[entry.key]
+        local saved = projectedLook[entry.key]
         emit(
             entry.key ..
             " currentIdentifier=" .. tostring(Helpers.itemIdentifier(current)) ..
@@ -4585,14 +3986,6 @@ function Helpers.requestWindowClose()
     windowNeedsRefresh = true
 end
 
-function Helpers.refreshWindow()
-    if attachmentPanelOpen then
-        buildAttachmentVisibilityWindow()
-    else
-        buildWindow()
-    end
-end
-
 function Helpers.addText(parent, text)
     local block = GUI.TextBlock(GUI.RectTransform(Vector2(1.0, 0.0), parent.RectTransform), text)
     block.TextColor = Color.White
@@ -4617,38 +4010,20 @@ function Helpers.addButton(parent, text, action, refresh, enabled)
 end
 
 function Helpers.clientViewModelSnapshot(character, overrideState)
-    local reducerView = clientController ~= nil and clientController.getViewModel() or {
-        phase = "Legacy",
-        hasSavedLook = Helpers.hasSavedLook(),
-        active = activeLook == true,
-        autoApply = autoApplyLook == true,
-        canSave = character ~= nil,
-        canApply = character ~= nil and Helpers.hasSavedLook(),
-        canClear = character ~= nil,
-        canForget = Helpers.hasSavedLook(),
-        error = nil
-    }
-    local lookCopy = copyLookData(savedLook)
+    local reducerView = Core.clientViewModel(reducerState)
+    local lookCopy = currentLegacyLook()
     local resultCopy = {}
     local currentNames = {}
     for _, entry in ipairs(slots) do
         resultCopy[entry.key] = slotResults[entry.key]
         currentNames[entry.key] = character ~= nil and Helpers.itemName(getSlotItem(character, entry.slot)) or "-"
     end
-    local viewCaptured = savedLookCaptured == true
-    local viewHideHair = hideHair == true
-    local viewAttachmentVisibility =
-        copyAttachmentVisibility(attachmentVisibility, hideHair)
-    if coreAvailable then
-        viewCaptured = reducerView.look ~= nil and reducerView.look.captured == true
-        viewHideHair = reducerView.look ~= nil and reducerView.look.hideHair == true
-        if reducerView.look ~= nil then
-            viewAttachmentVisibility = copyAttachmentVisibility(
-                reducerView.look.attachmentVisibility,
-                reducerView.look.hideHair == true
-            )
-        end
-    end
+    local viewCaptured = reducerView.look ~= nil and reducerView.look.captured == true
+    local viewHideHair = reducerView.look ~= nil and reducerView.look.hideHair == true
+    local viewAttachmentVisibility = reducerView.look ~= nil and
+        (Core.validateAttachmentVisibility(reducerView.look.attachmentVisibility, reducerView.look.hideHair == true) or
+            Core.attachmentVisibilityFromLegacy(reducerView.look.hideHair == true)) or
+        Core.attachmentVisibilityFromLegacy(false)
     return {
         phase = reducerView.phase,
         look = lookCopy,
@@ -4696,7 +4071,7 @@ function Helpers.nextAttachmentVisibility(value)
 end
 
 function Helpers.updateAttachmentVisibility(nextVisibility)
-    local canonical, reason = validateAttachmentVisibility(nextVisibility, false)
+    local canonical, reason = Core.validateAttachmentVisibility(nextVisibility, false)
     if canonical == nil then
         Helpers.log("Appearance-layer update failed: " .. tostring(reason))
         return false
@@ -4709,7 +4084,7 @@ function Helpers.updateAttachmentVisibility(nextVisibility)
         remote = remote,
         operationId = remote and nextOperationId() or nil
     })
-    local state = clientController ~= nil and clientController.getState() or reducerState
+    local state = reducerState
     if state ~= nil and state.phase == Core.PHASE.Faulted then
         Helpers.log("Appearance-layer update failed: " .. tostring(state.error))
         return false
@@ -4857,7 +4232,8 @@ buildAttachmentVisibilityWindow = function()
             tr(layer.labelKey) .. " — " .. Helpers.attachmentVisibilityLabel(state),
             function()
                 local nextVisibility =
-                    copyAttachmentVisibility(view.attachmentVisibility, false)
+                    Core.validateAttachmentVisibility(view.attachmentVisibility, false) or
+                    Core.attachmentVisibilityFromLegacy(false)
                 nextVisibility[layer.key] = Helpers.nextAttachmentVisibility(state)
                 Helpers.updateAttachmentVisibility(nextVisibility)
             end,
@@ -4876,7 +4252,7 @@ buildAttachmentVisibilityWindow = function()
     end, true, view.canSetAttachmentVisibility)
 
     Helpers.addButton(list, tr("button.all_auto"), function()
-        Helpers.updateAttachmentVisibility(attachmentVisibilityFromLegacy(false))
+        Helpers.updateAttachmentVisibility(Core.attachmentVisibilityFromLegacy(false))
     end, true, view.canSetAttachmentVisibility)
 
     Helpers.addButton(list, tr("button.back"), function()
@@ -4917,46 +4293,21 @@ tryCaptureEmptyVisualOverride = function(character)
     return true
 end
 
-function Helpers.syncReducerCharacter(character)
-    if not coreAvailable then return end
-    local key = characterStateKey(character)
-    if key == nil then
-        if reducerCharacterKey ~= nil then
-            if not isSinglePlayerClient() then
-                dispatchReducer({ type = "CharacterLost" })
-            end
-            reducerCharacterKey = nil
-        end
-        return
-    end
-    if key ~= reducerCharacterKey then
-        reducerCharacterKey = key
-        suppressControlledCharacterStateSync = true
-        dispatchReducer({ type = "CharacterReady", characterKey = key })
-        syncReducerLook()
-        suppressControlledCharacterStateSync = false
-    end
-end
-
 function Helpers.resetSavedLookForNewSession()
     Helpers.clearAllVisualOverrides()
-    savedLook = {}
-    savedLookCaptured = false
-    activeLook = false
-    autoApplyLook = false
-    hideHair = false
-    attachmentVisibility = attachmentVisibilityFromLegacy(false)
+    lastCharacter = nil
+    windowNeedsRefresh = true
+    legacyLookMetadata = {}
     characterStates = {}
     slotResults = {}
     lastNetworkApplyDiagnostics = {}
     lastEquipmentSignature = nil
     lastServerAutoApplySignature = nil
-    Helpers.clearPendingServerApplyRequest()
     pendingRoundStartNetworkLook = nil
     pendingRoundStartNetworkCharacterKey = nil
     pendingRoundStartNetworkRevision = nil
     pendingRoundStartHideHair = false
-    pendingRoundStartAttachmentVisibility = nil
+    pendingRoundStartProtocolLook = nil
     pendingNetworkAppliesByCharacterId = {}
     pendingNetworkClearsByCharacterId = {}
     pendingSinglePlayerRestores = {}
@@ -4969,7 +4320,7 @@ function Helpers.resetSavedLookForNewSession()
     lastAppliedNetworkLookSignatureByCharacterKey = {}
     suppressedNetworkAppliesByCharacterKey = {}
     remoteRevisionByCharacterId = {}
-    protocolMode = coreAvailable and "probing" or "v1"
+    protocolMode = "probing"
     serverCapabilities = 0
     visibilitySyncPendingNegotiation = false
     protocolHelloSentAt = nil
@@ -4978,10 +4329,11 @@ function Helpers.resetSavedLookForNewSession()
     protocolOperationCounter = 0
     clientSessionId = createClientSessionId()
     reducerCharacterKey = nil
-    reducerState = coreAvailable and Core.newClientState({
+    reducerHasUnboundLook = false
+    reducerState = Core.newClientState({
         clientSessionId = clientSessionId,
         sessionKey = Helpers.currentSessionKey()
-    }) or nil
+    })
     clientController = createClientController(reducerState)
     persistentClientLookLoaded = false
     lastOperation = "Ready."
@@ -5029,7 +4381,6 @@ Hook.Add("think", "barowardrobeswitcher.panel", function()
     end
 
     local character = controlled()
-    Helpers.syncReducerCharacter(character)
     if character == nil then
         Helpers.handleNoControlledCharacter()
         if fullPanelOpen and (window == nil or windowNeedsRefresh) then
@@ -5069,11 +4420,10 @@ Hook.Add("roundStart", "barowardrobeswitcher.notice", function()
         singlePlayerRoundScanned = false
         Helpers.scanSinglePlayerCrewForRestores()
     end
-    if Helpers.hasSavedLook() and autoApplyLook then
+    if Helpers.hasSavedLook() and reducerState.autoApply then
         dispatchReducer({ type = "Deactivate" })
         lastEquipmentSignature = nil
         lastServerAutoApplySignature = nil
-        Helpers.clearPendingServerApplyRequest()
     end
     Helpers.sendRoundStartNotice()
 end)
@@ -5119,6 +4469,7 @@ Hook.Add("roundEnd", "barowardrobeswitcher.cleanup", function()
     pendingRoundStartNetworkCharacterKey = nil
     pendingRoundStartNetworkRevision = nil
     pendingRoundStartHideHair = false
+    pendingRoundStartProtocolLook = nil
     pendingNetworkAppliesByCharacterId = {}
     pendingNetworkClearsByCharacterId = {}
     pendingSinglePlayerRestores = {}
@@ -5136,7 +4487,6 @@ Hook.Add("roundEnd", "barowardrobeswitcher.cleanup", function()
     lastNetworkApplyDiagnostics = {}
     diagnosticsVisible = false
     lastServerAutoApplySignature = nil
-    Helpers.clearPendingServerApplyRequest()
     lastEquipmentSignature = nil
     Helpers.clearAllVisualOverrides()
     lastCharacter = nil

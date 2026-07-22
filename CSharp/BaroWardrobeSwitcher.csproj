@@ -3,9 +3,9 @@
     <TargetFramework>net8.0</TargetFramework>
     <AssemblyName>BaroWardrobeSwitcher</AssemblyName>
     <RootNamespace>BaroWardrobeSwitcher</RootNamespace>
-    <Version>0.5.1</Version>
-    <AssemblyVersion>0.5.1.0</AssemblyVersion>
-    <FileVersion>0.5.1.0</FileVersion>
+    <Version>0.5.2</Version>
+    <AssemblyVersion>0.5.2.0</AssemblyVersion>
+    <FileVersion>0.5.2.0</FileVersion>
     <ImplicitUsings>disable</ImplicitUsings>
     <Nullable>disable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
@@ -36,10 +36,6 @@
       <HintPath>$(BarotraumaInstallDir)/0Harmony.dll</HintPath>
       <Private>false</Private>
     </Reference>
-    <Reference Include="MoonSharp.Interpreter">
-      <HintPath>$(BarotraumaInstallDir)/MoonSharp.Interpreter.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
     <Reference Include="XNATypes">
       <HintPath>$(BarotraumaInstallDir)/XNATypes.dll</HintPath>
       <Private>false</Private>
@@ -56,7 +52,6 @@
     <Error Condition="!Exists('$(LuaCsPublicizedDir)/Barotrauma.dll')" Text="Barotrauma.dll was not found in LuaCsPublicizedDir." />
     <Error Condition="!Exists('$(LuaCsPublicizedDir)/BarotraumaCore.dll')" Text="BarotraumaCore.dll was not found in LuaCsPublicizedDir." />
     <Error Condition="!Exists('$(BarotraumaInstallDir)/0Harmony.dll')" Text="0Harmony.dll was not found in BarotraumaInstallDir." />
-    <Error Condition="!Exists('$(BarotraumaInstallDir)/MoonSharp.Interpreter.dll')" Text="MoonSharp.Interpreter.dll was not found in BarotraumaInstallDir." />
     <Error Condition="!Exists('$(BarotraumaInstallDir)/XNATypes.dll')" Text="XNATypes.dll was not found in BarotraumaInstallDir." />
     <Error Condition="'$(MonoGameAssemblyPath)' == '' Or !Exists('$(MonoGameAssemblyPath)')" Text="Set MonoGameAssemblyPath when the platform-specific MonoGame assembly cannot be detected." />
   </Target>

@@ -3,7 +3,7 @@
 
 local Core = {}
 
-Core.MOD_VERSION = "0.5.1"
+Core.MOD_VERSION = "0.5.2"
 Core.PROTOCOL_VERSION = 2
 Core.LOOK_SCHEMA_VERSION = 2
 Core.PERSISTENCE_VERSION = 3
@@ -112,20 +112,6 @@ local function shallowCopy(source)
     return copy
 end
 
--- copySlots is currently unused; keep it disabled while confirming safe removal.
---[[
-local function copySlots(source)
-    local copy = {}
-    source = source or {}
-    for _, key in ipairs(Core.SLOT_KEYS) do
-        if source[key] ~= nil then
-            copy[key] = tostring(source[key])
-        end
-    end
-    return copy
-end
-]]
-
 local function checkBoundedString(value, field, maximum, allowEmpty)
     if type(value) ~= "string" then
         return nil, field .. " must be a string"
@@ -192,10 +178,6 @@ function Core.validateAttachmentVisibility(value, legacyHideHair)
         result[key] = state
     end
     return result
-end
-
-function Core.copyAttachmentVisibility(value)
-    return Core.validateAttachmentVisibility(value, false)
 end
 
 function Core.legacyHideHair(value)
@@ -595,12 +577,6 @@ function Core.readLook(message)
     })
 end
 
-function Core.tryReadLook(message)
-    local ok, look, reason = pcall(Core.readLook, message)
-    if not ok then return nil, "malformed look payload: " .. tostring(look) end
-    return look, reason
-end
-
 function Core.writeClientHello(message, clientSessionId)
     local sessionId, reason = checkBoundedString(
         clientSessionId,
@@ -754,12 +730,6 @@ function Core.readCommand(message)
     return Core.validateCommand(command)
 end
 
-function Core.tryReadCommand(message)
-    local ok, command, reason = pcall(Core.readCommand, message)
-    if not ok then return nil, "malformed command payload: " .. tostring(command) end
-    return command, reason
-end
-
 function Core.writeState(message, state)
     if type(state) ~= "table" then return false, "state must be a table" end
     local revision, revisionReason = normalizeRevision(state.revision or 0, "revision")
@@ -889,7 +859,7 @@ end
 local function attachmentVisibilityEffect(kind, look)
     return effect(kind, {
         attachmentVisibility = look ~= nil and
-            Core.copyAttachmentVisibility(look.attachmentVisibility) or
+            Core.validateAttachmentVisibility(look.attachmentVisibility, false) or
             Core.attachmentVisibilityFromLegacy(false)
     })
 end
@@ -1235,7 +1205,6 @@ function Core.reduce(currentState, event)
     if event.type == "CommandSendSucceeded" then
         if event.operationId ~= nil and state.pendingOperationId ~= nil and
             event.operationId ~= state.pendingOperationId then
-            effects[#effects + 1] = effect("IgnoredForeignSend", { operationId = event.operationId })
             return state, effects
         end
         if state.pendingKind == Core.COMMAND.Save and event.awaitAck ~= true then
@@ -1298,31 +1267,6 @@ function Core.reduce(currentState, event)
         effects[#effects + 1] = effect("ClearRender", {
             forget = event.type == "LocalForgetRequested"
         })
-        return state, effects
-    end
-
-    if event.type == "ClearSucceeded" then
-        state.active = false
-        state.autoApply = false
-        state.phase = Core.hasLook(state.look) and Core.PHASE.SavedInactive or Core.PHASE.Idle
-        clearPending(state)
-        clearRollback(state)
-        effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
-        return state, effects
-    end
-
-    if event.type == "ForgetSucceeded" then
-        state.look = nil
-        state.active = false
-        state.autoApply = false
-        if event.preservePending == true then
-            state.phase = Core.PHASE.ClearPending
-        else
-            state.phase = state.characterKey ~= nil and Core.PHASE.Idle or Core.PHASE.NoCharacter
-            clearPending(state)
-        end
-        clearRollback(state)
-        effects[#effects + 1] = effect("ClearPersistence")
         return state, effects
     end
 
@@ -1478,7 +1422,6 @@ function Core.reduce(currentState, event)
     if event.type == "RenderSucceeded" then
         local revision = tonumber(event.revision)
         if revision ~= nil and revision < state.revision then
-            effects[#effects + 1] = effect("IgnoredStaleRender", { revision = revision })
             return state, effects
         end
         state.phase = Core.PHASE.Active
@@ -1662,20 +1605,7 @@ function Core.reduce(currentState, event)
         return state, effects
     end
 
-    if event.type == "Reset" then
-        return Core.newClientState({
-            clientSessionId = state.clientSessionId,
-            sessionKey = event.sessionKey,
-            characterKey = event.characterKey
-        }), effects
-    end
-
     error("unknown reducer event " .. tostring(event.type))
-end
-
-function Core.copyClientState(state)
-    if type(state) ~= "table" then return nil end
-    return copyClientState(state)
 end
 
 -- UI permissions are derived from the phase rather than maintained separately,
@@ -1895,43 +1825,6 @@ function Core.createClientController(initialState, adapters)
         getState = function() return copyClientState(state) end,
         getViewModel = function() return Core.clientViewModel(state) end
     }
-end
-
-function Core.selfTest()
-    local emptyLook = assert(Core.newLook(true, false, {}))
-    assert(Core.hasLook(emptyLook), "captured empty look must be preserved")
-
-    local look = assert(Core.newLook(true, true, { Head = "ballistichelmet", Bag = "duffelbag" }))
-    assert(look.slots.Head == "ballistichelmet")
-    assert(Core.validateLook({ schemaVersion = 99, slots = {} }) == nil)
-    assert(Core.validateLook({ slots = { Unknown = "bad" } }) == nil)
-
-    local state = Core.newClientState({ characterKey = "7" })
-    state = Core.reduce(state, { type = "SaveRequested" })
-    assert(state.phase == Core.PHASE.Saving)
-    state = Core.reduce(state, { type = "CaptureSucceeded", look = look })
-    assert(state.phase == Core.PHASE.Saving)
-    state = Core.reduce(state, { type = "UnequipSucceeded" })
-    assert(state.phase == Core.PHASE.SavedInactive)
-    state = Core.reduce(state, {
-        type = "RemoteStateReceived",
-        revision = 2,
-        characterId = 7,
-        active = true,
-        look = look
-    })
-    assert(state.phase == Core.PHASE.ApplyPending)
-    state = Core.reduce(state, { type = "RenderSucceeded", revision = 2 })
-    assert(state.phase == Core.PHASE.Active)
-    local unchanged, effects = Core.reduce(state, {
-        type = "RemoteStateReceived",
-        revision = 1,
-        characterId = 7,
-        active = false
-    })
-    assert(unchanged.phase == Core.PHASE.Active)
-    assert(effects[1].type == "IgnoredStaleState")
-    return true
 end
 
 WardrobeCore = Core
