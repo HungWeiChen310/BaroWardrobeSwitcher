@@ -71,6 +71,13 @@ local visualOverrideFailure = nil
 local visualOverrideDiagnostics = nil
 local WardrobePersistence = nil
 local wardrobePersistenceFailure = nil
+local globalTick = 0
+local BRIDGE_RETRY_TICKS = 60
+local EQUIPMENT_POLL_TICKS = 6
+local visualOverrideNextAttemptTick = 0
+local wardrobePersistenceNextAttemptTick = 0
+local singlePlayerTransferSettingNextAttemptTick = 0
+local persistentClientLookNextAttemptTick = 0
 
 local function tr(key, fallback)
     local tag = "barowardrobeswitcher." .. tostring(key)
@@ -169,8 +176,17 @@ local buildAttachmentVisibilityWindow
 local toggleWindow
 local fullPanelOpen = false
 local Helpers = {}
+local cachedPanelKeyName = "F8"
+local cachedPanelKey = Keys.F8
+local panelKeyNextRefreshTick = 0
+local selectableCharactersCacheTick = -1
+local selectableCharactersCache = nil
 
 local function currentPanelKey()
+    if cachedPanelKey ~= nil and globalTick < panelKeyNextRefreshTick then
+        return cachedPanelKeyName, cachedPanelKey
+    end
+    panelKeyNextRefreshTick = globalTick + BRIDGE_RETRY_TICKS
     local name = "F8"
     local bridge = Helpers.ensureVisualOverride and Helpers.ensureVisualOverride() or nil
     if bridge ~= nil then
@@ -180,8 +196,9 @@ local function currentPanelKey()
         end
     end
     local key = Keys[name]
-    if key == nil then return "F8", Keys.F8 end
-    return name, key
+    if key == nil then name, key = "F8", Keys.F8 end
+    cachedPanelKeyName, cachedPanelKey = name, key
+    return cachedPanelKeyName, cachedPanelKey
 end
 
 local function panelKeyText(key, fallback)
@@ -197,7 +214,6 @@ local getSlotItem
 local isInAnyWearableSlot
 local roundStartNoticeSent = false
 local lastServerAutoApplySignature = nil
-local globalTick = 0
 local initialEquipGateActive = false
 local initialEquipGateStartedTick = 0
 local initialEquipGateLastEquipTick = 0
@@ -220,6 +236,7 @@ local lastSessionKey = nil
 local lastSessionObject = nil
 local sessionObjectObserved = false
 local persistentClientLookLoaded = false
+local nextEquipmentSignatureTick = 0
 local persistClientLook
 local clearPersistentClientLook
 local ensureWardrobePersistence
@@ -651,8 +668,8 @@ function Helpers.currentSessionObject()
     return Helpers.userDataMember(GameMain, "GameSession")
 end
 
-function Helpers.currentSessionKey()
-    local session = Helpers.currentSessionObject()
+function Helpers.currentSessionKey(session)
+    if session == nil then session = Helpers.currentSessionObject() end
     if session == nil then return nil end
 
     local dataPath = Helpers.userDataMember(session, "DataPath")
@@ -842,6 +859,8 @@ end
 
 function Helpers.loadSinglePlayerTransferSetting()
     if singlePlayerTransferSettingLoaded or not isSinglePlayerClient() then return end
+    if globalTick < singlePlayerTransferSettingNextAttemptTick then return end
+    singlePlayerTransferSettingNextAttemptTick = globalTick + BRIDGE_RETRY_TICKS
     local persistence = ensureWardrobePersistence()
     if persistence == nil then return end
     local ok, enabled = pcall(function()
@@ -1269,6 +1288,8 @@ end
 
 function Helpers.loadPersistentClientLook()
     if isSinglePlayerClient() then return false end
+    if persistentClientLookLoaded or globalTick < persistentClientLookNextAttemptTick then return false end
+    persistentClientLookNextAttemptTick = globalTick + BRIDGE_RETRY_TICKS
     local persistence = ensureWardrobePersistence()
     if persistence ~= nil then
         local existedBeforeLoad = false
@@ -1373,6 +1394,8 @@ end
 
 function Helpers.ensureVisualOverride()
     if VisualOverride ~= nil then return VisualOverride end
+    if globalTick < visualOverrideNextAttemptTick then return nil end
+    visualOverrideNextAttemptTick = globalTick + BRIDGE_RETRY_TICKS
 
     visualOverrideFailure = nil
     local diagnostics = {}
@@ -1429,12 +1452,16 @@ function Helpers.ensureVisualOverride()
         end
     end
 
+    if VisualOverride ~= nil then visualOverrideNextAttemptTick = 0 end
+
     visualOverrideDiagnostics = table.concat(diagnostics, " ")
     return VisualOverride
 end
 
 ensureWardrobePersistence = function()
     if WardrobePersistence ~= nil then return WardrobePersistence end
+    if globalTick < wardrobePersistenceNextAttemptTick then return nil end
+    wardrobePersistenceNextAttemptTick = globalTick + BRIDGE_RETRY_TICKS
 
     wardrobePersistenceFailure = nil
     pcall(function()
@@ -1457,6 +1484,7 @@ ensureWardrobePersistence = function()
         end)
         if result ~= nil and versionOk and tostring(loadedVersion) == EXPECTED_CSHARP_VERSION then
             WardrobePersistence = result
+            wardrobePersistenceNextAttemptTick = 0
         else
             WardrobePersistence = nil
             wardrobePersistenceFailure =
@@ -3575,6 +3603,9 @@ function Helpers.refreshActiveLookIfNeeded(character)
         tonumber(sessionActiveCharacterId) ~= Helpers.characterEntityId(character) then
         return
     end
+    -- ponytail: equip hooks invalidate immediately; this bounded poll only covers missed compatibility events.
+    if lastEquipmentSignature ~= nil and globalTick < nextEquipmentSignatureTick then return end
+    nextEquipmentSignatureTick = globalTick + EQUIPMENT_POLL_TICKS
     local signature = Helpers.equipmentSignature(character)
     if lastEquipmentSignature == signature then return end
     local applied = Helpers.applyCapturedFashionToCharacterEquipment(
@@ -3873,6 +3904,9 @@ function Helpers.belongsToLocalWardrobeState(characterId)
 end
 
 function Helpers.singlePlayerSelectableCharacters()
+    if selectableCharactersCacheTick == globalTick and selectableCharactersCache ~= nil then
+        return selectableCharactersCache
+    end
     local actual = Helpers.actualControlledCharacter()
     local targets = {}
     local seen = {}
@@ -3883,6 +3917,8 @@ function Helpers.singlePlayerSelectableCharacters()
     end
     if not isSinglePlayerClient() and
         not (Helpers.isMultiplayerClient() and serverSupportsCrewTargeting()) then
+        selectableCharactersCacheTick = globalTick
+        selectableCharactersCache = targets
         return targets
     end
 
@@ -3908,6 +3944,8 @@ function Helpers.singlePlayerSelectableCharacters()
         return leftName < rightName
     end)
     for _, character in ipairs(bots) do targets[#targets + 1] = character end
+    selectableCharactersCacheTick = globalTick
+    selectableCharactersCache = targets
     return targets
 end
 
@@ -5284,6 +5322,7 @@ function Helpers.resetSavedLookForNewSession()
     })
     clientController = createClientController(reducerState)
     persistentClientLookLoaded = false
+    persistentClientLookNextAttemptTick = 0
     lastOperation = "Ready."
 end
 
@@ -5324,7 +5363,7 @@ end
 
 function Helpers.handleSessionChange()
     local sessionObject = Helpers.currentSessionObject()
-    local sessionKey = Helpers.currentSessionKey()
+    local sessionKey = Helpers.currentSessionKey(sessionObject)
     if sessionKey == nil then return end
     if lastSessionKey == nil then
         lastSessionKey = sessionKey
@@ -5348,7 +5387,7 @@ end
 
 function Helpers.handleRoundStartSessionChange()
     local sessionObject = Helpers.currentSessionObject()
-    local sessionKey = Helpers.currentSessionKey()
+    local sessionKey = Helpers.currentSessionKey(sessionObject)
     if not sessionObjectObserved then
         sessionObjectObserved = true
         lastSessionObject = sessionObject
@@ -5452,6 +5491,7 @@ end)
 
 Hook.Add("item.equip", "barowardrobeswitcher.initial-equip", function(item, character)
     Helpers.noteSinglePlayerEquipmentChange(character)
+    if character ~= nil and character == lastCharacter then lastEquipmentSignature = nil end
     if character ~= controlled() and Helpers.isManagedEquippedItem(character, item) then
         -- Remote observers and uncontrolled crew refresh suppression locally;
         -- the saved look itself did not change and needs no server Apply.
@@ -5467,6 +5507,7 @@ end)
 
 Hook.Add("item.unequip", "barowardrobeswitcher.profile-equip", function(item, character)
     Helpers.noteSinglePlayerEquipmentChange(character)
+    if character ~= nil and character == lastCharacter then lastEquipmentSignature = nil end
     Helpers.removeVisualOverrideFromItem(character, item)
 end)
 

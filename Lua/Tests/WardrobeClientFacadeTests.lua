@@ -108,7 +108,7 @@ assert(clientSource:find("Helpers.isManagedEquippedItem(character, item)", 1, tr
     "observer equipment registration must be limited to the six managed clothing slots")
 assert(clientSource:find("bridge.GetPanelKeyName()", 1, true) ~= nil and
        clientSource:find("return PlayerInput.KeyHit(key)", 1, true) ~= nil and
-       clientSource:find('if key == nil then return "F8", Keys.F8 end', 1, true) ~= nil and
+       clientSource:find('if key == nil then name, key = "F8", Keys.F8 end', 1, true) ~= nil and
        clientSource:find('panelKeyText("notice.open_panel")', 1, true) ~= nil,
     "the configurable panel key must drive both input and the round-start notice")
 assert(clientSource:find("local CONFIG", 1, true) == nil,

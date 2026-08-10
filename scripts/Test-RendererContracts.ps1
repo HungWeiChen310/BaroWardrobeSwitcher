@@ -68,7 +68,7 @@ $contracts = @(
         Name = "live-equipment-mask-transaction"
         Source = $renderer
         Required = @(
-            ".Where(sprite => IsEquipmentSprite(sprite) && !session.TryGetDescriptor(sprite, out _))",
+            "!IsEquipmentSprite(equipmentSprite) || session.TryGetDescriptor(equipmentSprite, out _)",
             "originalMasks[equipmentSprite] = new SpriteMaskState(equipmentSprite);",
             "if (equipmentSprite.HideWearablesOfType?.Count > 0)",
             "wearableTypesCacheChanged = true;",
@@ -233,6 +233,7 @@ Assert-Contract "workshop-left-breast-none-limb-binding" $customNoneLimb @(
     'sprite.Limb != LimbType.None',
     '"/3156077899/"',
     'name.EndsWith("LeftBreast", StringComparison.OrdinalIgnoreCase)',
+    'name.EndsWith("Left Breast", StringComparison.OrdinalIgnoreCase)',
     'limb.type == LimbType.None && limb.Params?.ID == 17'
 )
 if ($customNoneLimb.Contains("descriptor.SourceIdentifier") -or
@@ -453,4 +454,90 @@ Assert-Order "appendage-check-before-render-transaction" $limbDrawPrefix @(
     "ShouldSuppressEquipmentAppendage(__instance)",
     "return false;",
     "BeginLimbDraw(__instance)"
+)
+
+Assert-Contract "bridge-retry-interval" $client @(
+    "local BRIDGE_RETRY_TICKS = 60",
+    "local EQUIPMENT_POLL_TICKS = 6"
+)
+
+$visualOverrideBridge = Get-Section $client `
+    "function Helpers.ensureVisualOverride()" `
+    "ensureWardrobePersistence = function()"
+Assert-Order "visual-override-bridge-backoff-and-success-cache" $visualOverrideBridge @(
+    "if VisualOverride ~= nil then return VisualOverride end",
+    "if globalTick < visualOverrideNextAttemptTick then return nil end",
+    "visualOverrideNextAttemptTick = globalTick + BRIDGE_RETRY_TICKS",
+    "if VisualOverride ~= nil then visualOverrideNextAttemptTick = 0 end",
+    "return VisualOverride"
+)
+
+Assert-Order "equipment-poll-throttle" $equipmentRefresh @(
+    "lastEquipmentSignature ~= nil",
+    "globalTick < nextEquipmentSignatureTick",
+    "nextEquipmentSignatureTick = globalTick + EQUIPMENT_POLL_TICKS",
+    "Helpers.equipmentSignature(character)",
+    "lastEquipmentSignature = signature"
+)
+Assert-Order "equipment-hook-immediate-invalidation" $client @(
+    'Hook.Add("item.equip"',
+    "character == lastCharacter then lastEquipmentSignature = nil",
+    'Hook.Add("item.unequip"',
+    "character == lastCharacter then lastEquipmentSignature = nil"
+)
+
+Assert-Order "fashion-limb-cache-lifecycle" $session @(
+    "FashionSpritesByLimb",
+    "public void Add(FashionSpriteDescriptor descriptor)",
+    "descriptorsBySprite[descriptor.Sprite] = descriptor;",
+    "FashionSpritesByLimb.Clear();",
+    "public void Dispose()",
+    "SpritesBySlot.Clear();",
+    "FashionSpritesByLimb.Clear();"
+)
+
+$missingFashionFallback = Get-Section $renderer `
+    "internal static void DrawMissingFashionSprites(" `
+    "private static void DrawFashionWearable("
+Assert-Contract "fallback-uses-transaction-descriptors" $missingFashionFallback @(
+    "foreach (FashionSpriteDescriptor descriptor in transaction.FashionDescriptors)"
+)
+if ($missingFashionFallback.Contains("EnumerateFashionSpritesForLimb(")) {
+    throw "Fallback draw must reuse the transaction descriptor snapshot."
+}
+
+$wearableSort = Get-Section $renderer `
+    "private static void SortWearablesForDraw(" `
+    "private static int GetFashionLayerSortKey("
+Assert-Order "stable-in-place-wearable-sort" $wearableSort @(
+    "for (int index = 1; index < wearingItems.Count; index++)",
+    "CompareWearablesForDraw(wearingItems[insertionIndex], current) > 0",
+    "wearingItems[insertionIndex + 1] = current;",
+    "private static int CompareWearablesForDraw("
+)
+if ($wearableSort.Contains(".ToList()") -or $wearableSort.Contains(".OrderBy(")) {
+    throw "Every Limb.Draw must sort wearables in place without a LINQ list allocation."
+}
+
+$limbDrawEnd = Get-Section $renderer `
+    "internal static Exception EndLimbDraw(" `
+    "internal static FootstepSoundTransaction BeginFootstepSound("
+Assert-Order "pooled-render-transaction-return" $limbDrawEnd @(
+    "transaction?.Cleanup();",
+    "finally",
+    "ReturnLimbRenderTransaction(transaction);"
+)
+
+$limbTransaction = Get-Section $renderer `
+    "internal sealed class LimbRenderTransaction" `
+    "private sealed class PatchState"
+Assert-Contract "pooled-render-transaction-reset" $limbTransaction @(
+    "public void Reset(Limb nextLimb)",
+    "public void ResetForPool()",
+    "originalOrder?.Clear();",
+    "originalMasks?.Clear();",
+    "InjectedSprites.Clear();",
+    "DrawnSprites.Clear();",
+    "FashionDescriptors = Array.Empty<FashionSpriteDescriptor>();",
+    "Array.Clear(drawArguments, 0, drawArguments.Length);"
 )

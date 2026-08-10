@@ -317,6 +317,9 @@ namespace BaroWardrobeSwitcher
         public Dictionary<Tuple<WearableType, LimbType>, List<FashionSpriteDescriptor>> SpritesBySlot { get; } =
             new Dictionary<Tuple<WearableType, LimbType>, List<FashionSpriteDescriptor>>();
 
+        public Dictionary<LimbType, List<FashionSpriteDescriptor>> FashionSpritesByLimb { get; } =
+            new Dictionary<LimbType, List<FashionSpriteDescriptor>>();
+
         public HashSet<WearableType> HiddenWearableTypes { get; } = new HashSet<WearableType>();
 
         public HashSet<InvSlotType> EmptySlots { get; set; } = new HashSet<InvSlotType>();
@@ -415,6 +418,7 @@ namespace BaroWardrobeSwitcher
             }
             descriptors.Add(descriptor);
             descriptorsBySprite[descriptor.Sprite] = descriptor;
+            FashionSpritesByLimb.Clear();
         }
 
         public bool TryGetDescriptor(WearableSprite sprite, out FashionSpriteDescriptor descriptor)
@@ -529,6 +533,7 @@ namespace BaroWardrobeSwitcher
             }
             descriptorsBySprite.Clear();
             SpritesBySlot.Clear();
+            FashionSpritesByLimb.Clear();
             FashionAnimations.Clear();
             SuppressedEquipmentAnimations.Clear();
             FashionSounds.Clear();
