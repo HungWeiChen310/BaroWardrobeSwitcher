@@ -2034,97 +2034,69 @@ local requiredClientEffects = {
     ApplyFootstepSoundSourceCompensation = true
 }
 
+local successEventTypeByEffect = {
+    Unequip = "UnequipSucceeded",
+    SendCommand = "CommandSendSucceeded",
+    Persist = "PersistenceSucceeded",
+    ClearPersistence = "PersistenceSucceeded",
+    Render = "RenderSucceeded",
+    RenderCompensation = "CompensationSucceeded",
+    ClearRender = "ClearRenderSucceeded",
+    ClearRenderCompensation = "CompensationSucceeded",
+    ApplyAttachmentVisibility = "AttachmentVisibilityUpdateSucceeded",
+    ApplyAttachmentVisibilityCompensation = "CompensationSucceeded",
+    ApplyMovementAnimationSource = "MovementAnimationSourceUpdateSucceeded",
+    ApplyMovementAnimationSourceCompensation = "CompensationSucceeded",
+    ApplyFootstepSoundSource = "FootstepSoundSourceUpdateSucceeded",
+    ApplyFootstepSoundSourceCompensation = "CompensationSucceeded"
+}
+
+local failureEventTypeByEffect = {
+    Capture = "CaptureFailed",
+    Unequip = "UnequipFailed",
+    SendCommand = "CommandSendFailed",
+    Persist = "PersistenceFailed",
+    ClearPersistence = "PersistenceFailed",
+    Render = "RenderFailed",
+    RenderCompensation = "CompensationFailed",
+    ClearRender = "ClearRenderFailed",
+    ClearRenderCompensation = "CompensationFailed",
+    ApplyAttachmentVisibility = "AttachmentVisibilityUpdateFailed",
+    ApplyAttachmentVisibilityCompensation = "CompensationFailed",
+    ApplyMovementAnimationSource = "MovementAnimationSourceUpdateFailed",
+    ApplyMovementAnimationSourceCompensation = "CompensationFailed",
+    ApplyFootstepSoundSource = "FootstepSoundSourceUpdateFailed",
+    ApplyFootstepSoundSourceCompensation = "CompensationFailed"
+}
+
 local function successEventForEffect(currentEffect)
-    if currentEffect.type == "Unequip" then return { type = "UnequipSucceeded" } end
+    local eventType = successEventTypeByEffect[currentEffect.type]
+    if eventType == nil then return nil end
+    local event = { type = eventType }
     if currentEffect.type == "SendCommand" then
-        return {
-            type = "CommandSendSucceeded",
-            operationId = currentEffect.operationId,
-            awaitAck = currentEffect.awaitAck == true
-        }
+        event.operationId = currentEffect.operationId
+        event.awaitAck = currentEffect.awaitAck == true
+    elseif currentEffect.type == "Render" then
+        event.revision = currentEffect.revision
+    elseif currentEffect.type == "ClearRender" then
+        event.preserveAutoApply = currentEffect.preserveAutoApply == true
     end
-    if currentEffect.type == "Persist" or currentEffect.type == "ClearPersistence" then
-        return { type = "PersistenceSucceeded" }
-    end
-    if currentEffect.type == "Render" then
-        return { type = "RenderSucceeded", revision = currentEffect.revision }
-    end
-    if currentEffect.type == "RenderCompensation" then return { type = "CompensationSucceeded" } end
-    if currentEffect.type == "ClearRender" then
-        return {
-            type = "ClearRenderSucceeded",
-            preserveAutoApply = currentEffect.preserveAutoApply == true
-        }
-    end
-    if currentEffect.type == "ClearRenderCompensation" then return { type = "CompensationSucceeded" } end
-    if currentEffect.type == "ApplyAttachmentVisibility" then
-        return { type = "AttachmentVisibilityUpdateSucceeded" }
-    end
-    if currentEffect.type == "ApplyAttachmentVisibilityCompensation" then
-        return { type = "CompensationSucceeded" }
-    end
-    if currentEffect.type == "ApplyMovementAnimationSource" then
-        return { type = "MovementAnimationSourceUpdateSucceeded" }
-    end
-    if currentEffect.type == "ApplyMovementAnimationSourceCompensation" then
-        return { type = "CompensationSucceeded" }
-    end
-    if currentEffect.type == "ApplyFootstepSoundSource" then
-        return { type = "FootstepSoundSourceUpdateSucceeded" }
-    end
-    if currentEffect.type == "ApplyFootstepSoundSourceCompensation" then
-        return { type = "CompensationSucceeded" }
-    end
-    return nil
+    return event
 end
 
 local function failureEventForEffect(currentEffect, reason)
-    local message = tostring(reason or (currentEffect.type .. " adapter failed"))
-    if currentEffect.type == "Capture" then return { type = "CaptureFailed", reason = message } end
-    if currentEffect.type == "Unequip" then return { type = "UnequipFailed", reason = message } end
+    local eventType = failureEventTypeByEffect[currentEffect.type]
+    if eventType == nil then return nil end
+    local event = {
+        type = eventType,
+        reason = tostring(reason or (currentEffect.type .. " adapter failed"))
+    }
     if currentEffect.type == "SendCommand" then
-        return {
-            type = "CommandSendFailed",
-            operationId = currentEffect.operationId,
-            reason = message
-        }
+        event.operationId = currentEffect.operationId
+    elseif currentEffect.type == "ClearRender" then
+        event.preserveAutoApply = currentEffect.preserveAutoApply == true
     end
-    if currentEffect.type == "Persist" or currentEffect.type == "ClearPersistence" then
-        return { type = "PersistenceFailed", reason = message }
-    end
-    if currentEffect.type == "Render" then return { type = "RenderFailed", reason = message } end
-    if currentEffect.type == "RenderCompensation" then
-        return { type = "CompensationFailed", reason = message }
-    end
-    if currentEffect.type == "ClearRender" then
-        return {
-            type = "ClearRenderFailed",
-            reason = message,
-            preserveAutoApply = currentEffect.preserveAutoApply == true
-        }
-    end
-    if currentEffect.type == "ClearRenderCompensation" then
-        return { type = "CompensationFailed", reason = message }
-    end
-    if currentEffect.type == "ApplyAttachmentVisibility" then
-        return { type = "AttachmentVisibilityUpdateFailed", reason = message }
-    end
-    if currentEffect.type == "ApplyAttachmentVisibilityCompensation" then
-        return { type = "CompensationFailed", reason = message }
-    end
-    if currentEffect.type == "ApplyMovementAnimationSource" then
-        return { type = "MovementAnimationSourceUpdateFailed", reason = message }
-    end
-    if currentEffect.type == "ApplyMovementAnimationSourceCompensation" then
-        return { type = "CompensationFailed", reason = message }
-    end
-    if currentEffect.type == "ApplyFootstepSoundSource" then
-        return { type = "FootstepSoundSourceUpdateFailed", reason = message }
-    end
-    if currentEffect.type == "ApplyFootstepSoundSourceCompensation" then
-        return { type = "CompensationFailed", reason = message }
-    end
-    return nil
+    return event
 end
 
 local function normalizeAdapterEvents(currentEffect, result, reason)

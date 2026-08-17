@@ -69,10 +69,11 @@ $contracts = @(
         Source = $renderer
         Required = @(
             "!IsEquipmentSprite(equipmentSprite) || session.TryGetDescriptor(equipmentSprite, out _)",
+            "if (!NeedsMaskClear(equipmentSprite)) { continue; }",
             "originalMasks[equipmentSprite] = new SpriteMaskState(equipmentSprite);",
             "if (equipmentSprite.HideWearablesOfType?.Count > 0)",
             "wearableTypesCacheChanged = true;",
-            "ClearMask(equipmentSprite);",
+            "ClearMask(equipmentSprite, emptyHideWearablesOfType);",
             "limb.UpdateWearableTypesToHide();",
             "pair.Value.Restore(pair.Key);"
         )
@@ -92,7 +93,10 @@ $contracts = @(
             'PatchStates["Ragdoll.PlayImpactSound"] = new PatchState(required: false);',
             'public static bool SetUseFashionFootstepSounds(Character character, bool enabled)',
             '!session.UseFashionFootstepSounds',
-            'originalOrder = new List<WearableSprite>(wearingItems);',
+            'footstepSoundTransactionPool',
+            'transaction.Reset(limb);',
+            'originalOrder ??= new List<WearableSprite>(wearingItems.Count);',
+            'originalOrder.AddRange(wearingItems);',
             'if (IsEquipmentSprite(wearingItems[index]))',
             'if (sprite.Limb == limb.type && !wearingItems.Contains(sprite))',
             'limb.WearingItems.AddRange(originalOrder);',
@@ -111,9 +115,9 @@ $contracts = @(
         Name = "physical-limb-guard"
         Source = $renderer
         Required = @(
-            "private static bool SpriteBelongsToLimb(WearableSprite sprite, LimbType limbType)",
-            "if (!SpriteBelongsToLimb(original, limb.type))",
-            "if (!SpriteBelongsToLimb(wearable, limb.type)) { return; }"
+            "private static bool SpriteBelongsToLimb(RenderSession session, WearableSprite sprite, LimbType limbType)",
+            "if (!SpriteBelongsToLimb(session, original, limb.type))",
+            "if (!SpriteBelongsToLimb(session, wearable, limb.type)) { return; }"
         )
     },
     @{
@@ -142,9 +146,9 @@ $contracts = @(
         Name = "functional-alarm-lifecycle"
         Source = $all
         Required = @(
-            "FashionEffectPolicy.IsFunctionalEquipmentAlarm(statusEffect)",
+            "FashionEffectPolicy.IsStateDependentStatusEffect(statusEffect)",
             "session.SuppressedEquipmentSounds.Remove(statusEffect);",
-            "if (!FashionEffectPolicy.ShouldCaptureStatusSound(statusEffect)) { continue; }",
+            "if (FashionEffectPolicy.IsStateDependentStatusEffect(statusEffect)) { continue; }",
             "if (!FashionEffectPolicy.ShouldCaptureStatusEffect(statusEffect)) { continue; }",
             "internal static bool IsStateDependentStatusEffect(StatusEffect statusEffect)",
             "OnlyInsideField",
@@ -168,7 +172,7 @@ $contracts = @(
         Source = $all
         Required = @(
             "return actionType == ActionType.Always || actionType == ActionType.OnWearing;",
-            "FashionEffectPolicy.ShouldKeepComponentLoopAlive(fashionSound.ActionType)",
+            "FashionEffectPolicy.ShouldKeepComponentLoopAlive(actionType)",
             "fashionSound.Component == null || fashionSound.ActionType != actionType"
         )
     },
@@ -200,7 +204,7 @@ $contracts = @(
             "session.UseFashionMovementAnimations = enabled;",
             "if (!session.UseFashionMovementAnimations) { return true; }",
             "if (!session.UseFashionMovementAnimations &&",
-            "FashionEffectPolicy.IsMovementAnimation(animationInfo)",
+            "session.FashionMovementAnimations.Contains(animationInfo)",
             "public HashSet<object> SuppressedEquipmentAnimations { get; }",
             "RegisterSuppressedEquipmentAnimations(character, item);",
             "session.SuppressedEquipmentAnimations.Contains(animationInfo)",
@@ -231,10 +235,13 @@ $customNoneLimb = Get-Section $renderer `
     "private static LimbType GetFallbackAnchorLimb("
 Assert-Contract "workshop-left-breast-none-limb-binding" $customNoneLimb @(
     'sprite.Limb != LimbType.None',
-    '"/3156077899/"',
-    'name.EndsWith("LeftBreast", StringComparison.OrdinalIgnoreCase)',
-    'name.EndsWith("Left Breast", StringComparison.OrdinalIgnoreCase)',
+    'descriptor.UsesLeftBreastNoneLimbCompatibility',
     'limb.type == LimbType.None && limb.Params?.ID == 17'
+)
+Assert-Contract "workshop-left-breast-cached-metadata" $session @(
+    '"/3156077899/"',
+    'sourceName.EndsWith("LeftBreast", StringComparison.OrdinalIgnoreCase)',
+    'sourceName.EndsWith("Left Breast", StringComparison.OrdinalIgnoreCase)'
 )
 if ($customNoneLimb.Contains("descriptor.SourceIdentifier") -or
     $customNoneLimb.Contains("exo_milker2.png")) {
@@ -258,14 +265,14 @@ Assert-Order "workshop-left-breast-fallback-guard" $missingFashionSprites @(
     "WearableSprite sprite = descriptor.Sprite;",
     "IsFashionSpriteCompatibleWithLimb(session, sprite, limb)",
     "drawnSprites.Add(sprite);",
-    "DrawFashionWearable(limb, transaction, sprite"
+    "DrawFashionWearable(session, limb, transaction, sprite"
 )
 
 $fashionInjection = Get-Section $renderer `
     "public void Begin(RenderSession renderSession)" `
     "public void Cleanup()"
 Assert-Order "workshop-left-breast-injection-guard" $fashionInjection @(
-    "EnumerateFashionSpritesForLimb(session.SpritesBySlot, limb.type)",
+    "EnumerateFashionSpritesForLimb(session, limb.type)",
     "IsFashionSpriteCompatibleWithLimb(session, descriptor.Sprite, limb)",
     "wearingItems.Add(descriptor.Sprite);",
     "SortWearablesForDraw(wearingItems);"
@@ -285,7 +292,7 @@ $maskBegin = Get-Section $renderer `
     "public void Cleanup()"
 Assert-Order "live-equipment-hide-cache-begin" $maskBegin @(
     "originalMasks[equipmentSprite] = new SpriteMaskState(equipmentSprite);",
-    "ClearMask(equipmentSprite);",
+    "ClearMask(equipmentSprite, emptyHideWearablesOfType);",
     "limb.UpdateWearableTypesToHide();",
     "List<FashionSpriteDescriptor> descriptors"
 )
@@ -411,7 +418,7 @@ $fashionAnimations = Get-Section $renderer `
 Assert-Order "movement-toggle-scope" $fashionAnimations @(
     "foreach (object animationInfo in session.FashionAnimations)",
     "if (!session.UseFashionMovementAnimations &&",
-    "FashionEffectPolicy.IsMovementAnimation(animationInfo)",
+    "session.FashionMovementAnimations.Contains(animationInfo)",
     "TryLoadTemporaryAnimationMethod.Invoke"
 )
 
@@ -541,3 +548,103 @@ Assert-Contract "pooled-render-transaction-reset" $limbTransaction @(
     "FashionDescriptors = Array.Empty<FashionSpriteDescriptor>();",
     "Array.Clear(drawArguments, 0, drawArguments.Length);"
 )
+
+Assert-Contract "allocation-free-slot-keys" $session @(
+    "Dictionary<(WearableType Type, LimbType Limb), List<FashionSpriteDescriptor>> SpritesBySlot",
+    "(WearableType Type, LimbType Limb) key = (descriptor.Sprite.Type, descriptor.Sprite.Limb);"
+)
+if ($renderer.Contains("Dictionary<Tuple<WearableType, LimbType>") -or $renderer.Contains("Tuple.Create(type,")) {
+    throw "Renderer hot paths must use value-tuple slot keys."
+}
+
+$savedSlotVisibility = Get-Section $renderer `
+    "private static bool ShouldHideOriginalForEmptySavedSlot(" `
+    "private static void CaptureFashionHiddenWearableTypes("
+$savedSlotVisibility += Get-Section $renderer `
+    "private static bool ShouldHideOriginalForSavedSlot(" `
+    "private static string DescribeSavedSlots("
+Assert-Contract "allocation-free-slot-membership" $savedSlotVisibility @(
+    "foreach (InvSlotType slot in original.WearableComponent.AllowedSlots)",
+    "session.EmptySlots.Contains(slot)",
+    "session.SavedSlots.Contains(slot)"
+)
+if ($savedSlotVisibility.Contains(".Any(")) {
+    throw "Per-sprite saved-slot checks must not allocate captured LINQ predicates."
+}
+
+$candidateLookup = Get-Section $renderer `
+    "internal static bool TryGetFashionSprite(" `
+    "private static string DescribeFashionSprites("
+Assert-Order "single-pass-exact-wildcard-candidates" $candidateLookup @(
+    "session.SpritesBySlot.TryGetValue((type, limbType)",
+    "TryGetFashionSpriteFromList(",
+    "session.SpritesBySlot.TryGetValue((type, LimbType.None)",
+    "private static bool TryGetFashionSpriteFromList(",
+    "alreadyDrawn = true;"
+)
+if ($candidateLookup.Contains("yield return") -or
+    $candidateLookup.Contains(".Any(") -or
+    $candidateLookup.Contains("FashionSpriteAlreadyDrawn(")) {
+    throw "Per-sprite candidate selection must scan exact/wildcard lists once without iterators."
+}
+
+$maskHelpers = Get-Section $renderer `
+    "private static bool NeedsMaskClear(" `
+    "private static bool IsCharacterStale("
+Assert-Contract "mask-no-op-and-list-reuse" $maskHelpers @(
+    "sprite.HideWearablesOfType?.Count > 0",
+    "sprite.HideWearablesOfType = emptyHideWearablesOfType;"
+)
+if ($maskHelpers.Contains("new List<WearableType>")) {
+    throw "Every mask clear must reuse the transaction-owned empty list."
+}
+Assert-Order "sort-only-after-injection" $fashionInjection @(
+    "InjectedSprites.Add(descriptor.Sprite);",
+    "if (InjectedSprites.Count > 0)",
+    "SortWearablesForDraw(wearingItems);"
+)
+
+$animationKeepAlive = Get-Section $renderer `
+    "private static void KeepFashionAnimationsAlive(" `
+    "private static void KeepFashionSoundsAlive("
+Assert-Contract "capture-classified-animation-hot-path" $animationKeepAlive @(
+    "session.FashionAnimationInvokeArguments",
+    "session.FashionMovementAnimations.Contains(animationInfo)"
+)
+if ($animationKeepAlive.Contains("FashionEffectPolicy.IsMovementAnimation(")) {
+    throw "Animation movement metadata must be classified at capture time."
+}
+$soundKeepAlive = Get-Section $renderer `
+    "private static void KeepFashionSoundsAlive(" `
+    "private static bool HasFashionPayload("
+Assert-Contract "capture-classified-loop-sound-hot-path" $soundKeepAlive @(
+    "session.LoopingFashionSounds",
+    "session.LoopingFashionComponentSounds"
+)
+if ($soundKeepAlive.Contains("HasLoopingSound(") -or $soundKeepAlive.Contains("HasLoopingComponentSound(")) {
+    throw "Loop metadata must not be reflected on every animation update."
+}
+Assert-Contract "reused-effect-reflection-arguments" $all @(
+    "FashionAnimationInvokeArguments",
+    "FashionSoundInvokeArguments",
+    "GetFashionSoundInvokeArguments("
+)
+
+Assert-Contract "pooled-footstep-transaction" $renderer @(
+    "footstepSoundTransactionPool",
+    "transaction.Reset(limb);",
+    "finally",
+    "ReturnFootstepSoundTransaction(transaction);",
+    "public void ResetForPool()"
+)
+
+Assert-Contract "cached-limb-compatibility-metadata" $all @(
+    'HasExplicitLimbBinding = sprite?.SourceElement?.GetAttribute("limb") != null;',
+    "UsesLeftBreastNoneLimbCompatibility",
+    "descriptor.HasExplicitLimbBinding",
+    "if (!descriptor.UsesLeftBreastNoneLimbCompatibility)"
+)
+
+if ($policy.Contains("ShouldCaptureStatusSound(") -or $policy.Contains("IsFunctionalEquipmentAlarm(")) {
+    throw "Pure status-effect forwarding wrappers should stay removed."
+}

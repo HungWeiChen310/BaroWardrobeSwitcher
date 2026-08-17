@@ -26,6 +26,12 @@ namespace BaroWardrobeSwitcher
             SourceIdentifier = sourceIdentifier ?? string.Empty;
             SourceContentPackage = sourceContentPackage ?? string.Empty;
             ResolvedSpritePath = resolvedSpritePath ?? string.Empty;
+            HasExplicitLimbBinding = sprite?.SourceElement?.GetAttribute("limb") != null;
+            string sourceName = sprite?.SourceElement?.GetAttribute("name")?.Value ?? string.Empty;
+            UsesLeftBreastNoneLimbCompatibility =
+                ResolvedSpritePath.Replace('\\', '/').IndexOf("/3156077899/", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                (sourceName.EndsWith("LeftBreast", StringComparison.OrdinalIgnoreCase) ||
+                 sourceName.EndsWith("Left Breast", StringComparison.OrdinalIgnoreCase));
         }
 
         public WearableSprite Sprite { get; }
@@ -37,6 +43,10 @@ namespace BaroWardrobeSwitcher
         public string SourceContentPackage { get; }
 
         public string ResolvedSpritePath { get; }
+
+        public bool HasExplicitLimbBinding { get; }
+
+        public bool UsesLeftBreastNoneLimbCompatibility { get; }
 
         public bool IsValid(out string error)
         {
@@ -314,8 +324,8 @@ namespace BaroWardrobeSwitcher
 
         public Character Character { get; }
 
-        public Dictionary<Tuple<WearableType, LimbType>, List<FashionSpriteDescriptor>> SpritesBySlot { get; } =
-            new Dictionary<Tuple<WearableType, LimbType>, List<FashionSpriteDescriptor>>();
+        public Dictionary<(WearableType Type, LimbType Limb), List<FashionSpriteDescriptor>> SpritesBySlot { get; } =
+            new Dictionary<(WearableType Type, LimbType Limb), List<FashionSpriteDescriptor>>();
 
         public Dictionary<LimbType, List<FashionSpriteDescriptor>> FashionSpritesByLimb { get; } =
             new Dictionary<LimbType, List<FashionSpriteDescriptor>>();
@@ -328,6 +338,10 @@ namespace BaroWardrobeSwitcher
 
         public List<object> FashionAnimations { get; } = new List<object>();
 
+        public HashSet<object> FashionMovementAnimations { get; } = new HashSet<object>();
+
+        public object[] FashionAnimationInvokeArguments { get; } = new object[] { null, false };
+
         public bool UseFashionMovementAnimations { get; set; } = true;
 
         public bool UseFashionFootstepSounds { get; set; }
@@ -336,12 +350,24 @@ namespace BaroWardrobeSwitcher
 
         public List<StatusEffect> FashionSounds { get; } = new List<StatusEffect>();
 
+        public List<StatusEffect> LoopingFashionSounds { get; } = new List<StatusEffect>();
+
+        public object[] FashionSoundInvokeArguments { get; } = new object[3];
+
         public List<(ItemComponent Component, ActionType ActionType)> FashionComponentSounds { get; } =
+            new List<(ItemComponent Component, ActionType ActionType)>();
+
+        public List<(ItemComponent Component, ActionType ActionType)> LoopingFashionComponentSounds { get; } =
             new List<(ItemComponent Component, ActionType ActionType)>();
 
         public HashSet<StatusEffect> SuppressedEquipmentSounds { get; } = new HashSet<StatusEffect>();
 
+        public HashSet<StatusEffect> LoopingEquipmentSounds { get; } = new HashSet<StatusEffect>();
+
         public HashSet<ItemComponent> SuppressedEquipmentComponentSounds { get; } = new HashSet<ItemComponent>();
+
+        public HashSet<(ItemComponent Component, ActionType ActionType)> LoopingEquipmentComponentSounds { get; } =
+            new HashSet<(ItemComponent Component, ActionType ActionType)>();
 
         public int FashionSoundCursor { get; set; }
 
@@ -410,7 +436,7 @@ namespace BaroWardrobeSwitcher
             {
                 throw new InvalidOperationException(error);
             }
-            Tuple<WearableType, LimbType> key = Tuple.Create(descriptor.Sprite.Type, descriptor.Sprite.Limb);
+            (WearableType Type, LimbType Limb) key = (descriptor.Sprite.Type, descriptor.Sprite.Limb);
             if (!SpritesBySlot.TryGetValue(key, out List<FashionSpriteDescriptor> descriptors))
             {
                 descriptors = new List<FashionSpriteDescriptor>();
@@ -535,11 +561,19 @@ namespace BaroWardrobeSwitcher
             SpritesBySlot.Clear();
             FashionSpritesByLimb.Clear();
             FashionAnimations.Clear();
+            FashionMovementAnimations.Clear();
+            Array.Clear(FashionAnimationInvokeArguments, 0, FashionAnimationInvokeArguments.Length);
+            FashionAnimationInvokeArguments[1] = false;
             SuppressedEquipmentAnimations.Clear();
             FashionSounds.Clear();
+            LoopingFashionSounds.Clear();
+            Array.Clear(FashionSoundInvokeArguments, 0, FashionSoundInvokeArguments.Length);
             FashionComponentSounds.Clear();
+            LoopingFashionComponentSounds.Clear();
             SuppressedEquipmentSounds.Clear();
+            LoopingEquipmentSounds.Clear();
             SuppressedEquipmentComponentSounds.Clear();
+            LoopingEquipmentComponentSounds.Clear();
 
             // Temporary prefab items stay alive for exactly as long as any descriptor
             // or captured effect can reference their components. Remove them last.

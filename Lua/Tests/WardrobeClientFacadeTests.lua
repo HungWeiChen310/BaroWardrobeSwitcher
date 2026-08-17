@@ -67,6 +67,25 @@ assert(captureSource:find('.. "@" .. tostring(color or "base")', 1, true) ~= nil
     "prefab fallback dedupe must include the packed color")
 assert(clientSource:find("color = Helpers.itemSpriteColor(item)", 1, true) ~= nil,
     "client visual snapshots must capture Item.SpriteColor.PackedValue")
+assert(clientSource:find("function Helpers.clearVisualOverride(", 1, true) == nil and
+       clientSource:find("local function legacyHideHairForVisibility", 1, true) == nil,
+    "dead visual-clear and legacy hide-hair forwarding wrappers returned")
+local resetTransportStart = assert(clientSource:find("function Helpers.resetSessionTransportState", 1, true))
+local resetTransportEnd = assert(clientSource:find(
+    "function Helpers.resetSavedLookForNewSession",
+    resetTransportStart,
+    true
+))
+assert(clientSource:sub(resetTransportStart, resetTransportEnd - 1):find(
+        "footstepSoundSyncPendingNegotiation = false",
+        1,
+        true
+    ) ~= nil,
+    "session replacement retained a footstep preference from the previous server")
+assert(clientSource:find("local SessionPollTicks = 30", 1, true) ~= nil and
+       clientSource:find("globalTick < nextSessionPollTick", 1, true) ~= nil and
+       clientSource:find("local SelectableCharactersCacheTicks = 15", 1, true) ~= nil,
+    "session-key polling or crew-list caching returned to every-frame work")
 
 local equipmentRefreshStart = assert(clientSource:find(
     "function Helpers.refreshActiveLookIfNeeded",
@@ -273,6 +292,7 @@ local reuseCheckCount = 0
 local fashionSlotCalls = 0
 local equipmentRegistrationCalls = 0
 local equipmentRemovalCalls = 0
+local stalePruneCalls = 0
 local reusableCharacters = {}
 local transactionCharacter = nil
 local function characterId(character)
@@ -388,7 +408,10 @@ local visualOverride = {
         activeCharacterIds[characterId(character)] = nil
         return true
     end,
-    PruneStaleCharacters = function() return true end
+    PruneStaleCharacters = function()
+        stalePruneCalls = stalePruneCalls + 1
+        return true
+    end
 }
 
 local gameSessionDataPath = { SavePath = "campaign-a.save" }
@@ -659,7 +682,6 @@ hooks.think()
 assert(lastEmptyCaptureCharacterId == selectorNpc.ID and
        lastSavedProfileKey == stableCharacterProfileKey("A Target NPC"),
     "Save did not capture and persist the selected bot's own wardrobe profile")
-
 local nextPageButton = buttons["Next Page"]
 assert(nextPageButton ~= nil and type(nextPageButton.OnClicked) == "function",
     "the main page did not expose its Next Page control")
@@ -762,6 +784,7 @@ assert(hasVisibleButton("Wardrobe target: Player Tester") and Character.Controll
 buttons["Wardrobe target: Player Tester"].OnClicked()
 hooks.think()
 selectorNpc.Removed = true
+hooks["character.removed"](selectorNpc)
 hooks.think()
 assert(hasVisibleButton("Wardrobe target: Player Tester"),
     "an unavailable selected bot did not safely fall back to the controlled character")
@@ -1391,11 +1414,11 @@ do
     assert(activationCount == beforeLateEntity,
         "a snapshot rendered before its remote Character existed")
 
-    Character.CharacterList[#Character.CharacterList + 1] =
-        makeCharacter(remoteId, remoteId, "Early Player", false)
-    for _ = 1, 30 do hooks.think() end
+    local earlyPlayer = makeCharacter(remoteId, remoteId, "Early Player", false)
+    Character.CharacterList[#Character.CharacterList + 1] = earlyPlayer
+    hooks["character.created"](earlyPlayer)
     assert(activationCount == beforeLateEntity + 1 and activeCharacterIds[remoteId] == true,
-        "a retained snapshot was not applied when the late Character appeared")
+        "character.created did not immediately retry its retained snapshot")
     assert(capturedIdentifierByCharacterId[remoteId] == "helmet",
         "the late Character received the wrong wardrobe look")
     assert(movementAnimationByCharacterId[remoteId] == false,
@@ -1483,6 +1506,32 @@ do
     assert(activationAttempts == attemptsBeforeBoundedFailure + 3,
         "authoritative apply retries were not bounded to three actual attempts")
     deliverState({ revision = 19, characterId = remoteId, active = false, look = exhaustedLook })
+
+    local expiredApplyId = 905
+    local expiredClearId = 906
+    local activationBeforeExpiry = activationCount
+    local clearBeforeExpiry = clearAttempts
+    local pruneBeforeExpiry = stalePruneCalls
+    local helloBeforeExpiry = 0
+    for _, message in ipairs(networkSent) do
+        if message.name == WardrobeCore.NET.V2_HELLO then helloBeforeExpiry = helloBeforeExpiry + 1 end
+    end
+    deliverState({ revision = 1, characterId = expiredApplyId, active = true, look = remoteLook })
+    deliverState({ revision = 1, characterId = expiredClearId, active = false, look = remoteLook })
+    for _ = 1, 1810 do hooks.think() end
+    local helloAfterExpiry = 0
+    for _, message in ipairs(networkSent) do
+        if message.name == WardrobeCore.NET.V2_HELLO then helloAfterExpiry = helloAfterExpiry + 1 end
+    end
+    local expiredApplyCharacter = makeCharacter(expiredApplyId, expiredApplyId, "Expired Apply", false)
+    local expiredClearCharacter = makeCharacter(expiredClearId, expiredClearId, "Expired Clear", false)
+    Character.CharacterList[#Character.CharacterList + 1] = expiredApplyCharacter
+    Character.CharacterList[#Character.CharacterList + 1] = expiredClearCharacter
+    hooks["character.created"](expiredApplyCharacter)
+    hooks["character.created"](expiredClearCharacter)
+    assert(activationCount == activationBeforeExpiry and clearAttempts == clearBeforeExpiry and
+           stalePruneCalls > pruneBeforeExpiry and helloAfterExpiry == helloBeforeExpiry + 1,
+        "expired v2 apply/clear state was retained or did not request one replacement snapshot")
 
     local helloBeforeRound = nil
     local helloCountBeforeRound = 0
@@ -1841,9 +1890,12 @@ assert(buttons["Save Current Outfit"].Enabled ~= false and
 -- P2P can replace the game session while retaining the same controlled
 -- Character object. A genuinely different stable key still performs the full
 -- reset and then binds the fresh reducer to that same Character.
+local helloCountBeforeStableKeyChange = clientHelloCount()
 gameSessionDataPath.SavePath = "p2p-session-b.save"
 openPanel = true
-hooks.think()
+for _ = 1, 31 do hooks.think() end
+assert(clientHelloCount() > helloCountBeforeStableKeyChange,
+    "the throttled session poll did not detect a delayed stable-key change within 30 ticks")
 assert(buttons["Save Current Outfit"].Enabled ~= false and
        buttons["Apply Saved Look"].Enabled ~= false and
        buttons["Clear Look"].Enabled ~= false,

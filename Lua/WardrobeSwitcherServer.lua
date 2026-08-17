@@ -56,9 +56,16 @@ local migratedLegacySteamIds = {}
 local sessionsByClient = setmetatable({}, { __mode = "k" })
 local operationCachesByAccount = {}
 local activeByCharacterId = {}
+local observerRevisionByCharacterId = {}
 local serverSessionId = tostring(os.time()) .. "-" .. tostring(math.random(100000, 999999))
 local lastGameSessionKey = nil
 local roundReactivationGeneration = 0
+local OPERATION_CACHE_RETENTION_SECONDS = 120
+local MAX_RETAINED_OPERATION_ACCOUNTS = 64
+local SERVER_LOG_MAX_BYTES = 65536
+local SERVER_LOG_MAX_WRITES_PER_SECOND = 20
+local serverLogWindowSecond = nil
+local serverLogWritesInWindow = 0
 
 local function writeLog(level, message)
     local line = "[" .. MOD_NAME .. "] " .. tostring(message)
@@ -66,15 +73,26 @@ local function writeLog(level, message)
     local writeFailure = nil
     if File ~= nil and GameApi ~= nil then
         written, writeFailure = pcall(function()
+            local now = math.floor(tonumber(os.time()) or 0)
+            if serverLogWindowSecond ~= now then
+                serverLogWindowSecond = now
+                serverLogWritesInWindow = 0
+            end
+            if serverLogWritesInWindow >= SERVER_LOG_MAX_WRITES_PER_SECOND then return end
+            serverLogWritesInWindow = serverLogWritesInWindow + 1
             local root = GameApi.SaveFolder
             if root == nil or tostring(root) == "" then error("Game.SaveFolder unavailable") end
             local directory = tostring(root):gsub("\\", "/"):gsub("/$", "") ..
                 "/ModData/BaroWardrobeSwitcher"
             File.CreateDirectory(directory)
             local path = directory .. "/WardrobeServer.log"
+            local entry = "[" .. os.date("%Y-%m-%d %H:%M:%S") .. "] [" .. level .. "] " .. line .. "\n"
+            if #entry > SERVER_LOG_MAX_BYTES then entry = entry:sub(-SERVER_LOG_MAX_BYTES) end
             local previous = File.Exists(path) and File.Read(path) or ""
-            File.Write(path, previous ..
-                "[" .. os.date("%Y-%m-%d %H:%M:%S") .. "] [" .. level .. "] " .. line .. "\n")
+            local retainedBytes = SERVER_LOG_MAX_BYTES - #entry
+            if retainedBytes <= 0 then previous = ""
+            elseif #previous > retainedBytes then previous = previous:sub(-retainedBytes) end
+            File.Write(path, previous .. entry)
         end)
     end
     if written then return end
@@ -114,10 +132,6 @@ local function messageLengthBytes(message)
     return nil
 end
 
-local function legacyHideHair(value)
-    return Core.legacyHideHair(value)
-end
-
 local function cloneLook(look)
     if look == nil then return nil end
     local attachmentVisibility =
@@ -126,7 +140,7 @@ local function cloneLook(look)
     local cloned = {
         schemaVersion = LOOK_SCHEMA_VERSION,
         captured = look.captured == true,
-        hideHair = legacyHideHair(attachmentVisibility),
+        hideHair = Core.legacyHideHair(attachmentVisibility),
         attachmentVisibility = attachmentVisibility,
         useFashionMovementAnimations = look.useFashionMovementAnimations ~= false,
         useFashionFootstepSounds = look.useFashionFootstepSounds == true,
@@ -751,7 +765,7 @@ local function validateStoredLook(raw, persistenceVersion)
     local look = {
         schemaVersion = LOOK_SCHEMA_VERSION,
         captured = raw.captured == true,
-        hideHair = legacyHideHair(visibility),
+        hideHair = Core.legacyHideHair(visibility),
         attachmentVisibility = visibility,
         useFashionMovementAnimations =
             persistenceVersion < 4 or raw.useFashionMovementAnimations ~= false,
@@ -1128,7 +1142,7 @@ local function canonicalizeLook(raw, requireCaptured)
     local canonical = {
         schemaVersion = LOOK_SCHEMA_VERSION,
         captured = raw.captured == true,
-        hideHair = legacyHideHair(attachmentVisibility),
+        hideHair = Core.legacyHideHair(attachmentVisibility),
         attachmentVisibility = attachmentVisibility,
         useFashionMovementAnimations = raw.useFashionMovementAnimations ~= false,
         useFashionFootstepSounds = raw.useFashionFootstepSounds == true,
@@ -1170,7 +1184,7 @@ local function captureAuthoritativeLook(character, clientLook)
     local raw = {
         schemaVersion = LOOK_SCHEMA_VERSION,
         captured = true,
-        hideHair = legacyHideHair(attachmentVisibility),
+        hideHair = Core.legacyHideHair(attachmentVisibility),
         attachmentVisibility = attachmentVisibility,
         useFashionMovementAnimations =
             type(clientLook) ~= "table" or clientLook.useFashionMovementAnimations ~= false,
@@ -1239,22 +1253,62 @@ end
 
 -- v2 retries reuse operation IDs. Retaining the first result per account/session
 -- makes repeated packets idempotent even if the connection object is replaced.
+local function operationCacheNow()
+    local ok, value = pcall(os.time)
+    return ok and math.floor(tonumber(value) or 0) or 0
+end
+
 local function newOperationCache(clientSessionId)
     return {
         clientSessionId = clientSessionId,
         results = {},
         count = 0,
-        limitResult = nil
+        limitResult = nil,
+        lastTouchedAt = operationCacheNow()
     }
+end
+
+local function operationCacheInUse(cache)
+    for _, session in pairs(sessionsByClient) do
+        if session.operationCache == cache then return true end
+    end
+    return false
+end
+
+local function pruneOperationCaches(now)
+    now = tonumber(now) or operationCacheNow()
+    local retained = {}
+    for accountId, cache in pairs(operationCachesByAccount) do
+        if not operationCacheInUse(cache) and
+            now - (tonumber(cache.lastTouchedAt) or 0) > OPERATION_CACHE_RETENTION_SECONDS then
+            operationCachesByAccount[accountId] = nil
+        else
+            retained[#retained + 1] = { accountId = accountId, cache = cache }
+        end
+    end
+    if #retained <= MAX_RETAINED_OPERATION_ACCOUNTS then return end
+    table.sort(retained, function(left, right)
+        return (tonumber(left.cache.lastTouchedAt) or 0) < (tonumber(right.cache.lastTouchedAt) or 0)
+    end)
+    local remove = #retained - MAX_RETAINED_OPERATION_ACCOUNTS
+    for _, entry in ipairs(retained) do
+        if remove <= 0 then break end
+        if not operationCacheInUse(entry.cache) then
+            operationCachesByAccount[entry.accountId] = nil
+            remove = remove - 1
+        end
+    end
 end
 
 local function bindOperationCache(session, clientSessionId)
     if session == nil then return end
     clientSessionId = tostring(clientSessionId or "")
+    local now = operationCacheNow()
     local cache = nil
     if session.accountId ~= nil then
         local retained = operationCachesByAccount[session.accountId]
-        if retained ~= nil and retained.clientSessionId == clientSessionId then
+        if retained ~= nil and retained.clientSessionId == clientSessionId and
+            now - (tonumber(retained.lastTouchedAt) or 0) <= OPERATION_CACHE_RETENTION_SECONDS then
             cache = retained
         else
             cache = newOperationCache(clientSessionId)
@@ -1265,11 +1319,13 @@ local function bindOperationCache(session, clientSessionId)
     else
         cache = newOperationCache(clientSessionId)
     end
+    cache.lastTouchedAt = now
     session.clientSessionId = clientSessionId
     session.operationCache = cache
     -- Keep this field in the ClientWardrobeSession aggregate while the cache
     -- metadata enforces a hard memory bound.
     session.seenOperations = cache.results
+    pruneOperationCaches(now)
 end
 
 local function sessionFor(client)
@@ -1438,18 +1494,32 @@ local function sendLegacyState(client, characterId, active, look)
     end
 end
 
-local function sendStateTo(client, revision, characterId, active, look)
+local function sendStateTo(client, ownerSession, ownerRevision, observerRevision, characterId, active, look)
     local recipient = sessionFor(client)
     if recipient ~= nil and recipient.protocol == PROTOCOL_VERSION then
+        local revision = recipient == ownerSession and ownerRevision or observerRevision
         sendV2State(client, revision, characterId, active, look)
     elseif recipient ~= nil and recipient.protocol == 1 then
         sendLegacyState(client, characterId, active, look)
     end
 end
 
-local function broadcastState(revision, characterId, active, look)
+local function nextObserverRevision(characterId)
+    characterId = tonumber(characterId)
+    if characterId == nil or characterId <= 0 then return 0 end
+    local revision = tonumber(observerRevisionByCharacterId[characterId]) or 0
+    if revision < MAX_REVISION then revision = revision + 1 end
+    observerRevisionByCharacterId[characterId] = revision
+    return revision
+end
+
+local function broadcastState(ownerSession, ownerRevision, characterId, active, look, observerRevision)
     if tonumber(characterId) == nil or tonumber(characterId) <= 0 then return end
-    for _, client in ipairs(connectedClients()) do sendStateTo(client, revision, characterId, active, look) end
+    observerRevision = tonumber(observerRevision) or nextObserverRevision(characterId)
+    for _, client in ipairs(connectedClients()) do
+        sendStateTo(client, ownerSession, ownerRevision, observerRevision, characterId, active, look)
+    end
+    return observerRevision
 end
 
 local activateRuntime
@@ -1458,9 +1528,9 @@ local handleGameSessionChange
 local function sendActiveSnapshot(client)
     local reboundCharacterIds = {}
     local requestingSession = sessionFor(client)
-    -- Rebuild runtime entries lost during round transitions. The requesting
-    -- client's ready hello also reannounces its own active look so peers that saw
-    -- an early/transient Character get one authoritative state after it is ready.
+    -- Rebuild runtime entries lost during round transitions. A ready owner's
+    -- hello reannounces its active look to peers that may have seen a transient
+    -- Character before it was ready.
     for _, owner in ipairs(connectedClients()) do
         local ownerSession = sessionFor(owner)
         local character = clientCharacter(owner)
@@ -1479,7 +1549,15 @@ local function sendActiveSnapshot(client)
     end
     for characterId, active in pairs(activeByCharacterId) do
         if reboundCharacterIds[characterId] ~= true then
-            sendStateTo(client, active.revision, characterId, true, active.look)
+            sendStateTo(
+                client,
+                active.session,
+                active.revision,
+                active.observerRevision,
+                characterId,
+                true,
+                active.look
+            )
         end
     end
 end
@@ -1501,7 +1579,7 @@ local function clearActiveRuntime(session, shouldBroadcast)
     if characterId ~= nil and characterId > 0 then
         local active = activeByCharacterId[characterId]
         if active == nil or active.session == session then activeByCharacterId[characterId] = nil end
-        if shouldBroadcast then broadcastState(session.revision, characterId, false, nil) end
+        if shouldBroadcast then broadcastState(session, session.revision, characterId, false, nil) end
     end
     return characterId
 end
@@ -1528,12 +1606,14 @@ activateRuntime = function(session, character, look, restoring)
     session.activePersistent = character == clientCharacter(session.client)
     session.persistentSessionKey = nil
     session.activeCharacterId = characterId
+    local observerRevision = nextObserverRevision(characterId)
     activeByCharacterId[characterId] = {
         session = session,
         revision = session.revision,
+        observerRevision = observerRevision,
         look = cloneLook(look)
     }
-    broadcastState(session.revision, characterId, true, look)
+    broadcastState(session, session.revision, characterId, true, look, observerRevision)
     return true
 end
 
@@ -1544,6 +1624,7 @@ local function operationResultFor(session, operationId)
         session.operationCache = cache
         session.seenOperations = cache.results
     end
+    cache.lastTouchedAt = operationCacheNow()
     local result = cache.results[operationId]
     if result ~= nil then return result end
     if cache.count >= MAX_SEEN_OPERATIONS then
@@ -1572,6 +1653,7 @@ local function rememberOperation(session, operationId, accepted, reason, command
     local cache = session.operationCache
     cache.results[operationId] = result
     cache.count = cache.count + 1
+    cache.lastTouchedAt = operationCacheNow()
     return result
 end
 
@@ -1669,7 +1751,7 @@ local function commitVisualPreference(session, requestedLook, preference)
         end
         merged.attachmentVisibility = Core.validateAttachmentVisibility(attachmentVisibility, false) or
             Core.attachmentVisibilityFromLegacy(false)
-        merged.hideHair = legacyHideHair(merged.attachmentVisibility)
+        merged.hideHair = Core.legacyHideHair(merged.attachmentVisibility)
     elseif preference == COMMAND_ANIMATION then
         merged.useFashionMovementAnimations = requestedLook.useFashionMovementAnimations ~= false
     elseif preference == COMMAND_FOOTSTEP then
@@ -1685,12 +1767,14 @@ local function commitVisualPreference(session, requestedLook, preference)
 
     local characterId = tonumber(session.activeCharacterId)
     if session.active == true and characterId ~= nil and characterId > 0 then
+        local observerRevision = nextObserverRevision(characterId)
         activeByCharacterId[characterId] = {
             session = session,
             revision = session.revision,
+            observerRevision = observerRevision,
             look = cloneLook(merged)
         }
-        broadcastState(session.revision, characterId, true, merged)
+        broadcastState(session, session.revision, characterId, true, merged, observerRevision)
     else
         sendOwnInactiveState(session)
     end
@@ -1986,6 +2070,7 @@ end)
 
 local function clearRoundRuntime()
     activeByCharacterId = {}
+    observerRevisionByCharacterId = {}
     for _, session in pairs(sessionsByClient) do
         session.activeCharacterId = nil
         if session.activePersistent ~= true then session.active = false end
@@ -2105,7 +2190,9 @@ Hook.Add("client.disconnected", "barowardrobeswitcher.v2-disconnected", function
     -- Disconnect only clears the runtime binding. The durable account record
     -- already contains the active intent and must not be rewritten from a
     -- transient reconnect session whose Character may not exist yet.
+    if session.operationCache ~= nil then session.operationCache.lastTouchedAt = operationCacheNow() end
     sessionsByClient[client] = nil
+    pruneOperationCaches()
 end)
 
 Hook.Add("character.created", "barowardrobeswitcher.v2-character-created", function(character)

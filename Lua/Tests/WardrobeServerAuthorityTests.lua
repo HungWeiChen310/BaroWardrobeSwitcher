@@ -19,6 +19,22 @@ local function loadFirst(paths, requireTable)
 end
 
 local Core = loadFirst(candidates("Lua/WardrobeCore.lua"), true)
+local serverSource = nil
+for _, path in ipairs(candidates("Lua/WardrobeSwitcherServer.lua")) do
+    local file = io.open(path, "r")
+    if file ~= nil then
+        serverSource = file:read("*a")
+        file:close()
+        break
+    end
+end
+assert(serverSource ~= nil)
+assert(serverSource:find("local OPERATION_CACHE_RETENTION_SECONDS = 120", 1, true) ~= nil and
+       serverSource:find("local MAX_RETAINED_OPERATION_ACCOUNTS = 64", 1, true) ~= nil and
+       serverSource:find("table.sort(retained", 1, true) ~= nil,
+    "account operation caches must retain a bounded reconnect grace with LRU eviction")
+assert(serverSource:find("local function legacyHideHair", 1, true) == nil,
+    "the pure legacy hide-hair forwarding wrapper returned")
 
 SERVER = true
 Character = { CharacterList = {} }
@@ -33,15 +49,25 @@ InvSlotType = {
 local connectedClients = {}
 local memoryFiles = {}
 local failPrimaryMove = false
+local serverLogReadMaxBytes = 0
+local serverLogWriteCount = 0
 local storageRoot = "/local/Daedalic Entertainment GmbH/Barotrauma/ModData/BaroWardrobeSwitcher"
 local MemoryFile = {
     Exists = function(path) return memoryFiles[tostring(path)] ~= nil end,
     Read = function(path)
         local value = memoryFiles[tostring(path)]
         if value == nil then error("file not found") end
+        if tostring(path):sub(-18) == "WardrobeServer.log" then
+            serverLogReadMaxBytes = math.max(serverLogReadMaxBytes, #value)
+        end
         return value
     end,
-    Write = function(path, value) memoryFiles[tostring(path)] = tostring(value) end,
+    Write = function(path, value)
+        if tostring(path):sub(-18) == "WardrobeServer.log" then
+            serverLogWriteCount = serverLogWriteCount + 1
+        end
+        memoryFiles[tostring(path)] = tostring(value)
+    end,
     CreateDirectory = function() return true end,
     Delete = function(path) memoryFiles[tostring(path)] = nil end,
     Move = function(...)
@@ -147,6 +173,17 @@ assert(serverHello.capabilities == Core.CAPABILITY.AttachmentVisibility +
     Core.CAPABILITY.MovementAnimationSource + Core.CAPABILITY.CrewTargeting +
     Core.CAPABILITY.FootstepSoundSource,
     "server did not advertise all authoritative appearance preferences")
+
+local logWritesBeforeFlood = serverLogWriteCount
+for _ = 1, 100 do
+    Networking.handlers[Core.NET.V1_CLEAR_REQUEST](newBuffer(), client)
+end
+assert(serverLogWriteCount - logWritesBeforeFlood <= 20 and
+       #assert(memoryFiles[serverLogPath]) <= 65536 and
+       serverLogReadMaxBytes <= 65536,
+    "server warning floods caused unbounded log read/rewrite amplification: writes=" ..
+    tostring(serverLogWriteCount - logWritesBeforeFlood) .. ", size=" ..
+    tostring(#assert(memoryFiles[serverLogPath])) .. ", maxRead=" .. tostring(serverLogReadMaxBytes))
 
 local function sendCommand(command, targetClient)
     targetClient = targetClient or client
@@ -259,6 +296,35 @@ local contested = sendTargetCommand({
 }, secondOwner)
 assert(not contested.accepted and contested.reason == "target_in_use" and contested.revision == 0,
     "a second player silently stole an active bot target")
+
+local firstOwnerClear = sendTargetCommand({
+    clientSessionId = "target-owner-session",
+    operationId = "target-owner-clear",
+    baseRevision = 1,
+    kind = Core.COMMAND.Clear,
+    targetCharacterId = friendlyBot.ID
+}, targetOwner)
+assert(firstOwnerClear.accepted and firstOwnerClear.revision == 2)
+local observerClear = assert(Core.readState(
+    lastSentMessage(Core.NET.V2_STATE, client.Connection)))
+local secondOwnerApply = sendTargetCommand({
+    clientSessionId = "second-target-session",
+    operationId = "target-second-owner-apply",
+    baseRevision = 0,
+    kind = Core.COMMAND.Apply,
+    targetCharacterId = friendlyBot.ID,
+    look = targetLook
+}, secondOwner)
+assert(secondOwnerApply.accepted and secondOwnerApply.revision == 1,
+    "bot takeover changed the second owner's account/base revision semantics")
+local observerTakeover = assert(Core.readState(
+    lastSentMessage(Core.NET.V2_STATE, client.Connection)))
+local secondOwnerState = assert(Core.readState(
+    lastSentMessage(Core.NET.V2_STATE, secondOwner.Connection)))
+assert(not observerClear.active and observerTakeover.active and
+       observerTakeover.revision > observerClear.revision and
+       secondOwnerState.revision == secondOwnerApply.revision,
+    "a third-party observer saw bot takeover revisions move backward across owners")
 
 local sentBeforeTargetRoundStart = #Networking.sent
 Hook.handlers.roundEnd()
@@ -375,7 +441,7 @@ do
     end
     assert(#lateStates == 1, "a player without a saved look received an unexpected own state")
     local lateSnapshot = lateStates[1]
-    assert(lateSnapshot.active and lateSnapshot.revision == 4 and
+    assert(lateSnapshot.active and lateSnapshot.revision > 0 and
         lateSnapshot.characterId == 143 and lateSnapshot.look.slots.Head == "helmet" and
         lateSnapshot.look.useFashionMovementAnimations == false,
         "a late client did not receive the active next-round wardrobe snapshot")
@@ -417,7 +483,7 @@ do
         end
     end
     assert(announcedToExistingClient ~= nil and announcedToExistingClient.active and
-        announcedToExistingClient.revision == 1 and
+        announcedToExistingClient.revision > 0 and
         announcedToExistingClient.look.slots.Head == "helmet" and
         announcedToExistingClient.look.useFashionMovementAnimations == true,
         "a ready late client did not reannounce its active look to an existing client")
@@ -888,6 +954,35 @@ local reconnectDuplicateAck = assert(Core.readAck(Networking.sent[beforeReconnec
 assert(reconnectDuplicateAck.accepted and reconnectDuplicateAck.revision == 1,
     "a stable account reconnecting with the same client session must receive the original operation result")
 
+local originalOsTime = os.time
+local operationCacheTime = math.floor(tonumber(originalOsTime()) or 0)
+os.time = function() return operationCacheTime end
+Hook.handlers["client.disconnected"](stableReconnected)
+operationCacheTime = operationCacheTime + 121
+local stableAfterCacheExpiry = {
+    Connection = {},
+    Character = { ID = 90, Name = "Stable After Cache Expiry" },
+    AccountId = stableClient.AccountId
+}
+connectedClients[3] = stableAfterCacheExpiry
+local expiredCacheHello = newBuffer()
+assert(Core.writeClientHello(expiredCacheHello, "stable-session"))
+Networking.handlers[Core.NET.V2_HELLO](expiredCacheHello, stableAfterCacheExpiry)
+local expiredCacheRetry = newBuffer()
+assert(Core.writeCommand(expiredCacheRetry, {
+    clientSessionId = "stable-session",
+    operationId = "stable-save",
+    baseRevision = 0,
+    kind = Core.COMMAND.Save
+}))
+local beforeExpiredCacheRetry = #Networking.sent
+Networking.handlers[Core.NET.V2_COMMAND](expiredCacheRetry, stableAfterCacheExpiry)
+local expiredCacheAck = assert(Core.readAck(Networking.sent[beforeExpiredCacheRetry + 1].message))
+assert(not expiredCacheAck.accepted and expiredCacheAck.reason == "stale_revision",
+    "an expired reconnect cache retained its old idempotent operation result")
+os.time = originalOsTime
+stableReconnected = stableAfterCacheExpiry
+
 failPrimaryMove = true
 local failedClear = sendCommand({
     clientSessionId = "stable-session",
@@ -1304,7 +1399,7 @@ for index = sentBeforeReconnectRecovery + 1, #Networking.sent do
     if sent.message.name == Core.NET.V2_STATE then
         local state = assert(Core.readState(sent.message))
         if state.characterId == 131 and state.active then
-            recoveredReconnectLook = state.revision == reconnectRaceApply.revision
+            recoveredReconnectLook = state.revision > 0
         end
     end
 end
@@ -1335,7 +1430,7 @@ for index = sentBeforeLateIdentity + 1, #Networking.sent do
     if sent.message.name == Core.NET.V2_STATE then
         local state = assert(Core.readState(sent.message))
         if state.characterId == 132 and state.active then
-            recoveredLateIdentityLook = state.revision == reconnectRaceApply.revision
+            recoveredLateIdentityLook = state.revision > 0
         end
     end
 end

@@ -181,6 +181,7 @@ local cachedPanelKey = Keys.F8
 local panelKeyNextRefreshTick = 0
 local selectableCharactersCacheTick = -1
 local selectableCharactersCache = nil
+local nextSessionPollTick = 0
 
 local function currentPanelKey()
     if cachedPanelKey ~= nil and globalTick < panelKeyNextRefreshTick then
@@ -320,8 +321,10 @@ local InitialEquipStableTicks = 12
 local InitialEquipFallbackTicks = 120
 local ServerApplyRetryTicks = 30
 local NetworkRenderMaxAttempts = 3
-local PendingLegacyNetworkMessageMaxTicks = 300
-local NetworkApplySuppressTicks = PendingLegacyNetworkMessageMaxTicks
+local PendingNetworkMessageMaxTicks = 1800
+local NetworkApplySuppressTicks = 300
+local SessionPollTicks = 30
+local SelectableCharactersCacheTicks = 15
 
 local function copyLookData(lookData)
     local copy = {}
@@ -339,10 +342,6 @@ local function copyLookData(lookData)
         end
     end
     return copy
-end
-
-local function legacyHideHairForVisibility(value)
-    return Core.legacyHideHair(value)
 end
 
 local function serverSupportsAttachmentVisibility()
@@ -744,7 +743,7 @@ function Helpers.encodePersistentClientLook(
     if type(footstepSoundSource) ~= "boolean" then
         footstepSoundSource = currentFootstepSoundSource()
     end
-    local hairHidden = legacyHideHairForVisibility(visibility)
+    local hairHidden = Core.legacyHideHair(visibility)
     local parts = {
         "schema=5",
         "captured=" .. tostring(captured == true),
@@ -2066,13 +2065,6 @@ function Helpers.isManagedEquippedItem(character, item)
     return false
 end
 
-function Helpers.clearVisualOverride(character)
-    if Helpers.ensureVisualOverride() == nil then return end
-    pcall(function()
-        VisualOverride.ClearCharacter(character)
-    end)
-end
-
 function Helpers.tryClearVisualOverride(character)
     if character == nil then return true end
     if Helpers.ensureVisualOverride() == nil then return true end
@@ -2394,7 +2386,7 @@ function Helpers.writeProjectedV2Look(
     if valid == nil then return false, reason end
     message.WriteUInt16(Core.LOOK_SCHEMA_VERSION)
     message.WriteBoolean(valid.captured == true)
-    message.WriteBoolean(legacyHideHairForVisibility(valid.attachmentVisibility))
+    message.WriteBoolean(Core.legacyHideHair(valid.attachmentVisibility))
     local count = 0
     for _, key in ipairs(Core.SLOT_KEYS) do
         if valid.slots[key] ~= nil then count = count + 1 end
@@ -2681,7 +2673,7 @@ function Helpers.queueProtocolCommand(kind, lookData, captured, operationId, red
             domainLookFromLegacy(
                 lookData or {},
                 captured == true,
-                legacyHideHairForVisibility(visibility),
+                Core.legacyHideHair(visibility),
                 visibility,
                 currentMovementAnimationSource(),
                 currentFootstepSoundSource()
@@ -3118,7 +3110,7 @@ clientEffectAdapters.Capture = function(currentEffect)
     local domainLook, lookReason = domainLookFromLegacy(
         lookData,
         true,
-        legacyHideHairForVisibility(visibility),
+        Core.legacyHideHair(visibility),
         visibility,
         currentMovementAnimationSource(),
         currentFootstepSoundSource()
@@ -3904,7 +3896,7 @@ function Helpers.belongsToLocalWardrobeState(characterId)
 end
 
 function Helpers.singlePlayerSelectableCharacters()
-    if selectableCharactersCacheTick == globalTick and selectableCharactersCache ~= nil then
+    if selectableCharactersCache ~= nil and globalTick < selectableCharactersCacheTick then
         return selectableCharactersCache
     end
     local actual = Helpers.actualControlledCharacter()
@@ -3917,7 +3909,7 @@ function Helpers.singlePlayerSelectableCharacters()
     end
     if not isSinglePlayerClient() and
         not (Helpers.isMultiplayerClient() and serverSupportsCrewTargeting()) then
-        selectableCharactersCacheTick = globalTick
+        selectableCharactersCacheTick = globalTick + SelectableCharactersCacheTicks
         selectableCharactersCache = targets
         return targets
     end
@@ -3944,7 +3936,7 @@ function Helpers.singlePlayerSelectableCharacters()
         return leftName < rightName
     end)
     for _, character in ipairs(bots) do targets[#targets + 1] = character end
-    selectableCharactersCacheTick = globalTick
+    selectableCharactersCacheTick = globalTick + SelectableCharactersCacheTicks
     selectableCharactersCache = targets
     return targets
 end
@@ -3953,7 +3945,11 @@ function Helpers.selectedSinglePlayerCharacter(actual)
     actual = actual or Helpers.actualControlledCharacter()
     if selectedSinglePlayerCharacterKey == nil then return actual end
     for _, character in ipairs(Helpers.singlePlayerSelectableCharacters()) do
-        if characterStateKey(character) == selectedSinglePlayerCharacterKey then return character end
+        if characterStateKey(character) == selectedSinglePlayerCharacterKey and
+            Helpers.userDataMember(character, "IsDead") ~= true and
+            Helpers.userDataMember(character, "Removed") ~= true then
+            return character
+        end
     end
     selectedSinglePlayerCharacterKey = nil
     lastOperation = "Selected crew member is no longer available."
@@ -4412,7 +4408,7 @@ function Helpers.handleNetworkLookApply(
         local domainLook = domainLookFromLegacy(
             networkLook,
             true,
-            legacyHideHairForVisibility(visibility),
+            Core.legacyHideHair(visibility),
             visibility,
             useFashionMovementAnimations,
             useFashionFootstepSounds
@@ -4549,11 +4545,12 @@ end
 
 function Helpers.processPendingNetworkMessages()
     Helpers.pruneNetworkApplySuppressions()
+    local expired = false
 
     for characterId, pending in pairs(pendingNetworkClearsByCharacterId) do
-        if pending.protocolRevision == nil and
-            globalTick - pending.receivedTick > PendingLegacyNetworkMessageMaxTicks then
+        if globalTick - pending.receivedTick > PendingNetworkMessageMaxTicks then
             pendingNetworkClearsByCharacterId[characterId] = nil
+            expired = true
         elseif globalTick >= (pending.nextAttemptTick or pending.receivedTick) then
             Helpers.handleNetworkLookClear(
                 characterId,
@@ -4565,9 +4562,9 @@ function Helpers.processPendingNetworkMessages()
     end
 
     for characterId, pending in pairs(pendingNetworkAppliesByCharacterId) do
-        if pending.protocolRevision == nil and
-            globalTick - pending.receivedTick > PendingLegacyNetworkMessageMaxTicks then
+        if globalTick - pending.receivedTick > PendingNetworkMessageMaxTicks then
             pendingNetworkAppliesByCharacterId[characterId] = nil
+            expired = true
         elseif globalTick >= (pending.nextAttemptTick or pending.receivedTick) then
             Helpers.handleNetworkLookApply(
                 characterId,
@@ -4578,6 +4575,10 @@ function Helpers.processPendingNetworkMessages()
                 pending
             )
         end
+    end
+    if expired then
+        Helpers.pruneVisualOverrides()
+        if protocolMode == "v3" then Helpers.sendV2Hello(true) end
     end
 end
 
@@ -4684,7 +4685,7 @@ if Networking ~= nil then
                         localLook.hideHair == true
                     ) or Core.attachmentVisibilityFromLegacy(localLook.hideHair == true)
                     state.look.hideHair =
-                        legacyHideHairForVisibility(state.look.attachmentVisibility)
+                        Core.legacyHideHair(state.look.attachmentVisibility)
                 end
             end
             if belongsToControlledCharacter and
@@ -5292,6 +5293,7 @@ function Helpers.resetSessionTransportState()
     multiplayerOwnerCharacterId = nil
     visibilitySyncPendingNegotiation = false
     movementAnimationSyncPendingNegotiation = false
+    footstepSoundSyncPendingNegotiation = false
     protocolHelloSentAt = nil
     protocolCommandQueue = {}
     inFlightV2Command = nil
@@ -5363,8 +5365,14 @@ end
 
 function Helpers.handleSessionChange()
     local sessionObject = Helpers.currentSessionObject()
+    if rawequal(sessionObject, lastSessionObject) and globalTick < nextSessionPollTick then return end
+    nextSessionPollTick = globalTick + SessionPollTicks
     local sessionKey = Helpers.currentSessionKey(sessionObject)
-    if sessionKey == nil then return end
+    if sessionKey == nil then
+        lastSessionObject = sessionObject
+        sessionObjectObserved = sessionObject ~= nil or sessionObjectObserved
+        return
+    end
     if lastSessionKey == nil then
         lastSessionKey = sessionKey
         lastSessionObject = sessionObject
@@ -5512,6 +5520,29 @@ Hook.Add("item.unequip", "barowardrobeswitcher.profile-equip", function(item, ch
 end)
 
 Hook.Add("character.created", "barowardrobeswitcher.profile-character-created", function(character)
+    selectableCharactersCache = nil
+    selectableCharactersCacheTick = -1
+    local characterId = Helpers.characterEntityId(character)
+    local pendingClear = pendingNetworkClearsByCharacterId[characterId]
+    if pendingClear ~= nil then
+        Helpers.handleNetworkLookClear(
+            characterId,
+            pendingClear.protocolRevision,
+            pendingClear.protocolLook,
+            pendingClear
+        )
+    end
+    local pendingApply = pendingNetworkAppliesByCharacterId[characterId]
+    if pendingApply ~= nil then
+        Helpers.handleNetworkLookApply(
+            characterId,
+            pendingApply.look,
+            pendingApply.protocolRevision,
+            pendingApply.hideHair,
+            pendingApply.protocolLook,
+            pendingApply
+        )
+    end
     if not isSinglePlayerClient() then return end
     local attempts = 0
     local function attemptQueue()
@@ -5526,6 +5557,11 @@ Hook.Add("character.created", "barowardrobeswitcher.profile-character-created", 
         end
     end
     attemptQueue()
+end)
+
+Hook.Add("character.removed", "barowardrobeswitcher.profile-character-removed", function()
+    selectableCharactersCache = nil
+    selectableCharactersCacheTick = -1
 end)
 
 Hook.Add("roundEnd", "barowardrobeswitcher.cleanup", function()
