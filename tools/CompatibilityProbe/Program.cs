@@ -261,6 +261,7 @@ RequirePublicStaticField("Character.CharacterList", character, "CharacterList");
 RequirePublicProperty("Character.IsBot", character, "IsBot", typeof(bool));
 RequirePublicProperty("Character.IsHuman", character, "IsHuman", typeof(bool));
 RequirePublicProperty("Character.IsOnPlayerTeam", character, "IsOnPlayerTeam", typeof(bool));
+RequirePublicProperty("Character.InPressure", character, "InPressure", typeof(bool));
 RequireAnyPublicField("CharacterInfo.ID", characterInfo, "ID");
 RequirePublicProperty("CharacterInfo.OriginalName", characterInfo, "OriginalName");
 RequirePublicProperty("CharacterInfo.SpeciesName", characterInfo, "SpeciesName");

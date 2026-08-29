@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <infotexts language="English">
-  <entityname.barowardrobeswitcher>Wardrobe(Beta)</entityname.barowardrobeswitcher>
-  <Wardrobe_x0028_beta_x0029_.PanelKey.DisplayName>Wardrobe Panel Key</Wardrobe_x0028_beta_x0029_.PanelKey.DisplayName>
-  <Wardrobe_x0028_beta_x0029_.PanelKey.DisplayCategory>Wardrobe</Wardrobe_x0028_beta_x0029_.PanelKey.DisplayCategory>
-  <Wardrobe_x0028_beta_x0029_.PanelKey.Tooltip>Enter a Microsoft.Xna.Framework.Input.Keys name, such as F7 or Insert. Invalid names use F8.</Wardrobe_x0028_beta_x0029_.PanelKey.Tooltip>
+  <entityname.barowardrobeswitcher>Wardrobe</entityname.barowardrobeswitcher>
+  <Wardrobe_x0028_衣櫃_x0029__x0028_衣柜_x0029_.PanelKey.DisplayName>Wardrobe Panel Key</Wardrobe_x0028_衣櫃_x0029__x0028_衣柜_x0029_.PanelKey.DisplayName>
+  <Wardrobe_x0028_衣櫃_x0029__x0028_衣柜_x0029_.PanelKey.DisplayCategory>Wardrobe</Wardrobe_x0028_衣櫃_x0029__x0028_衣柜_x0029_.PanelKey.DisplayCategory>
+  <Wardrobe_x0028_衣櫃_x0029__x0028_衣柜_x0029_.PanelKey.Tooltip>Enter a Microsoft.Xna.Framework.Input.Keys name, such as F7 or Insert. Invalid names use F8.</Wardrobe_x0028_衣櫃_x0029__x0028_衣柜_x0029_.PanelKey.Tooltip>
   <barowardrobeswitcher.notice.open_panel>Wardrobe control panel can be opened by pressing {key}.</barowardrobeswitcher.notice.open_panel>
   <barowardrobeswitcher.panel.title>Wardrobe Switcher</barowardrobeswitcher.panel.title>
   <barowardrobeswitcher.panel.main_page>Main</barowardrobeswitcher.panel.main_page>
@@ -30,6 +30,10 @@
   <barowardrobeswitcher.button.save>Save Current Outfit</barowardrobeswitcher.button.save>
   <barowardrobeswitcher.button.apply>Apply Saved Look</barowardrobeswitcher.button.apply>
   <barowardrobeswitcher.button.clear>Clear Look</barowardrobeswitcher.button.clear>
+  <barowardrobeswitcher.button.diving_mode_none>Diving mode: None</barowardrobeswitcher.button.diving_mode_none>
+  <barowardrobeswitcher.button.diving_mode_suit>Diving mode: Diving suit only</barowardrobeswitcher.button.diving_mode_suit>
+  <barowardrobeswitcher.button.diving_mode_custom>Diving mode: Custom outfit</barowardrobeswitcher.button.diving_mode_custom>
+  <barowardrobeswitcher.button.save_diving_outfit>Save Diving Outfit</barowardrobeswitcher.button.save_diving_outfit>
   <barowardrobeswitcher.button.forget>Forget Saved Look</barowardrobeswitcher.button.forget>
   <barowardrobeswitcher.button.attachment_layers>Appearance Layers...</barowardrobeswitcher.button.attachment_layers>
   <barowardrobeswitcher.button.animation_fashion>Movement: Fashion Priority</barowardrobeswitcher.button.animation_fashion>

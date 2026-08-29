@@ -176,6 +176,13 @@ local buildAttachmentVisibilityWindow
 local toggleWindow
 local fullPanelOpen = false
 local Helpers = {}
+Helpers.DIVING_MODE_NONE = 0
+Helpers.DIVING_MODE_SUIT = 1
+Helpers.DIVING_MODE_CUSTOM = 2
+Helpers.divingProfilesByKey = {}
+Helpers.divingRuntimeByCharacterKey = {}
+Helpers.divingTrackedCharacters = {}
+Helpers.nextDivingPollTick = 0
 local cachedPanelKeyName = "F8"
 local cachedPanelKey = Keys.F8
 local panelKeyNextRefreshTick = 0
@@ -1500,6 +1507,147 @@ ensureWardrobePersistence = function()
     return WardrobePersistence
 end
 
+function Helpers.divingProfileStorageKey(character)
+    if character == nil then return nil, false end
+    if isSinglePlayerClient() then
+        local campaignKey = Helpers.currentSinglePlayerCampaignKey()
+        local profileKey = Helpers.singlePlayerCharacterProfileKey(character)
+        if campaignKey ~= nil and profileKey ~= nil and
+            not singlePlayerAmbiguousFingerprints[profileKey] then
+            return "single-player\n" .. campaignKey .. "\n" .. profileKey, true
+        end
+    elseif Helpers.isMultiplayerClient() and character == Helpers.actualControlledCharacter() then
+        return "multiplayer-client", true
+    end
+    local runtimeKey = characterStateKey(character)
+    return runtimeKey ~= nil and ("runtime\n" .. runtimeKey) or nil, false
+end
+
+function Helpers.parseDivingProfileLine(line)
+    if line == nil or tostring(line) == "" then return nil end
+    local mode = nil
+    local captured = nil
+    local look = {}
+    local colors = {}
+    local seen = {}
+    local slotSet = {}
+    for _, entry in ipairs(slots) do slotSet[entry.key] = true end
+
+    for part in tostring(line):gmatch("[^|]+") do
+        local name, value = part:match("^([^=]+)=(.*)$")
+        if name == nil or seen[name] then return nil end
+        seen[name] = true
+        if name == "mode" then
+            mode = tonumber(value)
+            if mode == nil or mode % 1 ~= 0 or mode < Helpers.DIVING_MODE_NONE or
+                mode > Helpers.DIVING_MODE_CUSTOM then return nil end
+        elseif name == "captured" then
+            if value == "true" then captured = true
+            elseif value == "false" then captured = false
+            else return nil end
+        elseif name:sub(-#"Color") == "Color" and slotSet[name:sub(1, -#"Color" - 1)] then
+            local key = name:sub(1, -#"Color" - 1)
+            local color = tonumber(value)
+            if color == nil or color < 0 or color > Core.LIMITS.MAX_UINT32 or color % 1 ~= 0 then
+                return nil
+            end
+            colors[key] = color
+        elseif slotSet[name] then
+            local identifier, displayName = value:match("^([^,]+),(.*)$")
+            identifier = identifier ~= nil and Helpers.unescapePersistentValue(identifier) or nil
+            if identifier == nil or identifier == "" or #identifier > 256 then return nil end
+            look[name] = {
+                identifier = identifier,
+                itemId = 0,
+                name = Helpers.unescapePersistentValue(displayName or ""),
+                slot = name
+            }
+        else
+            return nil
+        end
+    end
+    if mode == nil or captured == nil then return nil end
+    for key, color in pairs(colors) do
+        if look[key] == nil then return nil end
+        look[key].color = color
+    end
+    return { mode = mode, captured = captured, look = look, loaded = true }
+end
+
+function Helpers.encodeDivingLook(profile)
+    profile = profile or {}
+    local look = profile.look or {}
+    local parts = { "captured=" .. tostring(profile.captured == true) }
+    for _, entry in ipairs(slots) do
+        local value = look[entry.key]
+        if value ~= nil and tostring(value.identifier or "") ~= "" then
+            parts[#parts + 1] = entry.key .. "=" ..
+                Helpers.escapePersistentValue(value.identifier) .. "," ..
+                Helpers.escapePersistentValue(value.name or "")
+            if value.color ~= nil then
+                parts[#parts + 1] = entry.key .. "Color=" .. tostring(value.color)
+            end
+        end
+    end
+    return table.concat(parts, "|")
+end
+
+function Helpers.divingProfile(character)
+    local key, persistable = Helpers.divingProfileStorageKey(character)
+    if key == nil then
+        return { mode = Helpers.DIVING_MODE_NONE, captured = false, look = {}, loaded = true }
+    end
+    local profile = Helpers.divingProfilesByKey[key]
+    if profile == nil then
+        profile = {
+            mode = Helpers.DIVING_MODE_NONE,
+            captured = false,
+            look = {},
+            loaded = not persistable,
+            nextLoadTick = 0
+        }
+        Helpers.divingProfilesByKey[key] = profile
+    end
+    if persistable and not profile.loaded and globalTick >= (profile.nextLoadTick or 0) then
+        profile.nextLoadTick = globalTick + BRIDGE_RETRY_TICKS
+        local persistence = ensureWardrobePersistence()
+        local ok, line = pcall(function()
+            return persistence ~= nil and persistence.LoadDivingProfile(key) or nil
+        end)
+        if ok and line ~= nil then
+            local restored = Helpers.parseDivingProfileLine(line)
+            if restored ~= nil then
+                profile = restored
+                Helpers.divingProfilesByKey[key] = profile
+            else
+                profile.loaded = true
+            end
+        elseif not ok then
+            Helpers.debugLog("Diving appearance profile load failed: " .. tostring(line))
+        end
+    end
+    return profile
+end
+
+function Helpers.persistDivingProfile(character, profile)
+    local key, persistable = Helpers.divingProfileStorageKey(character)
+    if not persistable then return true end
+    local persistence = ensureWardrobePersistence()
+    if persistence == nil then
+        return false, persistenceFailureReason("C# wardrobe persistence is unavailable")
+    end
+    local ok, saved = pcall(function()
+        return persistence.SaveDivingProfile(
+            key,
+            tonumber(profile.mode) or Helpers.DIVING_MODE_NONE,
+            Helpers.encodeDivingLook(profile)
+        )
+    end)
+    if ok and saved == true then return true end
+    return false, ok and
+        persistenceFailureReason("C# SaveDivingProfile returned false") or tostring(saved)
+end
+
 function Helpers.visualOverrideState()
     local override = Helpers.ensureVisualOverride()
     if override == nil then
@@ -1649,6 +1797,47 @@ end
 function Helpers.isIgnoredWardrobeItem(item)
     local identifier = Helpers.itemIdentifier(item)
     return identifier == "genesplicer" or identifier == "advancedgenesplicer"
+end
+
+function Helpers.hasHighPressureAffliction(character)
+    local override = Helpers.ensureVisualOverride()
+    if override ~= nil then
+        local ok, active = pcall(function()
+            return override.HasHighPressureAffliction(character)
+        end)
+        if ok then return active == true end
+    end
+    local ok, active = pcall(function()
+        return character.InPressure
+    end)
+    return ok and active == true
+end
+
+function Helpers.isDivingSuitItem(item)
+    if item == nil then return false end
+    local override = Helpers.ensureVisualOverride()
+    if override ~= nil then
+        local ok, divingSuit = pcall(function()
+            return override.IsDivingSuitItem(item)
+        end)
+        if ok then return divingSuit == true end
+    end
+    local ok, divingSuit = pcall(function()
+        return item.HasTag("deepdiving") or item.HasTag("deepdivinglarge")
+    end)
+    return ok and divingSuit == true
+end
+
+function Helpers.isLockedWardrobeItem(item)
+    if item == nil then return false end
+    local ok, locked = pcall(function()
+        return item.OwnInventory ~= nil and item.OwnInventory.Locked == true
+    end)
+    if ok and locked == true then return true end
+    ok, locked = pcall(function()
+        return item.HasTag("lock") or item.HasTag("locked")
+    end)
+    return ok and locked == true
 end
 
 function Helpers.itemEntityId(item)
@@ -2025,6 +2214,13 @@ unequipItem = function(character, item)
         item.Unequip(character)
     end)
     if isClear() then return true end
+
+    if Helpers.isLockedWardrobeItem(item) then
+        pcall(function()
+            item.Drop(character)
+        end)
+        return isClear()
+    end
 
     if moveToInventoryAndValidate() then return true end
 
@@ -3045,6 +3241,185 @@ function Helpers.applyCapturedFashionToCharacterEquipment(
     return true, visualItems, nil
 end
 
+function Helpers.trackDivingCharacter(character)
+    local key = characterStateKey(character)
+    if key ~= nil then Helpers.divingTrackedCharacters[key] = character end
+end
+
+function Helpers.divingRuntime(character)
+    local key = characterStateKey(character)
+    if key == nil then return nil end
+    local runtime = Helpers.divingRuntimeByCharacterKey[key]
+    if runtime == nil then
+        runtime = { active = false, signature = nil }
+        Helpers.divingRuntimeByCharacterKey[key] = runtime
+    end
+    return runtime
+end
+
+function Helpers.divingOverrideActive(character)
+    local runtime = character ~= nil and Helpers.divingRuntime(character) or nil
+    return runtime ~= nil and runtime.active == true
+end
+
+function Helpers.currentDivingSuitLook(character)
+    local look = {}
+    local found = false
+    for _, entry in ipairs(slots) do
+        local item = getSlotItem(character, entry.slot)
+        if Helpers.isDivingSuitItem(item) then
+            found = true
+            look[entry.key] = {
+                identifier = Helpers.itemIdentifier(item),
+                itemId = Helpers.itemEntityId(item),
+                name = Helpers.itemName(item),
+                slot = entry.key,
+                color = Helpers.itemSpriteColor(item)
+            }
+        end
+    end
+    return found and look or nil
+end
+
+function Helpers.baseAppearanceForCharacter(character)
+    if character == controlled() then
+        return reducerState.active == true,
+            currentLegacyLook(),
+            currentAttachmentVisibility(),
+            currentMovementAnimationSource(),
+            currentFootstepSoundSource()
+    end
+    local key = characterStateKey(character)
+    local state = key ~= nil and characterStates[key] or nil
+    if state == nil or not Core.hasLook(state.look) then return false, nil end
+    return state.active == true,
+        legacyLookFromDomain(state.look, state.legacyLookMetadata),
+        state.look.attachmentVisibility,
+        state.look.useFashionMovementAnimations,
+        state.look.useFashionFootstepSounds
+end
+
+function Helpers.restoreBaseAppearanceAfterDiving(character, runtime)
+    runtime = runtime or Helpers.divingRuntime(character)
+    if runtime == nil or not runtime.active then return true end
+    runtime.signature = nil
+    local active, look, visibility, movement, footstep =
+        Helpers.baseAppearanceForCharacter(character)
+    local restored = false
+    if active and look ~= nil then
+        restored = Helpers.applyCapturedFashionToCharacterEquipment(
+            character,
+            look,
+            true,
+            visibility,
+            movement,
+            footstep
+        ) == true
+    else
+        -- The committed session contains the temporary diving payload. Dispose it
+        -- so a later normal Apply cannot mistake that payload for the saved look.
+        restored = Helpers.tryClearVisualOverride(character) == true
+    end
+    runtime.active = not restored
+    if character == controlled() then lastEquipmentSignature = nil end
+    return restored
+end
+
+function Helpers.refreshDivingAppearance(character, force)
+    if character == nil then return false end
+    Helpers.trackDivingCharacter(character)
+    local profile = Helpers.divingProfile(character)
+    local runtime = Helpers.divingRuntime(character)
+    if runtime == nil then return false end
+
+    local pressure = profile.mode ~= Helpers.DIVING_MODE_NONE and
+        Helpers.hasHighPressureAffliction(character)
+    local look = nil
+    if pressure and profile.mode == Helpers.DIVING_MODE_SUIT then
+        look = Helpers.currentDivingSuitLook(character)
+    elseif pressure and profile.mode == Helpers.DIVING_MODE_CUSTOM and profile.captured then
+        look = profile.look
+    end
+    if look == nil then
+        return Helpers.restoreBaseAppearanceAfterDiving(character, runtime)
+    end
+
+    local signature = tostring(profile.mode) .. "|" ..
+        lookDataSignature(look, true) .. "|" .. Helpers.equipmentSignature(character)
+    if not force and runtime.active and runtime.signature == signature then return true end
+
+    local applied, _, reason = Helpers.applyCapturedFashionToCharacterEquipment(
+        character,
+        look,
+        true,
+        Core.attachmentVisibilityFromLegacy(false),
+        false,
+        false
+    )
+    if applied then
+        runtime.active = true
+        runtime.signature = signature
+        if character == controlled() then lastEquipmentSignature = nil end
+        return true
+    end
+    Helpers.debugLog("Diving appearance could not be applied: " .. tostring(reason))
+    Helpers.restoreBaseAppearanceAfterDiving(character, runtime)
+    return false
+end
+
+function Helpers.updateDivingAppearances(force)
+    if not force and globalTick < Helpers.nextDivingPollTick then return end
+    Helpers.nextDivingPollTick = globalTick + EQUIPMENT_POLL_TICKS
+    Helpers.trackDivingCharacter(Helpers.actualControlledCharacter())
+    Helpers.trackDivingCharacter(controlled())
+    for key, character in pairs(Helpers.divingTrackedCharacters) do
+        if character == nil or Helpers.userDataMember(character, "Removed") == true then
+            Helpers.divingTrackedCharacters[key] = nil
+            Helpers.divingRuntimeByCharacterKey[key] = nil
+        else
+            Helpers.refreshDivingAppearance(character, force == true)
+        end
+    end
+end
+
+function Helpers.cycleDivingMode()
+    local character = controlled()
+    if character == nil then return false end
+    local profile = Helpers.divingProfile(character)
+    profile.mode = (tonumber(profile.mode) or Helpers.DIVING_MODE_NONE) + 1
+    if profile.mode > Helpers.DIVING_MODE_CUSTOM then profile.mode = Helpers.DIVING_MODE_NONE end
+    local saved, reason = Helpers.persistDivingProfile(character, profile)
+    if not saved then
+        Helpers.debugLog("Diving appearance mode is session-only: " .. tostring(reason))
+    end
+    Helpers.refreshDivingAppearance(character, true)
+    return true
+end
+
+function Helpers.saveCustomDivingLook()
+    local character = controlled()
+    if character == nil then return false end
+    local profile = Helpers.divingProfile(character)
+    profile.mode = Helpers.DIVING_MODE_CUSTOM
+    profile.look = Helpers.visualSnapshot(character)
+    profile.captured = true
+    local saved, reason = Helpers.persistDivingProfile(character, profile)
+    if saved then
+        lastOperation = "Custom diving outfit saved without changing equipment."
+    else
+        lastOperation = "Custom diving outfit saved for this session only."
+        Helpers.debugLog("Custom diving outfit persistence failed: " .. tostring(reason))
+    end
+    Helpers.refreshDivingAppearance(character, true)
+    return true
+end
+
+function Helpers.divingModeButtonLabel(mode)
+    if mode == Helpers.DIVING_MODE_SUIT then return tr("button.diving_mode_suit") end
+    if mode == Helpers.DIVING_MODE_CUSTOM then return tr("button.diving_mode_custom") end
+    return tr("button.diving_mode_none")
+end
+
 function Helpers.applyNetworkLook(
     character,
     networkLook,
@@ -3591,6 +3966,7 @@ end
 -- stable equipment signature changes.
 function Helpers.refreshActiveLookIfNeeded(character)
     if character == nil or not reducerState.active or not Helpers.hasSavedLook() then return end
+    if Helpers.divingOverrideActive(character) then return end
     if Helpers.isMultiplayerClient() and serverSupportsCrewTargeting() and
         tonumber(sessionActiveCharacterId) ~= Helpers.characterEntityId(character) then
         return
@@ -3799,6 +4175,7 @@ end
 
 function Helpers.registerSinglePlayerCharacter(character)
     if not Helpers.singlePlayerCharacterEligible(character) then return false end
+    Helpers.trackDivingCharacter(character)
     local runtimeKey = characterStateKey(character)
     local profileKey = Helpers.singlePlayerCharacterProfileKey(character)
     if runtimeKey == nil or profileKey == nil then return false end
@@ -4863,6 +5240,28 @@ function Helpers.addButton(parent, text, action, refresh, enabled)
     return button
 end
 
+function Helpers.addButtonPair(parent, leftText, leftAction, leftEnabled, rightText, rightAction, rightEnabled)
+    local row = GUI.LayoutGroup(
+        GUI.RectTransform(Vector2(1.0, 0.08), parent.RectTransform),
+        true
+    )
+    local function add(text, action, enabled)
+        local button = GUI.Button(GUI.RectTransform(Vector2(0.5, 1.0), row.RectTransform), text)
+        if enabled == false then pcall(function() button.Enabled = false end) end
+        button.OnClicked = function()
+            local ok, reason = pcall(action)
+            if not ok then
+                lastOperation = "Wardrobe action failed; see WardrobeClient.log."
+                Helpers.debugLog("Wardrobe button action failed: " .. tostring(reason))
+            end
+            windowNeedsRefresh = true
+            return true
+        end
+        return button
+    end
+    return add(leftText, leftAction, leftEnabled), add(rightText, rightAction, rightEnabled)
+end
+
 function Helpers.createPanelList(frame)
     local listBox = GUI.ListBox(
         GUI.RectTransform(Vector2(0.94, 0.94), frame.RectTransform, GUI.Anchor.Center)
@@ -4887,6 +5286,7 @@ function Helpers.clientViewModelSnapshot(character, overrideState)
         (Core.validateAttachmentVisibility(reducerView.look.attachmentVisibility, reducerView.look.hideHair == true) or
             Core.attachmentVisibilityFromLegacy(reducerView.look.hideHair == true)) or
         Core.attachmentVisibilityFromLegacy(false)
+    local divingProfile = Helpers.divingProfile(character)
     return {
         phase = reducerView.phase,
         look = lookCopy,
@@ -4912,6 +5312,8 @@ function Helpers.clientViewModelSnapshot(character, overrideState)
         transferEnabled = transferToUnconfiguredCharacter == true,
         useFashionMovementAnimations = currentMovementAnimationSource(),
         useFashionFootstepSounds = currentFootstepSoundSource(),
+        divingMode = divingProfile.mode,
+        divingOutfitCaptured = divingProfile.captured == true,
         overrideLabel = tostring(overrideState.label),
         overrideDetails = overrideState.details
     }
@@ -5086,6 +5488,25 @@ buildWindow = function()
         Helpers.addButton(list, tr("button.save"), function() Helpers.saveFashionAndUnequip() end, true, view.canSave)
         Helpers.addButton(list, tr("button.apply"), function() Helpers.applyFashionToCurrentEquipment(false) end, true, view.canApply)
         Helpers.addButton(list, tr("button.clear"), function() Helpers.clearActiveLook() end, true, view.canClear)
+        if view.divingMode == Helpers.DIVING_MODE_CUSTOM then
+            Helpers.addButtonPair(
+                list,
+                tr("button.save_diving_outfit"),
+                function() Helpers.saveCustomDivingLook() end,
+                overrideState.ready and not view.busy,
+                Helpers.divingModeButtonLabel(view.divingMode),
+                function() Helpers.cycleDivingMode() end,
+                not view.busy
+            )
+        else
+            Helpers.addButton(
+                list,
+                Helpers.divingModeButtonLabel(view.divingMode),
+                function() Helpers.cycleDivingMode() end,
+                true,
+                not view.busy
+            )
+        end
         Helpers.addButton(list, tr("button.attachment_layers"), function()
             attachmentPanelOpen = true
         end, true, view.canSetAttachmentVisibility)
@@ -5307,6 +5728,10 @@ end
 
 function Helpers.resetSavedLookForNewSession()
     Helpers.clearAllVisualOverrides()
+    Helpers.divingProfilesByKey = {}
+    Helpers.divingRuntimeByCharacterKey = {}
+    Helpers.divingTrackedCharacters = {}
+    Helpers.nextDivingPollTick = 0
     selectedSinglePlayerCharacterKey = nil
     lastCharacter = nil
     windowNeedsRefresh = true
@@ -5335,6 +5760,9 @@ function Helpers.rebindCurrentLookForReplacedSession()
     local preservedLook = Core.copyLook(reducerState.look)
     local preservedAutoApply = reducerState.autoApply == true and Core.hasLook(preservedLook)
     Helpers.clearAllVisualOverrides()
+    Helpers.divingRuntimeByCharacterKey = {}
+    Helpers.divingTrackedCharacters = {}
+    Helpers.nextDivingPollTick = 0
     lastCharacter = nil
     lastEquipmentSignature = nil
     lastServerAutoApplySignature = nil
@@ -5469,6 +5897,7 @@ Hook.Add("think", "barowardrobeswitcher.panel", function()
     else
         Helpers.applyPendingRoundStartNetworkLook(character)
         Helpers.autoApplySavedLookIfNeeded(character)
+        Helpers.updateDivingAppearances(false)
         Helpers.refreshActiveLookIfNeeded(character)
     end
 
@@ -5615,6 +6044,9 @@ Hook.Add("roundEnd", "barowardrobeswitcher.cleanup", function()
     lastServerAutoApplySignature = nil
     lastEquipmentSignature = nil
     Helpers.clearAllVisualOverrides()
+    Helpers.divingRuntimeByCharacterKey = {}
+    Helpers.divingTrackedCharacters = {}
+    Helpers.nextDivingPollTick = 0
     lastCharacter = nil
     if Helpers.isMultiplayerClient() then
         characterStates = {}

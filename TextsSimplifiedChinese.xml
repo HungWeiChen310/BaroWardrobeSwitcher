@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <infotexts language="Simplified Chinese">
-  <entityname.barowardrobeswitcher>衣柜（测试版）</entityname.barowardrobeswitcher>
-  <Wardrobe_x0028_beta_x0029_.PanelKey.DisplayName>衣柜面板按键</Wardrobe_x0028_beta_x0029_.PanelKey.DisplayName>
-  <Wardrobe_x0028_beta_x0029_.PanelKey.DisplayCategory>衣柜</Wardrobe_x0028_beta_x0029_.PanelKey.DisplayCategory>
-  <Wardrobe_x0028_beta_x0029_.PanelKey.Tooltip>输入 Microsoft.Xna.Framework.Input.Keys 名称，例如 F7 或 Insert；无效名称会使用 F8。</Wardrobe_x0028_beta_x0029_.PanelKey.Tooltip>
+  <entityname.barowardrobeswitcher>Wardrobe(衣柜)</entityname.barowardrobeswitcher>
+  <Wardrobe_x0028_衣櫃_x0029__x0028_衣柜_x0029_.PanelKey.DisplayName>衣柜面板按键</Wardrobe_x0028_衣櫃_x0029__x0028_衣柜_x0029_.PanelKey.DisplayName>
+  <Wardrobe_x0028_衣櫃_x0029__x0028_衣柜_x0029_.PanelKey.DisplayCategory>衣柜</Wardrobe_x0028_衣櫃_x0029__x0028_衣柜_x0029_.PanelKey.DisplayCategory>
+  <Wardrobe_x0028_衣櫃_x0029__x0028_衣柜_x0029_.PanelKey.Tooltip>输入 Microsoft.Xna.Framework.Input.Keys 名称，例如 F7 或 Insert；无效名称会使用 F8。</Wardrobe_x0028_衣櫃_x0029__x0028_衣柜_x0029_.PanelKey.Tooltip>
   <barowardrobeswitcher.notice.open_panel>按 {key} 可打开衣柜控制面板。</barowardrobeswitcher.notice.open_panel>
   <barowardrobeswitcher.panel.title>衣柜切换器</barowardrobeswitcher.panel.title>
   <barowardrobeswitcher.panel.main_page>主页</barowardrobeswitcher.panel.main_page>
@@ -30,6 +30,10 @@
   <barowardrobeswitcher.button.save>保存当前服装</barowardrobeswitcher.button.save>
   <barowardrobeswitcher.button.apply>套用已保存外观</barowardrobeswitcher.button.apply>
   <barowardrobeswitcher.button.clear>清除外观</barowardrobeswitcher.button.clear>
+  <barowardrobeswitcher.button.diving_mode_none>潜水模式：无</barowardrobeswitcher.button.diving_mode_none>
+  <barowardrobeswitcher.button.diving_mode_suit>潜水模式：仅显示潜水服</barowardrobeswitcher.button.diving_mode_suit>
+  <barowardrobeswitcher.button.diving_mode_custom>潜水模式：自定义衣服</barowardrobeswitcher.button.diving_mode_custom>
+  <barowardrobeswitcher.button.save_diving_outfit>保存潜水用衣服</barowardrobeswitcher.button.save_diving_outfit>
   <barowardrobeswitcher.button.forget>忘记已保存外观</barowardrobeswitcher.button.forget>
   <barowardrobeswitcher.button.attachment_layers>外观图层…</barowardrobeswitcher.button.attachment_layers>
   <barowardrobeswitcher.button.animation_fashion>移动动画：时装优先</barowardrobeswitcher.button.animation_fashion>

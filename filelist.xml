@@ -1,5 +1,5 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<contentpackage name="Wardrobe(衣櫃)" modversion="0.5.14" corepackage="False" steamworkshopid="3737903001" gameversion="1.13.4.0">
+<contentpackage name="Wardrobe(衣櫃)(衣柜)" modversion="0.5.18" corepackage="False" steamworkshopid="3737903001" gameversion="1.13.4.0">
   <Text file="%ModDir%/Texts.xml" />
   <Text file="%ModDir%/TextsSimplifiedChinese.xml" />
   <Text file="%ModDir%/TextsTraditionalChinese.xml" />
@@ -11,5 +11,6 @@
   <Other file="%ModDir%/CSharp/Client/WardrobeRendering.cs" />
   <Other file="%ModDir%/CSharp/Client/WardrobeVisualOverridePlugin.cs" />
   <Other file="%ModDir%/CSharp/Client/WardrobeSinglePlayerProfiles.cs" />
+  <Other file="%ModDir%/CSharp/Client/WardrobeDivingProfiles.cs" />
   <Other file="%ModDir%/CSharp/Client/WardrobeFunctionalFashionFilters.cs" />
 </contentpackage>

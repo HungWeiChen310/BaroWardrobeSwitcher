@@ -45,6 +45,17 @@ MethodInfo clearClientLook = RequireMethod(persistence, "ClearClientLook");
 MethodInfo loadClientLook = RequireMethod(persistence, "LoadClientLook");
 MethodInfo getClientLookPath = RequireMethod(persistence, "GetClientLookPath");
 MethodInfo getSinglePlayerProfilesPath = RequireMethod(persistence, "GetSinglePlayerProfilesPath");
+MethodInfo getDivingProfilesPath = RequireMethod(persistence, "GetDivingProfilesPath");
+MethodInfo loadDivingProfile = RequireMethod(
+    persistence,
+    "LoadDivingProfile",
+    typeof(string));
+MethodInfo saveDivingProfile = RequireMethod(
+    persistence,
+    "SaveDivingProfile",
+    typeof(string),
+    typeof(int),
+    typeof(string));
 MethodInfo getSinglePlayerTransferEnabled = RequireMethod(
     persistence,
     "GetSinglePlayerTransferEnabled");
@@ -109,6 +120,7 @@ try
     Run("atomic-clear-failure-preserves-old", TestAtomicClearFailure, failures);
     Run("single-player-transfer-default-and-round-trip", TestSinglePlayerTransfer, failures);
     Run("single-player-profile-isolation-and-delete", TestSinglePlayerProfileIsolation, failures);
+    Run("diving-profile-isolation-and-round-trip", TestDivingProfileIsolation, failures);
     Run("single-player-v1-migration-and-backup", TestSinglePlayerV1Migration, failures);
     Run("single-player-v2-migration-and-backup", TestSinglePlayerV2Migration, failures);
     Run("single-player-v3-movement-default", TestSinglePlayerV3MovementDefault, failures);
@@ -937,6 +949,49 @@ void TestSinglePlayerAtomicFailure()
         "The old single-player profile was not loadable after atomic failure.");
 }
 
+void TestDivingProfileIsolation()
+{
+    _ = NewCaseDirectory("diving-profile-isolation");
+    const string profileA = "campaign-a\ncharacter-a";
+    const string profileB = "campaign-a\ncharacter-b";
+    Assert(SaveDiving(
+            profileA,
+            2,
+            "captured=true|Head=customdivehelmet,|HeadColor=1234|OuterClothes=customdivesuit,"),
+        "Could not save a custom diving appearance profile.");
+    Assert(SaveDiving(profileB, 1, "captured=false"),
+        "Could not save a diving-suit-only profile.");
+    string loadedA = LoadDiving(profileA);
+    string loadedB = LoadDiving(profileB);
+    Assert(loadedA.Contains("mode=2", StringComparison.Ordinal) &&
+           loadedA.Contains("Head=customdivehelmet,", StringComparison.Ordinal) &&
+           loadedA.Contains("HeadColor=1234", StringComparison.Ordinal) &&
+           loadedA.Contains("OuterClothes=customdivesuit,", StringComparison.Ordinal),
+        "Custom diving appearance did not round-trip.");
+    Assert(loadedB.Contains("mode=1", StringComparison.Ordinal) &&
+           loadedB.Contains("captured=false", StringComparison.Ordinal) &&
+           !loadedB.Contains("customdivehelmet", StringComparison.Ordinal),
+        "Diving appearance profiles were not isolated.");
+
+    string path = (string?)Invoke(getDivingProfilesPath) ?? string.Empty;
+    using JsonDocument document = JsonDocument.Parse(File.ReadAllText(path, Encoding.UTF8));
+    JsonElement profilesElement = document.RootElement.GetProperty("profiles");
+    Assert(document.RootElement.GetProperty("schemaVersion").GetInt32() == 1 &&
+           profilesElement.GetArrayLength() == 2,
+        "Diving appearance persistence did not write its canonical schema.");
+    string serialized = File.ReadAllText(path, Encoding.UTF8);
+    Assert(!serialized.Contains(profileA, StringComparison.Ordinal) &&
+           !serialized.Contains(profileB, StringComparison.Ordinal) &&
+           serialized.Contains(HashKey(profileA), StringComparison.Ordinal),
+        "Diving appearance persistence exposed unhashed profile keys.");
+
+    Assert(SaveDiving(profileA, 0, "captured=false"),
+        "Could not clear a diving appearance profile.");
+    Assert(string.IsNullOrEmpty(LoadDiving(profileA)) &&
+           LoadDiving(profileB).Contains("mode=1", StringComparison.Ordinal),
+        "Clearing one diving appearance profile changed another profile.");
+}
+
 string NewCaseDirectory(string name)
 {
     string directory = Path.Combine(normalizedProbeRoot, name);
@@ -955,6 +1010,12 @@ string CurrentPath() => (string?)Invoke(getClientLookPath) ?? throw new InvalidO
 string CurrentSinglePlayerProfilesPath() =>
     (string?)Invoke(getSinglePlayerProfilesPath) ??
     throw new InvalidOperationException("No single-player profiles path returned.");
+
+bool SaveDiving(string profileKey, int mode, string encodedLook) =>
+    (bool)(Invoke(saveDivingProfile, profileKey, mode, encodedLook) ?? false);
+
+string LoadDiving(string profileKey) =>
+    (string?)Invoke(loadDivingProfile, profileKey) ?? string.Empty;
 
 bool GetSinglePlayerTransfer() =>
     (bool)(Invoke(getSinglePlayerTransferEnabled) ?? false);

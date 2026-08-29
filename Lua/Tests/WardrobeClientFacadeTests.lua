@@ -177,6 +177,8 @@ assert(TextManager.ContainsTag("barowardrobeswitcher.button.save"))
 assert(TextManager.ContainsTag("barowardrobeswitcher.button.animation_fashion"))
 assert(TextManager.ContainsTag("barowardrobeswitcher.button.animation_equipment"))
 assert(TextManager.ContainsTag("barowardrobeswitcher.button.next_page"))
+assert(TextManager.ContainsTag("barowardrobeswitcher.button.diving_mode_none"))
+assert(TextManager.ContainsTag("barowardrobeswitcher.button.save_diving_outfit"))
 assert(TextManager.ContainsTag("barowardrobeswitcher.panel.target_character"))
 assert(not TextManager.ContainsTag("barowardrobeswitcher.button.hide_hair"))
 SERVER = false
@@ -208,6 +210,8 @@ local lastSavedProfileKey = nil
 local transferEnabled = false
 local importedCampaigns = {}
 local profiles = {}
+local divingProfiles = {}
+local divingSaveCalls = 0
 local function profileStorageKey(campaignKey, characterKey)
     return tostring(campaignKey) .. "\n" .. tostring(characterKey)
 end
@@ -220,6 +224,7 @@ local persistence = {
     GetLastError = function() return "" end,
     GetClientLookPath = function() return "sessionless/ClientLook.json" end,
     GetSinglePlayerProfilesPath = function() return "campaign/SinglePlayerProfiles.json" end,
+    GetDivingProfilesPath = function() return "campaign/DivingProfiles.json" end,
     GetSinglePlayerTransferEnabled = function() return transferEnabled end,
     SetSinglePlayerTransferEnabled = function(enabled)
         transferEnabled = enabled == true
@@ -245,6 +250,14 @@ local persistence = {
     end,
     DeleteSinglePlayerProfile = function(campaignKey, characterKey)
         profiles[profileStorageKey(campaignKey, characterKey)] = nil
+        return true
+    end,
+    LoadDivingProfile = function(profileKey)
+        return divingProfiles[tostring(profileKey)] or ""
+    end,
+    SaveDivingProfile = function(profileKey, mode, encoded)
+        divingSaveCalls = divingSaveCalls + 1
+        divingProfiles[tostring(profileKey)] = "mode=" .. tostring(mode) .. "|" .. tostring(encoded)
         return true
     end,
     ClientLookFileExists = function() return true end,
@@ -308,6 +321,8 @@ local visualOverride = {
             "loading"
     end,
     GetCharacterDebugStatus = function() return "test" end,
+    HasHighPressureAffliction = function(character) return character.InPressure == true end,
+    IsDivingSuitItem = function(item) return item ~= nil and item.IsDivingSuit == true end,
     BeginFashionTransaction = function(character)
         transactionCharacter = character
         return true
@@ -333,6 +348,10 @@ local visualOverride = {
         capturedPrefabKeysByCharacterId[id] = capturedPrefabKeysByCharacterId[id] or {}
         capturedPrefabKeysByCharacterId[id][#capturedPrefabKeysByCharacterId[id] + 1] =
             tostring(identifier) .. "@" .. tostring(packedColor or "base")
+        return 1
+    end,
+    CaptureFashionItem = function(character, item)
+        capturedIdentifierByCharacterId[characterId(character)] = tostring(item.Prefab.Identifier)
         return 1
     end,
     CaptureEmptyFashion = function(character)
@@ -444,6 +463,9 @@ LuaUserData = {
         end
         if name == "Barotrauma.GameMain" then
             return gameMain
+        end
+        if name == "Barotrauma.CharacterInventory" then
+            return { AnySlot = {} }
         end
         if name == "Microsoft.Xna.Framework.Vector2" then return vector end
         if name == "Microsoft.Xna.Framework.Color" then
@@ -666,6 +688,100 @@ assert(hasVisibleText(tutorialText), "the expanded guide text did not return")
 assert(hasVisibleButton("Appearance Layers...") and hasVisibleButton("Forget Saved Look") and
        not hasVisibleButton("Movement: Fashion Priority") and not hasVisibleButton("Diagnostics"),
     "the main page did not separate appearance actions from movement and diagnostics")
+local divingModeButton = buttons["Diving mode: None"]
+assert(divingModeButton ~= nil and type(divingModeButton.OnClicked) == "function",
+    "the first page did not expose the disabled diving mode")
+
+local divingSlots = {}
+local divingEquipmentMutations = 0
+local suitItem = {
+    ID = 710,
+    IsDivingSuit = true,
+    Prefab = { Identifier = "testsuit", Name = "Test Diving Suit" },
+    SpriteColor = { PackedValue = 1001 }
+}
+local ordinaryHat = {
+    ID = 711,
+    Prefab = { Identifier = "ordinaryhat", Name = "Ordinary Hat" },
+    SpriteColor = { PackedValue = 1002 }
+}
+suitItem.Unequip = function() divingEquipmentMutations = divingEquipmentMutations + 1 end
+ordinaryHat.Unequip = function() divingEquipmentMutations = divingEquipmentMutations + 1 end
+divingSlots[InvSlotType.OuterClothes] = suitItem
+divingSlots[InvSlotType.Head] = ordinaryHat
+player.Inventory = {
+    GetItemInLimbSlot = function(slot) return divingSlots[slot] end,
+    IsInLimbSlot = function(item, slot) return divingSlots[slot] == item end
+}
+
+divingModeButton.OnClicked()
+hooks.think()
+assert(hasVisibleButton("Diving mode: Diving suit only") and divingSaveCalls == 1,
+    "the diving mode did not cycle from None to Diving suit only")
+local activationBeforeSuitPressure = activationCount
+player.CharacterHealth = { PressureAffliction = { Strength = 0 } }
+player.InPressure = true
+for _ = 1, 7 do hooks.think() end
+assert(activationCount == activationBeforeSuitPressure + 1 and
+       capturedIdentifierByCharacterId[player.ID] == "testsuit" and
+       divingSlots[InvSlotType.OuterClothes] == suitItem and
+       divingSlots[InvSlotType.Head] == ordinaryHat and
+       divingEquipmentMutations == 0,
+    "high pressure did not render only the equipped diving suit without changing equipment")
+
+buttons["Diving mode: Diving suit only"].OnClicked()
+hooks.think()
+assert(hasVisibleButton("Save Diving Outfit") and
+       hasVisibleButton("Diving mode: Custom outfit") and
+       activeCharacterIds[player.ID] ~= true,
+    "custom diving mode did not use the two-button row or restore an unset custom look")
+
+local customHat = {
+    ID = 712,
+    Prefab = { Identifier = "customdivehat", Name = "Custom Dive Hat" },
+    SpriteColor = { PackedValue = 2001 }
+}
+local customSuit = {
+    ID = 713,
+    Prefab = { Identifier = "customdivecoat", Name = "Custom Dive Coat" },
+    SpriteColor = { PackedValue = 2002 }
+}
+customHat.Unequip = function() divingEquipmentMutations = divingEquipmentMutations + 1 end
+customSuit.Unequip = function() divingEquipmentMutations = divingEquipmentMutations + 1 end
+divingSlots[InvSlotType.Head] = customHat
+divingSlots[InvSlotType.OuterClothes] = customSuit
+local activationBeforeCustomSave = activationCount
+buttons["Save Diving Outfit"].OnClicked()
+hooks.think()
+local savedCustomDiving = ""
+for _, encoded in pairs(divingProfiles) do
+    if encoded:find("customdivehat", 1, true) then savedCustomDiving = encoded end
+end
+assert(savedCustomDiving:find("customdivecoat", 1, true) ~= nil and
+       activationCount == activationBeforeCustomSave + 1 and
+       divingSlots[InvSlotType.Head] == customHat and
+       divingSlots[InvSlotType.OuterClothes] == customSuit and
+       divingEquipmentMutations == 0,
+    "custom diving outfit was not saved and applied without changing equipment")
+
+player.InPressure = false
+for _ = 1, 7 do hooks.think() end
+assert(activeCharacterIds[player.ID] ~= true,
+    "leaving high pressure did not restore the character's normal appearance")
+buttons["Diving mode: Custom outfit"].OnClicked()
+hooks.think()
+assert(hasVisibleButton("Diving mode: None"),
+    "the diving mode did not cycle from Custom outfit back to None")
+
+player.Inventory = { GetItemInLimbSlot = function() return nil end }
+activationCount = 0
+activationAttempts = 0
+prefabCaptureCount = 0
+clearAttempts = 0
+capturedIdentifierByCharacterId = {}
+capturedPrefabKeysByCharacterId = {}
+activeCharacterIds = {}
+reusableCharacters = {}
 local playerTargetButton = buttons["Wardrobe target: Player Tester"]
 assert(playerTargetButton ~= nil and type(playerTargetButton.OnClicked) == "function",
     "the main page did not expose its single-player crew selector")
@@ -682,6 +798,39 @@ hooks.think()
 assert(lastEmptyCaptureCharacterId == selectorNpc.ID and
        lastSavedProfileKey == stableCharacterProfileKey("A Target NPC"),
     "Save did not capture and persist the selected bot's own wardrobe profile")
+
+local lockedSlots = {}
+local lockedUnequipCalls = 0
+local lockedDropCalls = 0
+local lockedInventoryMoves = 0
+local lockedItem = {
+    ID = 702,
+    Name = "Locked Fashion Gear",
+    Prefab = { Identifier = "lockedfashiongear", Name = "Locked Fashion Gear" },
+    OwnInventory = { Locked = true }
+}
+lockedItem.Unequip = function() lockedUnequipCalls = lockedUnequipCalls + 1 end
+lockedItem.Drop = function(dropper)
+    assert(dropper == selectorNpc, "locked fashion gear was dropped by the wrong character")
+    lockedDropCalls = lockedDropCalls + 1
+    lockedSlots[InvSlotType.Head] = nil
+end
+lockedSlots[InvSlotType.Head] = lockedItem
+selectorNpc.Inventory = {
+    GetItemInLimbSlot = function(slot) return lockedSlots[slot] end,
+    IsInLimbSlot = function(item, slot) return lockedSlots[slot] == item end,
+    TryPutItem = function()
+        lockedInventoryMoves = lockedInventoryMoves + 1
+        lockedSlots[InvSlotType.Head] = nil
+        return true
+    end
+}
+buttons["Save Current Outfit"].OnClicked()
+hooks.think()
+assert(lockedUnequipCalls == 1 and lockedDropCalls == 1 and lockedInventoryMoves == 0 and
+       lockedSlots[InvSlotType.Head] == nil,
+    "Save must drop locked fashion gear instead of moving it into character inventory")
+
 local nextPageButton = buttons["Next Page"]
 assert(nextPageButton ~= nil and type(nextPageButton.OnClicked) == "function",
     "the main page did not expose its Next Page control")

@@ -99,7 +99,7 @@ namespace BaroWardrobeSwitcher
             }
         }
 
-        private static bool IsSealedSuit(Item item)
+        internal static bool IsSealedSuit(Item item)
         {
             if (HasTag(item, DeepDivingTag) || HasTag(item, DeepDivingLargeTag))
             {

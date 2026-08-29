@@ -645,6 +645,19 @@ Assert-Contract "cached-limb-compatibility-metadata" $all @(
     "if (!descriptor.UsesLeftBreastNoneLimbCompatibility)"
 )
 
+$pressureDetection = Get-Section $renderer `
+    "public static bool HasHighPressureAffliction(" `
+    "public static bool IsDivingSuitItem("
+Assert-Contract "high-pressure-environment-detection" $pressureDetection @(
+    "character?.InPressure == true"
+)
+if ($pressureDetection.Contains("CharacterHealth?.PressureAffliction")) {
+    throw "Diving appearance must use the pressure environment flag, not pressure injury strength."
+}
+Assert-Contract "high-pressure-api-compatibility" $compatibilityProbe @(
+    'RequirePublicProperty("Character.InPressure", character, "InPressure", typeof(bool));'
+)
+
 if ($policy.Contains("ShouldCaptureStatusSound(") -or $policy.Contains("IsFunctionalEquipmentAlarm(")) {
     throw "Pure status-effect forwarding wrappers should stay removed."
 }

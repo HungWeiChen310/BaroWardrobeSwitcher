@@ -123,6 +123,9 @@ LuaUserData = {
         if name == "Barotrauma.GameMain" then
             return { GameSession = gameSession }
         end
+        if name == "Barotrauma.CharacterInventory" then
+            return { AnySlot = {} }
+        end
         if name:find("^System%.") then
             requestedSystemStatic = true
             error("system static userdata is unavailable")
@@ -849,6 +852,50 @@ assert(not stuckSave.accepted and stuckSave.reason == "unequip_failed" and stuck
     "a failed authoritative unequip must reject Save without advancing revision")
 assert(stuckSlots[InvSlotType.Head] == stuckItem,
     "a failed authoritative unequip must preserve the equipped item")
+
+local lockedDropCalls = 0
+local lockedInventoryMoves = 0
+local lockedItem = {
+    Prefab = fakeHelmetPrefab,
+    HasTag = function(tag) return tag == "lock" end,
+    Unequip = function() end,
+    Equip = function() end
+}
+local lockedSlots = { [InvSlotType.Head] = lockedItem }
+local lockedClient = {
+    Connection = {},
+    Character = {
+        ID = 79,
+        Name = "Locked",
+        Inventory = {
+            GetItemInLimbSlot = function(slot) return lockedSlots[slot] end,
+            IsInLimbSlot = function(item, slot) return lockedSlots[slot] == item end,
+            TryPutItem = function()
+                lockedInventoryMoves = lockedInventoryMoves + 1
+                lockedSlots[InvSlotType.Head] = nil
+                return true
+            end
+        }
+    }
+}
+lockedItem.Drop = function(dropper)
+    assert(dropper == lockedClient.Character, "locked fashion gear was dropped by the wrong character")
+    lockedDropCalls = lockedDropCalls + 1
+    lockedSlots[InvSlotType.Head] = nil
+end
+connectedClients[#connectedClients + 1] = lockedClient
+local lockedHello = newBuffer()
+assert(Core.writeClientHello(lockedHello, "locked-session"))
+Networking.handlers[Core.NET.V2_HELLO](lockedHello, lockedClient)
+local lockedSave = sendCommand({
+    clientSessionId = "locked-session",
+    operationId = "locked-save",
+    baseRevision = 0,
+    kind = Core.COMMAND.Save
+}, lockedClient)
+assert(lockedSave.accepted and lockedSave.revision == 1 and lockedDropCalls == 1 and
+       lockedInventoryMoves == 0 and lockedSlots[InvSlotType.Head] == nil,
+    "authoritative Save must drop lock-tagged fashion gear instead of moving it into inventory")
 
 local stableAccount = { StringRepresentation = "stable-account" }
 local stableClient = {

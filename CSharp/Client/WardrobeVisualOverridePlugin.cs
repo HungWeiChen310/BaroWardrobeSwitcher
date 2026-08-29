@@ -1789,6 +1789,16 @@ namespace BaroWardrobeSwitcher
             return true;
         }
 
+        public static bool HasHighPressureAffliction(Character character)
+        {
+            return character?.InPressure == true;
+        }
+
+        public static bool IsDivingSuitItem(Item item)
+        {
+            return FashionEffectPolicy.IsSealedSuit(item);
+        }
+
         public static bool SetAttachmentVisibility(
             Character character,
             int forceHideMask,

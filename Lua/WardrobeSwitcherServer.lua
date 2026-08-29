@@ -1030,6 +1030,18 @@ local function isIgnoredItem(item)
     return identifier == "genesplicer" or identifier == "advancedgenesplicer"
 end
 
+local function isLockedWardrobeItem(item)
+    if item == nil then return false end
+    local ok, locked = pcall(function()
+        return item.OwnInventory ~= nil and item.OwnInventory.Locked == true
+    end)
+    if ok and locked == true then return true end
+    ok, locked = pcall(function()
+        return item.HasTag("lock") or item.HasTag("locked")
+    end)
+    return ok and locked == true
+end
+
 local function getSlotItem(character, slot)
     if character == nil or character.Inventory == nil then return nil end
     local ok, item = pcall(function() return character.Inventory.GetItemInLimbSlot(slot) end)
@@ -1057,6 +1069,10 @@ local function unequipItem(character, item)
     local function clear() return not isInAnyWardrobeSlot(character, item) end
     pcall(function() item.Unequip(character) end)
     if clear() then return true end
+    if isLockedWardrobeItem(item) then
+        pcall(function() item.Drop(character) end)
+        return clear()
+    end
     if character.Inventory ~= nil and CharacterInventory ~= nil then
         local ok, moved = pcall(function()
             return character.Inventory.TryPutItem(item, character, CharacterInventory.AnySlot, true, true)
