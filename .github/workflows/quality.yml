@@ -11,6 +11,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Verify metadata and source-only package
         run: python3 scripts/verify_package.py
+      - name: Exercise source-package failure cases
+        run: python3 scripts/test_package.py
       - name: Run renderer crash characterization contracts
         shell: pwsh
         run: ./scripts/Test-RendererContracts.ps1

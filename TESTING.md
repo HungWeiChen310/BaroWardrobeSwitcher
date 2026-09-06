@@ -1,6 +1,6 @@
 # Release test matrix
 
-This checklist is the release gate for v0.5.10. Automated checks must pass before packaging, and the custom-color matrix below must be completed in game before release. The pinned 1.13.4.0 compatibility target retains its previously verified renderer and multiplayer matrix.
+This checklist is the release gate for v0.5.13. Automated checks must pass before packaging, and the custom-color matrix below must be completed in game before release. This candidate is not in-game verified; previous releases do not certify the changes in this version. See QUALITY_REPORT.md for executed checks.
 
 ## Automated checks
 
@@ -33,9 +33,9 @@ Expected:
 
 Run single-player, Windows host, and Linux dedicated server with at least two clients.
 
-- v0.5.10 client ↔ v0.5.10 server negotiates protocol version 5.
-- v0.5.10 client ↔ older server falls back to v1 after five seconds and displays prefab base colors.
-- Older client ↔ v0.5.10 server continues through the six v1 message names and displays prefab base colors.
+- v0.5.13 client ↔ v0.5.13 server negotiates protocol version 5.
+- v0.5.13 client ↔ older server falls back to v1 after five seconds and displays prefab base colors.
+- Older client ↔ v0.5.13 server continues through the six v1 message names and displays prefab base colors.
 - Duplicate operation IDs return the original result without applying twice.
 - Out-of-order state is ignored; clear/forget followed by a late stale apply stays cleared.
 - Join, reconnect, round start/end, death/respawn, character replacement, and campaign/server changes preserve the documented intent.
@@ -109,3 +109,13 @@ After isolated tests pass, repeat the renderer regression with:
 5. Performance Fix and ItemOptimizer together.
 
 Record exact mod versions with the result. A failure must be reproducible in isolation before changing the compatibility adapter.
+
+## 0.5.13 regression additions
+
+- The persistence probe executes native renderer mask/cache restoration, nested ownership, original-exception propagation, capture abort/dispose and functional-alarm classification without a graphics device. Actual GPU drawing remains a separate manual gate.
+- Diving files: malformed/oversized JSON, future schema, 512-profile capacity, read diagnostics and failed atomic clear/save preserve the appropriate original bytes. Client load failures retry; failed writes visibly remain session-only.
+- Multiplayer: a PvP opponent is rejected even when IsOnPlayerTeam=true; recheck after team/control changes and reject stale UI callbacks rather than applying to self.
+- Diving: normal Apply during pressure captures the normal saved payload, then resumes the temporary overlay; Clear during pressure stays cleared after pressure exit. Failed activation cleans up and backs off. Repeat on death, replacement and unselected NPCs.
+- Input: chat, console, menus and focused text fields do not trigger the wardrobe shortcut. Check narrow resolutions/UI scales and all three languages in game.
+- Run `python scripts/test_package.py` to verify candidate metadata, configuration coverage, binary/runtime-data exclusion, traversal rejection and manifest tamper detection.
+- For an isolated MoonSharp workload, set `WARDROBE_BENCHMARK_ONLY=1` and run the facade test through LuaSyntaxCheck. Set `WARDROBE_CLIENT_SOURCE` to a saved upstream Lua client to compare the same 600 stable custom-diving ticks. Report timing and managed allocation separately from game FPS.

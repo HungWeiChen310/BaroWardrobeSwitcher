@@ -121,6 +121,8 @@ try
     Run("single-player-transfer-default-and-round-trip", TestSinglePlayerTransfer, failures);
     Run("single-player-profile-isolation-and-delete", TestSinglePlayerProfileIsolation, failures);
     Run("diving-profile-isolation-and-round-trip", TestDivingProfileIsolation, failures);
+    Run("diving-profile-failures-and-limits", TestDivingProfileFailures, failures);
+    Run("native-renderer-transactions-and-alarm-policy", () => RendererChecks.Run(modAssembly), failures);
     Run("single-player-v1-migration-and-backup", TestSinglePlayerV1Migration, failures);
     Run("single-player-v2-migration-and-backup", TestSinglePlayerV2Migration, failures);
     Run("single-player-v3-movement-default", TestSinglePlayerV3MovementDefault, failures);
@@ -204,7 +206,7 @@ void TestPrivateFileLog()
 void TestDiagnosticContract()
 {
     _ = NewCaseDirectory("diagnostic-contract");
-    Assert(string.Equals((string?)Invoke(getVersion), "0.5.10", StringComparison.Ordinal),
+    Assert(string.Equals((string?)Invoke(getVersion), "0.5.13", StringComparison.Ordinal),
         "WardrobePersistence did not report the current plugin version.");
 
     AppContext.SetData(FailurePointKey, "BeforeReplace");
@@ -990,6 +992,54 @@ void TestDivingProfileIsolation()
     Assert(string.IsNullOrEmpty(LoadDiving(profileA)) &&
            LoadDiving(profileB).Contains("mode=1", StringComparison.Ordinal),
         "Clearing one diving appearance profile changed another profile.");
+}
+
+void TestDivingProfileFailures()
+{
+    string directory = NewCaseDirectory("diving-failures");
+    string path = (string?)Invoke(getDivingProfilesPath) ?? throw new InvalidOperationException();
+    Assert(SaveDiving("first", 2, "captured=true|Head=helmet,|HeadColor=1234"), "Could not seed diving profile.");
+    byte[] original = File.ReadAllBytes(path);
+    foreach (int mode in new[] { -1, 3 })
+    {
+        Assert(!SaveDiving("first", mode, "captured=false"), "Invalid diving mode was accepted.");
+        Assert(File.ReadAllBytes(path).SequenceEqual(original), "Invalid mode changed the existing file.");
+    }
+    AppContext.SetData(FailurePointKey, "BeforeReplace");
+    Assert(!SaveDiving("first", 0, "captured=false"), "Injected diving clear failure succeeded.");
+    Assert(File.ReadAllBytes(path).SequenceEqual(original), "Failed diving clear changed the existing file.");
+    Assert(!SaveDiving("second", 1, "captured=false"), "Injected diving save failure succeeded.");
+    Assert(File.ReadAllBytes(path).SequenceEqual(original), "Failed diving save changed the existing file.");
+    AppContext.SetData(FailurePointKey, null);
+
+    const string corrupt = "{truncated";
+    File.WriteAllText(path, corrupt);
+    Assert(LoadDiving("first") == string.Empty && !string.IsNullOrEmpty((string?)Invoke(getLastError)),
+        "Corruption was silently reported as a missing diving profile.");
+    string quarantine = Directory.GetFiles(directory, "DivingProfiles.json.*.corrupt").Single();
+    Assert(File.ReadAllText(quarantine) == corrupt && !File.Exists(path), "Diving quarantine lost the original bytes.");
+    Assert(LoadDiving("first") == string.Empty && string.IsNullOrEmpty((string?)Invoke(getLastError)),
+        "A genuinely absent diving profile did not reset the diagnostic.");
+
+    const string future = "{\"schemaVersion\":2,\"profiles\":[]}";
+    File.WriteAllText(path, future);
+    Assert(!SaveDiving("first", 1, "captured=false") && File.ReadAllText(path) == future,
+        "Saving overwrote a future diving schema.");
+
+    using JsonDocument seed = JsonDocument.Parse(original);
+    string template = seed.RootElement.GetProperty("profiles")[0].GetRawText();
+    string oldHash = HashKey("first");
+    string[] full = Enumerable.Range(0, 512)
+        .Select(i => template.Replace(oldHash, HashKey("profile-" + i), StringComparison.Ordinal)).ToArray();
+    File.WriteAllText(path, "{\"schemaVersion\":1,\"profiles\":[" + string.Join(",", full) + "]}");
+    byte[] atCapacity = File.ReadAllBytes(path);
+    Assert(!SaveDiving("overflow", 1, "captured=false") && File.ReadAllBytes(path).SequenceEqual(atCapacity),
+        "The 513th diving profile was accepted or destroyed existing profiles.");
+    Assert(SaveDiving("profile-0", 1, "captured=false"), "Existing profile could not be updated at capacity.");
+
+    File.WriteAllText(path, new string(' ', 4 * 1024 * 1024 + 1));
+    Assert(LoadDiving("first") == string.Empty && !string.IsNullOrEmpty((string?)Invoke(getLastError)) && !File.Exists(path),
+        "Oversized diving document was not rejected and quarantined.");
 }
 
 string NewCaseDirectory(string name)

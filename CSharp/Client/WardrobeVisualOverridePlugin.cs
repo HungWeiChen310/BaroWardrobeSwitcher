@@ -105,7 +105,7 @@ namespace BaroWardrobeSwitcher
 
     public static partial class WardrobePersistence
     {
-        public const string Version = "0.5.10";
+        public const string Version = "0.5.13";
         private const int PersistenceVersion = 5;
         private const string ModFolderName = "BaroWardrobeSwitcher";
         private const string ClientLookFileName = "ClientLook.json";
@@ -1091,7 +1091,7 @@ namespace BaroWardrobeSwitcher
     public static class VisualOverride
     {
 
-        public const string Version = "0.5.10";
+        public const string Version = "0.5.13";
         private const string DefaultPanelKeyName = "F8";
         private static ISettingBase<string> panelKeySetting;
 
@@ -1792,6 +1792,11 @@ namespace BaroWardrobeSwitcher
         public static bool HasHighPressureAffliction(Character character)
         {
             return character?.InPressure == true;
+        }
+
+        public static bool IsPanelInputBlocked()
+        {
+            return GUI.InputBlockingMenuOpen || GUI.KeyboardDispatcher?.Subscriber != null;
         }
 
         public static bool IsDivingSuitItem(Item item)
@@ -3444,7 +3449,7 @@ namespace BaroWardrobeSwitcher
 
         private static void RefreshWearables(Character character)
         {
-            if (character == null) { return; }
+            if (character == null || character.Removed) { return; }
             try
             {
                 OnWearablesChangedMethod?.Invoke(character, null);

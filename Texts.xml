@@ -92,4 +92,9 @@
   <barowardrobeswitcher.status.profile_collision>ambiguous identity; automatic restore disabled</barowardrobeswitcher.status.profile_collision>
   <barowardrobeswitcher.status.saved_cleared>Saved look cleared.</barowardrobeswitcher.status.saved_cleared>
   <barowardrobeswitcher.status.none>none</barowardrobeswitcher.status.none>
+  <barowardrobeswitcher.status.diving_saved>Custom diving outfit saved without changing equipment.</barowardrobeswitcher.status.diving_saved>
+  <barowardrobeswitcher.status.diving_session_only>Custom diving outfit saved for this session only.</barowardrobeswitcher.status.diving_session_only>
+  <barowardrobeswitcher.status.diving_mode_saved>Diving mode saved.</barowardrobeswitcher.status.diving_mode_saved>
+  <barowardrobeswitcher.status.diving_mode_session_only>Diving mode changed for this session only.</barowardrobeswitcher.status.diving_mode_session_only>
+  <barowardrobeswitcher.status.diving_load_failed>Diving profile could not be loaded; retrying.</barowardrobeswitcher.status.diving_load_failed>
 </infotexts>

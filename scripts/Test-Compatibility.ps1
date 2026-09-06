@@ -12,7 +12,7 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $project = Join-Path $root "tools/CompatibilityProbe/CompatibilityProbe.csproj"
 
-$arguments = @($BarotraumaInstallDir, $LuaCsPublicizedDir)
+$arguments = @($BarotraumaInstallDir, $LuaCsPublicizedDir, "--metadata", (Join-Path $root "version.json"))
 if ($RequireOptional) { $arguments += "--require-optional" }
 
 & dotnet run --project $project -c Release -- @arguments

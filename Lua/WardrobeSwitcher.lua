@@ -106,6 +106,11 @@ local statusKeys = {
     ["Saved look needs to be applied again."] = "status.apply_again",
     ["Controlled character changed. Save a new outfit for this character."] = "status.character_changed",
     ["Selected crew member is no longer available."] = "status.target_unavailable",
+    ["Custom diving outfit saved without changing equipment."] = "status.diving_saved",
+    ["Custom diving outfit saved for this session only."] = "status.diving_session_only",
+    ["Diving mode saved."] = "status.diving_mode_saved",
+    ["Diving mode changed for this session only."] = "status.diving_mode_session_only",
+    ["Diving profile could not be loaded; retrying."] = "status.diving_load_failed",
     ["Saved look cleared."] = "status.saved_cleared"
 }
 
@@ -180,6 +185,7 @@ Helpers.DIVING_MODE_NONE = 0
 Helpers.DIVING_MODE_SUIT = 1
 Helpers.DIVING_MODE_CUSTOM = 2
 Helpers.divingProfilesByKey = {}
+Helpers.divingStorageKeysByCharacter = {}
 Helpers.divingRuntimeByCharacterKey = {}
 Helpers.divingTrackedCharacters = {}
 Helpers.nextDivingPollTick = 0
@@ -1510,11 +1516,17 @@ end
 function Helpers.divingProfileStorageKey(character)
     if character == nil then return nil, false end
     if isSinglePlayerClient() then
+        local cached = Helpers.divingStorageKeysByCharacter[character]
+        if cached ~= nil and not singlePlayerAmbiguousFingerprints[cached.fingerprint] then
+            return cached.key, true
+        end
         local campaignKey = Helpers.currentSinglePlayerCampaignKey()
         local profileKey = Helpers.singlePlayerCharacterProfileKey(character)
         if campaignKey ~= nil and profileKey ~= nil and
             not singlePlayerAmbiguousFingerprints[profileKey] then
-            return "single-player\n" .. campaignKey .. "\n" .. profileKey, true
+            local key = "single-player\n" .. campaignKey .. "\n" .. profileKey
+            Helpers.divingStorageKeysByCharacter[character] = { key = key, fingerprint = profileKey }
+            return key, true
         end
     elseif Helpers.isMultiplayerClient() and character == Helpers.actualControlledCharacter() then
         return "multiplayer-client", true
@@ -1611,19 +1623,26 @@ function Helpers.divingProfile(character)
     if persistable and not profile.loaded and globalTick >= (profile.nextLoadTick or 0) then
         profile.nextLoadTick = globalTick + BRIDGE_RETRY_TICKS
         local persistence = ensureWardrobePersistence()
-        local ok, line = pcall(function()
-            return persistence ~= nil and persistence.LoadDivingProfile(key) or nil
+        local ok, line, loadError = pcall(function()
+            if persistence == nil then return nil end
+            local result = persistence.LoadDivingProfile(key)
+            return result, persistence.GetLastError()
         end)
-        if ok and line ~= nil then
+        if ok and line ~= nil and (loadError == nil or tostring(loadError) == "") then
             local restored = Helpers.parseDivingProfileLine(line)
             if restored ~= nil then
                 profile = restored
                 Helpers.divingProfilesByKey[key] = profile
-            else
+            elseif tostring(line) == "" then
                 profile.loaded = true
+            else
+                lastOperation = "Diving profile could not be loaded; retrying."
+                windowNeedsRefresh = true
             end
-        elseif not ok then
-            Helpers.debugLog("Diving appearance profile load failed: " .. tostring(line))
+        elseif not ok or (loadError ~= nil and tostring(loadError) ~= "") then
+            lastOperation = "Diving profile could not be loaded; retrying."
+            windowNeedsRefresh = true
+            Helpers.debugLog("Diving appearance profile load failed: " .. tostring(loadError or line))
         end
     end
     return profile
@@ -2267,6 +2286,7 @@ function Helpers.tryClearVisualOverride(character)
     local ok, reason = pcall(function()
         VisualOverride.ClearCharacter(character)
     end)
+    if ok then Helpers.invalidateDivingAppearance(character, true) end
     return ok, ok and nil or tostring(reason)
 end
 
@@ -2286,6 +2306,9 @@ end
 
 function Helpers.tryRestoreItemVisuals(character)
     if Helpers.ensureVisualOverride() == nil then return true end
+    if character ~= nil and Helpers.divingOverrideActive(character) then
+        return Helpers.tryClearVisualOverride(character)
+    end
     if character ~= nil then
         local ok, reason = pcall(function()
             VisualOverride.RestoreCharacterItemVisuals(character)
@@ -2487,6 +2510,7 @@ function Helpers.activateFashionVisual(character)
 end
 
 function Helpers.canReuseCapturedFashion(character)
+    if Helpers.divingOverrideActive(character) then return false end
     if Helpers.ensureVisualOverride() == nil or character == nil then return false end
     local ok, result = pcall(function()
         return VisualOverride.CanReuseCapturedFashion(character)
@@ -3238,20 +3262,36 @@ function Helpers.applyCapturedFashionToCharacterEquipment(
 
     local activated = Helpers.activateFashionVisual(character)
     if not activated then return false, visualItems, "renderer activation failed" end
+    Helpers.invalidateDivingAppearance(character, false)
     return true, visualItems, nil
+end
+
+function Helpers.invalidateDivingAppearance(character, cleared)
+    local key = characterStateKey(character)
+    local runtime = key ~= nil and Helpers.divingRuntimeByCharacterKey[key] or nil
+    if runtime == nil or runtime.character ~= character then return end
+    runtime.signature = nil
+    runtime.nextRetryTick = 0
+    if cleared then runtime.active = false end
 end
 
 function Helpers.trackDivingCharacter(character)
     local key = characterStateKey(character)
-    if key ~= nil then Helpers.divingTrackedCharacters[key] = character end
+    if key == nil then return end
+    local previous = Helpers.divingTrackedCharacters[key]
+    if previous ~= nil and previous ~= character then
+        Helpers.tryClearVisualOverride(previous)
+        Helpers.divingStorageKeysByCharacter[previous] = nil
+    end
+    Helpers.divingTrackedCharacters[key] = character
 end
 
 function Helpers.divingRuntime(character)
     local key = characterStateKey(character)
     if key == nil then return nil end
     local runtime = Helpers.divingRuntimeByCharacterKey[key]
-    if runtime == nil then
-        runtime = { active = false, signature = nil }
+    if runtime == nil or runtime.character ~= character then
+        runtime = { character = character, active = false, signature = nil, nextRetryTick = 0 }
         Helpers.divingRuntimeByCharacterKey[key] = runtime
     end
     return runtime
@@ -3326,13 +3366,15 @@ function Helpers.restoreBaseAppearanceAfterDiving(character, runtime)
 end
 
 function Helpers.refreshDivingAppearance(character, force)
-    if character == nil then return false end
+    if character == nil or Helpers.userDataMember(character, "Removed") == true then return false end
     Helpers.trackDivingCharacter(character)
     local profile = Helpers.divingProfile(character)
     local runtime = Helpers.divingRuntime(character)
     if runtime == nil then return false end
+    if not force and globalTick < runtime.nextRetryTick then return false end
 
-    local pressure = profile.mode ~= Helpers.DIVING_MODE_NONE and
+    local pressure = Helpers.userDataMember(character, "IsDead") ~= true and
+        profile.mode ~= Helpers.DIVING_MODE_NONE and
         Helpers.hasHighPressureAffliction(character)
     local look = nil
     if pressure and profile.mode == Helpers.DIVING_MODE_SUIT then
@@ -3341,11 +3383,20 @@ function Helpers.refreshDivingAppearance(character, force)
         look = profile.look
     end
     if look == nil then
-        return Helpers.restoreBaseAppearanceAfterDiving(character, runtime)
+        local restored = Helpers.restoreBaseAppearanceAfterDiving(character, runtime)
+        runtime.nextRetryTick = restored and 0 or globalTick + BRIDGE_RETRY_TICKS
+        return restored
     end
 
+    local lookSignature
+    if profile.mode == Helpers.DIVING_MODE_CUSTOM then
+        profile.lookSignature = profile.lookSignature or lookDataSignature(look, true)
+        lookSignature = profile.lookSignature
+    else
+        lookSignature = lookDataSignature(look, true)
+    end
     local signature = tostring(profile.mode) .. "|" ..
-        lookDataSignature(look, true) .. "|" .. Helpers.equipmentSignature(character)
+        lookSignature .. "|" .. Helpers.equipmentSignature(character)
     if not force and runtime.active and runtime.signature == signature then return true end
 
     local applied, _, reason = Helpers.applyCapturedFashionToCharacterEquipment(
@@ -3359,11 +3410,16 @@ function Helpers.refreshDivingAppearance(character, force)
     if applied then
         runtime.active = true
         runtime.signature = signature
+        runtime.nextRetryTick = 0
         if character == controlled() then lastEquipmentSignature = nil end
         return true
     end
     Helpers.debugLog("Diving appearance could not be applied: " .. tostring(reason))
+    -- Capture may have committed before activation failed. Never let that
+    -- temporary payload be reused by a later normal Apply.
+    runtime.active = true
     Helpers.restoreBaseAppearanceAfterDiving(character, runtime)
+    runtime.nextRetryTick = globalTick + BRIDGE_RETRY_TICKS
     return false
 end
 
@@ -3374,10 +3430,20 @@ function Helpers.updateDivingAppearances(force)
     Helpers.trackDivingCharacter(controlled())
     for key, character in pairs(Helpers.divingTrackedCharacters) do
         if character == nil or Helpers.userDataMember(character, "Removed") == true then
+            if character ~= nil then
+                Helpers.tryClearVisualOverride(character)
+                Helpers.divingStorageKeysByCharacter[character] = nil
+            end
             Helpers.divingTrackedCharacters[key] = nil
             Helpers.divingRuntimeByCharacterKey[key] = nil
         else
             Helpers.refreshDivingAppearance(character, force == true)
+            local profileKey = Helpers.divingProfileStorageKey(character)
+            local profile = profileKey ~= nil and Helpers.divingProfilesByKey[profileKey] or nil
+            if profile ~= nil and profile.loaded and profile.mode == Helpers.DIVING_MODE_NONE and
+                not Helpers.divingOverrideActive(character) then
+                Helpers.divingTrackedCharacters[key] = nil
+            end
         end
     end
 end
@@ -3388,7 +3454,9 @@ function Helpers.cycleDivingMode()
     local profile = Helpers.divingProfile(character)
     profile.mode = (tonumber(profile.mode) or Helpers.DIVING_MODE_NONE) + 1
     if profile.mode > Helpers.DIVING_MODE_CUSTOM then profile.mode = Helpers.DIVING_MODE_NONE end
+    profile.loaded = true -- A delayed disk retry must not overwrite explicit user intent.
     local saved, reason = Helpers.persistDivingProfile(character, profile)
+    lastOperation = saved and "Diving mode saved." or "Diving mode changed for this session only."
     if not saved then
         Helpers.debugLog("Diving appearance mode is session-only: " .. tostring(reason))
     end
@@ -3402,7 +3470,9 @@ function Helpers.saveCustomDivingLook()
     local profile = Helpers.divingProfile(character)
     profile.mode = Helpers.DIVING_MODE_CUSTOM
     profile.look = Helpers.visualSnapshot(character)
+    profile.lookSignature = nil
     profile.captured = true
+    profile.loaded = true
     local saved, reason = Helpers.persistDivingProfile(character, profile)
     if saved then
         lastOperation = "Custom diving outfit saved without changing equipment."
@@ -4272,6 +4342,17 @@ function Helpers.belongsToLocalWardrobeState(characterId)
     return tonumber(sessionActiveCharacterId) == characterId
 end
 
+function Helpers.isFriendlyWardrobeBot(character, actual)
+    if character == nil or actual == nil or
+        Helpers.userDataMember(character, "IsHuman") ~= true or
+        Helpers.userDataMember(character, "IsOnPlayerTeam") ~= true or
+        Helpers.userDataMember(character, "IsBot") ~= true or
+        Helpers.userDataMember(character, "IsDead") == true or
+        Helpers.userDataMember(character, "Removed") == true then return false end
+    local team = Helpers.userDataMember(actual, "TeamID")
+    return team ~= nil and Helpers.userDataMember(character, "TeamID") == team
+end
+
 function Helpers.singlePlayerSelectableCharacters()
     if selectableCharactersCache ~= nil and globalTick < selectableCharactersCacheTick then
         return selectableCharactersCache
@@ -4295,11 +4376,7 @@ function Helpers.singlePlayerSelectableCharacters()
     for _, character in ipairs(Helpers.singlePlayerCharactersSnapshot()) do
         local key = characterStateKey(character)
         if character ~= actual and key ~= nil and not seen[key] and
-            Helpers.userDataMember(character, "IsHuman") == true and
-            Helpers.userDataMember(character, "IsOnPlayerTeam") == true and
-            Helpers.userDataMember(character, "IsBot") == true and
-            Helpers.userDataMember(character, "IsDead") ~= true and
-            Helpers.userDataMember(character, "Removed") ~= true then
+            Helpers.isFriendlyWardrobeBot(character, actual) then
             seen[key] = true
             bots[#bots + 1] = character
         end
@@ -4323,8 +4400,7 @@ function Helpers.selectedSinglePlayerCharacter(actual)
     if selectedSinglePlayerCharacterKey == nil then return actual end
     for _, character in ipairs(Helpers.singlePlayerSelectableCharacters()) do
         if characterStateKey(character) == selectedSinglePlayerCharacterKey and
-            Helpers.userDataMember(character, "IsDead") ~= true and
-            Helpers.userDataMember(character, "Removed") ~= true then
+            Helpers.isFriendlyWardrobeBot(character, actual) then
             return character
         end
     end
@@ -4356,6 +4432,7 @@ end
 function Helpers.scanSinglePlayerCrewForRestores()
     if not isSinglePlayerClient() then return end
     singlePlayerRoundScanned = true
+    Helpers.divingStorageKeysByCharacter = {}
     singlePlayerFingerprintOwners = {}
     singlePlayerCharactersByRuntimeKey = {}
     singlePlayerAmbiguousFingerprints = {}
@@ -4366,6 +4443,7 @@ function Helpers.scanSinglePlayerCrewForRestores()
     end
     for _, character in ipairs(characters) do
         Helpers.queueSinglePlayerProfileRestore(character)
+        if Helpers.singlePlayerCharacterEligible(character) then Helpers.trackDivingCharacter(character) end
     end
 end
 
@@ -5215,16 +5293,21 @@ end
 
 function Helpers.addText(parent, text)
     local block = GUI.TextBlock(GUI.RectTransform(Vector2(1.0, 0.0), parent.RectTransform), text)
+    block.Wrap = true
+    block.SetTextPos()
+    block.CalculateHeightFromText()
     block.TextColor = Color.White
     return block
 end
 
 function Helpers.addButton(parent, text, action, refresh, enabled)
+    local targetAtBuild = controlled()
     local button = GUI.Button(GUI.RectTransform(Vector2(1.0, 0.08), parent.RectTransform), text)
     if enabled == false then
         pcall(function() button.Enabled = false end)
     end
     button.OnClicked = function()
+        if not Helpers.validateButtonTarget(targetAtBuild) then return false end
         local ok, reason = pcall(action)
         if not ok then
             lastOperation = "Wardrobe action failed; see WardrobeClient.log."
@@ -5241,6 +5324,7 @@ function Helpers.addButton(parent, text, action, refresh, enabled)
 end
 
 function Helpers.addButtonPair(parent, leftText, leftAction, leftEnabled, rightText, rightAction, rightEnabled)
+    local targetAtBuild = controlled()
     local row = GUI.LayoutGroup(
         GUI.RectTransform(Vector2(1.0, 0.08), parent.RectTransform),
         true
@@ -5249,6 +5333,7 @@ function Helpers.addButtonPair(parent, leftText, leftAction, leftEnabled, rightT
         local button = GUI.Button(GUI.RectTransform(Vector2(0.5, 1.0), row.RectTransform), text)
         if enabled == false then pcall(function() button.Enabled = false end) end
         button.OnClicked = function()
+            if not Helpers.validateButtonTarget(targetAtBuild) then return false end
             local ok, reason = pcall(action)
             if not ok then
                 lastOperation = "Wardrobe action failed; see WardrobeClient.log."
@@ -5260,6 +5345,14 @@ function Helpers.addButtonPair(parent, leftText, leftAction, leftEnabled, rightT
         return button
     end
     return add(leftText, leftAction, leftEnabled), add(rightText, rightAction, rightEnabled)
+end
+
+function Helpers.validateButtonTarget(targetAtBuild)
+    if targetAtBuild == controlled() then return true end
+    -- A click on an old NPC panel must never fall through to the local player.
+    lastOperation = "Selected crew member is no longer available."
+    windowNeedsRefresh = true
+    return false
 end
 
 function Helpers.createPanelList(frame)
@@ -5672,10 +5765,16 @@ end
 
 function Helpers.panelKeyHit()
     local _, key = currentPanelKey()
-    local ok, result = pcall(function()
+    local hitOk, hit = pcall(function()
         return PlayerInput.KeyHit(key)
     end)
-    return ok and result == true
+    if not hitOk or hit ~= true then return false end
+    local bridge = Helpers.ensureVisualOverride()
+    if bridge ~= nil then
+        local ok, blocked = pcall(function() return bridge.IsPanelInputBlocked() end)
+        if ok and blocked == true then return false end
+    end
+    return true
 end
 
 tryCaptureEmptyVisualOverride = function(character)
@@ -5729,6 +5828,7 @@ end
 function Helpers.resetSavedLookForNewSession()
     Helpers.clearAllVisualOverrides()
     Helpers.divingProfilesByKey = {}
+    Helpers.divingStorageKeysByCharacter = {}
     Helpers.divingRuntimeByCharacterKey = {}
     Helpers.divingTrackedCharacters = {}
     Helpers.nextDivingPollTick = 0
@@ -5879,6 +5979,7 @@ Hook.Add("think", "barowardrobeswitcher.panel", function()
     local character = controlled()
     if character == nil then
         Helpers.handleNoControlledCharacter()
+        Helpers.updateDivingAppearances(false)
         if fullPanelOpen and (window == nil or windowNeedsRefresh) then
             if attachmentPanelOpen then buildAttachmentVisibilityWindow() else buildWindow() end
         end
@@ -5979,6 +6080,7 @@ Hook.Add("character.created", "barowardrobeswitcher.profile-character-created", 
         if Helpers.singlePlayerCharacterEligible(character) then
             Helpers.registerSinglePlayerCharacter(character)
             Helpers.queueSinglePlayerProfileRestore(character)
+            Helpers.trackDivingCharacter(character)
             return
         end
         if attempts < 3 and Timer ~= nil and Timer.Wait ~= nil then
@@ -5988,12 +6090,21 @@ Hook.Add("character.created", "barowardrobeswitcher.profile-character-created", 
     attemptQueue()
 end)
 
-Hook.Add("character.removed", "barowardrobeswitcher.profile-character-removed", function()
+Hook.Add("character.removed", "barowardrobeswitcher.profile-character-removed", function(character)
     selectableCharactersCache = nil
     selectableCharactersCacheTick = -1
+    if character == nil then return end
+    Helpers.tryClearVisualOverride(character)
+    Helpers.divingStorageKeysByCharacter[character] = nil
+    local key = characterStateKey(character)
+    if key ~= nil and Helpers.divingTrackedCharacters[key] == character then
+        Helpers.divingTrackedCharacters[key] = nil
+        Helpers.divingRuntimeByCharacterKey[key] = nil
+    end
 end)
 
 Hook.Add("roundEnd", "barowardrobeswitcher.cleanup", function()
+    Helpers.divingStorageKeysByCharacter = {}
     local actualId = Helpers.characterEntityId(Helpers.actualControlledCharacter())
     local ownerId = actualId > 0 and actualId or
         tonumber(multiplayerOwnerCharacterId) or tonumber(reducerCharacterKey)

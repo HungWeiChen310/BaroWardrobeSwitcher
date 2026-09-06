@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -13,8 +14,10 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
 ERRORS: list[str] = []
-EXPECTED_CANDIDATE_DECLARED_VERSION = "1.12.7.0"
+PACKAGE_MODE = False
 
 
 def fail(message: str) -> None:
@@ -22,7 +25,11 @@ def fail(message: str) -> None:
 
 
 def mod_path(raw: str) -> Path:
-    return ROOT / raw.replace("%ModDir%/", "").replace("%ModDir%\\", "")
+    relative = raw.replace("%ModDir%/", "").replace("%ModDir%\\", "").replace("\\", "/")
+    path = (ROOT / relative).resolve()
+    if not path.is_relative_to(ROOT.resolve()):
+        raise ValueError(f"Package reference escapes mod directory: {raw}")
+    return path
 
 
 def parse_xml(path: Path) -> ET.Element:
@@ -34,20 +41,29 @@ def parse_xml(path: Path) -> ET.Element:
 
 
 def tracked_files() -> list[str]:
+    if PACKAGE_MODE:
+        return [path.relative_to(ROOT).as_posix() for path in ROOT.rglob("*") if path.is_file()]
     result = subprocess.run(
-        ["git", "ls-files"], cwd=ROOT, check=True, text=True, capture_output=True
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        cwd=ROOT, check=True, text=True, encoding="utf-8", capture_output=True
     )
-    return [line.replace("\\", "/") for line in result.stdout.splitlines()]
+    return [line.replace("\\", "/") for line in result.stdout.split("\0") if line]
 
 
 def main() -> int:
+    global ROOT, PACKAGE_MODE
+    ERRORS.clear()
     parser = argparse.ArgumentParser()
+    parser.add_argument("--package-root", type=Path, help="verify every file in a staged source package without Git")
     parser.add_argument(
         "--release",
         action="store_true",
         help="require the in-game compatibility matrix to be marked verified",
     )
     args = parser.parse_args()
+    if args.package_root:
+        ROOT = args.package_root.resolve()
+        PACKAGE_MODE = True
 
     version = json.loads((ROOT / "version.json").read_text(encoding="utf-8"))
     filelist_root = parse_xml(ROOT / "filelist.xml")
@@ -95,10 +111,13 @@ def main() -> int:
         fail("version.json compatibilityStatus must be release-candidate or verified")
     if compatibility_status == "verified" and declared_game_version != target_game_version:
         fail("verified compatibility must declare the tested target game version")
-    if compatibility_status == "release-candidate" and declared_game_version != EXPECTED_CANDIDATE_DECLARED_VERSION:
+    previous_verified_version = version.get("previousVerifiedGameVersion")
+    if compatibility_status == "release-candidate" and (
+        not previous_verified_version or declared_game_version != previous_verified_version
+    ):
         fail(
             "release-candidate must retain the previously declared game version "
-            f"{EXPECTED_CANDIDATE_DECLARED_VERSION}"
+            "recorded in previousVerifiedGameVersion"
         )
     if args.release and compatibility_status != "verified":
         fail("release verification requires the in-game matrix to be marked verified")
@@ -133,6 +152,8 @@ def main() -> int:
         raw = element.attrib.get("File") or element.attrib.get("Folder")
         if raw and not mod_path(raw).exists():
             fail(f"ModConfig.xml references missing path: {raw}")
+        if raw and element.attrib.get("File") and mod_path(raw).relative_to(ROOT).as_posix().casefold() not in listed:
+            fail(f"ModConfig.xml file is not in filelist.xml: {raw}")
 
     runtime_sources = list((ROOT / "CSharp" / "Client").rglob("*.cs"))
     runtime_sources += [
@@ -150,6 +171,12 @@ def main() -> int:
     existing_tracked = [tracked for tracked in all_tracked if (ROOT / tracked).exists()]
     pending_tracked_deletions = [tracked for tracked in all_tracked if not (ROOT / tracked).exists()]
     for tracked in existing_tracked:
+        filename = Path(tracked).name.casefold()
+        if Path(tracked).suffix.casefold() in {".dll", ".pdb", ".exe", ".tmp", ".bak", ".corrupt", ".log"} or filename in {
+            "clientlook.json", "singleplayerprofiles.json", "serverlooks.json", "divingprofiles.json",
+            "persistentlooks.txt", "persistentclientlook.txt", "serverlooks.txt",
+        }:
+            fail(f"Binary or runtime data must not be packaged: {tracked}")
         parts = {part.casefold() for part in Path(tracked).parts}
         generated_or_disabled = any(
             part in forbidden_parts
@@ -178,6 +205,20 @@ def main() -> int:
             fail("WardrobeCore.lua persistence version does not match version.json")
         if mod_version is None or mod_version.group(1) != version["modVersion"]:
             fail("WardrobeCore.lua mod version does not match version.json")
+
+    manifest_path = ROOT / "package-manifest.json"
+    if PACKAGE_MODE and manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("modVersion") != version["modVersion"]:
+            fail("Package manifest version does not match version.json")
+        expected = manifest.get("files", {})
+        actual = set(all_tracked) - {"package-manifest.json"}
+        if set(expected) != actual:
+            fail("Package manifest file set does not match package contents")
+        for relative, digest in expected.items():
+            path = mod_path(relative)
+            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                fail(f"Package hash mismatch: {relative}")
 
     if ERRORS:
         for error in ERRORS:

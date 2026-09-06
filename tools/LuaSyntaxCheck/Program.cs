@@ -47,6 +47,17 @@ foreach (string file in files)
         if (execute)
         {
             script.Options.ScriptLoader = new FileSystemScriptLoader();
+            script.Globals["MeasureWardrobeWorkload"] = DynValue.NewCallback((_, arguments) =>
+            {
+                GC.Collect();
+                long allocated = GC.GetAllocatedBytesForCurrentThread();
+                long started = System.Diagnostics.Stopwatch.GetTimestamp();
+                script.Call(arguments[1]);
+                double milliseconds = System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+                long bytes = GC.GetAllocatedBytesForCurrentThread() - allocated;
+                Console.WriteLine($"BENCH {arguments[0].String}: {milliseconds:F3} ms; {bytes} allocated bytes");
+                return DynValue.Nil;
+            });
             script.DoFile(file);
         }
         else
@@ -64,6 +75,10 @@ foreach (string file in files)
     {
         failures++;
         Console.Error.WriteLine($"FAIL {file}: {exception.DecoratedMessage}");
+        foreach (var frame in exception.CallStack ?? [])
+        {
+            Console.Error.WriteLine($"  {frame.Name}: source {frame.Location?.SourceIdx}, line {frame.Location?.FromLine}");
+        }
     }
 }
 

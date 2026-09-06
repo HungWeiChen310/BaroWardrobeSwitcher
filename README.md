@@ -1,79 +1,59 @@
 # Baro Wardrobe Switcher
 
-LuaCsForBarotrauma client-side wardrobe switcher for real equipment plus stored fashion visuals.
+Version **0.5.13** is a release candidate targeting Barotrauma **1.13.4.0** and LuaCs. It separates real equipped gear from saved cosmetic appearances. Automated checks and remaining in-game gates are recorded in [QUALITY_REPORT.md](QUALITY_REPORT.md).
 
-Version 0.5.3 targets the verified Barotrauma 1.13.4.0 and LuaCs contracts. It preserves per-item custom clothing colors across save, apply, scene changes, reconnects, and restarts using protocol 4 and look schema 3. See [ARCHITECTURE.md](ARCHITECTURE.md) for component boundaries and [COMPATIBILITY.md](COMPATIBILITY.md) for the pinned game/LuaCs contracts and release gates.
+## Setup and use
 
-## Design
+Enable LuaCs, enable C# scripting, and accept this mod's C# run prompt. LuaCs compiles `CSharp/Client` from source; no DLL is distributed. Restart Barotrauma fully after replacing source files so the loaded Lua and C# versions agree.
 
-- The currently worn equipment is the real set and keeps the real item effects.
-- A saved look persists stable item identifiers, optional per-item `SpriteColor.PackedValue` values, and user intent; initialized renderer-owned sprite descriptors are rebuilt for each target character, then the captured real items are removed from active equipment.
-- Wardrobe/fashion data never applies extra stats, buffs, resistances, oxygen, armor, or skill effects.
-- No panel is shown by default. Press `F8` to open or close the wardrobe panel. Change it in `Settings -> Mod Gameplay Settings -> Wardrobe -> Wardrobe Panel Key` using a `Microsoft.Xna.Framework.Input.Keys` name such as `F7` or `Insert`; an invalid name falls back to `F8`.
-- In single-player, each human player-team crew member has an independent saved look. Multiplayer keeps one saved look per client, while a server-negotiated target selector chooses whether actions affect that player or a friendly living human bot.
-- The compact, scrollable main page contains wardrobe actions and the target selector; the second page contains movement-animation and diagnostic controls. Real players, enemies, nonhumans, dead crew, and removed crew are excluded from the target cycle.
-- `Diving mode` on the main page cycles through `None`, `Diving suit only`, and `Custom outfit`. While the pressure affliction is active, the latter two temporarily replace only the rendered appearance; equipped items and their gameplay effects are untouched. Custom mode stores a separate per-character diving outfit, and restores the normal wardrobe appearance when pressure ends.
-- `Transfer to unconfigured characters` is a global single-player toggle. It defaults to off, is remembered across restarts, and only copies an active source look into a character that has no profile of their own.
-- `Save Current Outfit` verifies whether each fashion item left every managed worn slot. If an item is still equipped, the slot table lists where it remains.
-- `Apply Saved Look` activates the stored visuals even when no real equipment is currently worn. It does not equip gear for you.
-- Saving only stores the look; it does not mark the look for automatic activation. A look is automatically rebuilt after a scene or character change only if it was successfully applied beforehand.
-- Active NPC crew profiles are restored after their replacement Character instances finish initial equipment setup, even if the player never switches control to those NPCs.
-- Empty outfits are valid saved looks. Saving while no managed gear is worn creates an empty visual look that can be applied over real equipment.
-- `Clear Look` restores real equipment visuals without deleting the saved look, and also disables automatic reapplication until `Apply Saved Look` succeeds again.
-- `Forget Saved Look` deletes the saved look and disables automatic reapplication. Scene transitions and round ends do not delete saved looks.
-- `Appearance Layers...` controls `Hair`, `Beard`, `Moustache`, and `Face Attachment` independently. Each layer cycles through `Auto`, `Hide`, and `Show`. `Auto` follows the appearance item's XML mask, `Hide` force-hides the layer, and `Show` force-preserves it even when equipped fashion declares that type hidden. All four layers default to `Auto`.
-- Character mods may reuse these wearable slots as pieces of a composite head. Use `Show` for the reused layer instead of broadly hiding all hair-related slots. The `Hide Standard Hair` preset reproduces the old coarse behavior for Hair/Beard/Moustache while leaving Face Attachment automatic.
+Press **F8** to open the scrollable wardrobe panel. Change the key in Settings → Mod Gameplay Settings → Wardrobe → Wardrobe Panel Key; invalid names fall back to F8. The shortcut is ignored while a text field owns keyboard input or an input-blocking menu is open.
 
-## Current flow
+1. Select yourself or an eligible crew member.
+2. Wear the desired outfit and choose **Save Current Outfit**. The selected character's captured gear is removed from managed worn slots. Inspect the slot results if removal is incomplete.
+3. Equip your real combat/utility gear and choose **Apply Saved Look**. Its gameplay effects remain real; the saved appearance is cosmetic.
+4. **Clear Look** deactivates the normal appearance without deleting its save. **Forget Saved Look** deletes that save. Neither action deletes the independent diving profile.
 
-1. Wear the fashion/look set A, or wear nothing to save an empty visual look.
-2. Leave `Wardrobe target` on yourself or cycle it to an eligible NPC, then press `Save Current Outfit`; the target's worn A items are removed from active equipment. In multiplayer, the captured look replaces that client's one shared server-side saved look.
-3. Equip any real set B normally.
-4. Press `Apply Saved Look`; the character keeps B's real effects while C# draws the stored fashion sprites client-side. If no B gear is worn, the stored fashion is still drawn.
-5. If that crew member's look was active before a scene change, it is rebuilt for the replacement character instance after Barotrauma's initial equipment burst settles. Every active NPC profile restores independently; saved-but-inactive and manually cleared profiles stay inactive.
+Empty looks are valid. Save leaves a look inactive; Apply activates it. Scene restoration follows explicit activation intent. Appearance Layers controls Hair, Beard, Moustache and Face Attachment independently using Auto, Hide and Show. Show has priority over Hide and the appearance XML mask; this also supports character mods that reuse these layers for head parts.
 
-## Notes
+The second page controls movement-animation source, footstep-sound source and diagnostics. Footsteps follow real equipment by default. Only the cosmetic portions of supported effects are replayed; oxygen, protection, inventory and other real equipment effects remain owned by Barotrauma. Conditional/required-item alarms are not captured as fashion effects. Sealed-suit compatibility rules remain in place.
 
-- Enable `LuaCsForBarotrauma` together with this mod.
-- Enable CSharp scripting in the LuaCs Settings menu and accept/enable this mod's C# run prompt; the visual override patch is client-side C#.
-- The C# compatibility adapter is compiled from the source-only `CSharp/Client` folder by LuaCs.
-- At the start of each round, the mod posts a localized in-game notice containing the configured panel key.
-- A successful C# load prints:
-  - `[Baro Wardrobe Switcher] C# visual override v0.5.3 initializing.`
-  - `[Baro Wardrobe Switcher] C# visual override loaded: ready.`
-- If the panel says `C#: unavailable` or `C#: missing required hooks`, enable C# scripting in LuaCs, accept this mod's C# prompt, and reload before saving or applying a look.
-- Multiplayer client looks use persistence schema-v4 `ClientLook.json`. Single-player crew profiles use schema-v3 `SinglePlayerProfiles.json`, scoped by a SHA-256 hash of the campaign save path and a SHA-256 hash of the character fingerprint. Both formats store the complete four-layer visibility object and a parallel optional color map. Valid older files migrate automatically with versioned backups; colors that were never stored remain absent and use the prefab base color. Writes are atomic, corrupt files are quarantined, and raw campaign paths are never written to disk.
-- A legacy `ClientLook.json` is imported at most once per campaign into the first controlled non-bot character, without overwriting an existing crew profile. The imported look is saved but inactive, even if the legacy file recorded active/auto-apply intent, so starting equipment remains visible until `Apply Saved Look` is pressed. The original file remains available for multiplayer. Single-player scenes without a campaign save path use memory-only profiles.
-- If two current crew members have the same stable fingerprint, automatic disk restoration is disabled for both rather than risking the wrong appearance.
-- This version is intentionally conservative: it avoids a permanent extra UI column.
-- The visual override is draw-only. It explicitly patches `Limb.DrawWearable` and `Limb.Draw` when those targets are available, and does not mutate `Wearable.wearableSprites`, because changing those arrays can break unequip/swap logic.
-- Real combat equipment masking flags are cleared while the look is active. Original attachment visibility is decided at draw time using `Force Show > Force Hide > appearance-item XML mask`; clearing the look resets both force masks.
-- Saved bag and health-interface/exosuit sprites are drawn on a recessed wardrobe layer so they do not float over arm movement or hair after the look is applied.
-- Only `WearableType.Item` sprites are replaced. Character hair, beard, moustache, and face attachments remain owned by the original character renderer and are filtered only by the active four-layer policy.
-- Masking flags on the real equipped item sprites are temporarily cleared for each active-character draw, and Barotrauma's derived hide-type cache is refreshed before drawing and restored afterward. This keeps gloves, shoes, sleeves, hair-hiding hoods, and similar gear from hiding the original character layers underneath the visual override.
-- While a look is active, changing real equipment performs a local lightweight refresh of the existing renderer session. It does not recapture the saved look, rewrite wardrobe persistence, or send another wardrobe Apply command; normal Barotrauma equipment synchronization remains unchanged.
-- Fashion item `<TriggerAnimation>` effects from `OnWearing` status effects are replayed after the real outfit updates while the look is active, so decorative movement takes priority over the real combat outfit.
-- Fashion item sounds replace matching cosmetic real-equipment sounds while the look is active. The C# hook covers both `OnWearing <Sound>` status effects and item component `<sound type="...">` playback, can replace across those two sound sources when mods define the fashion and real gear differently, and keeps looping saved-fashion sounds alive even when the real equipment has no matching sound. Unconditional equipment ambience such as diving-suit loops can still be suppressed or replaced. Conditional and required-item status sounds are treated as gameplay alarms instead: they are never captured as fashion audio or added to the suppression set, so a real suit's low/empty-oxygen alarm starts and stops under Barotrauma's native oxygen, tank, and unequip rules. If alarm classification cannot be inspected on a future game build, the safe fallback is to allow the original sound.
-- Multiplayer uses a small server-side Lua sync helper. The server persists saved wardrobe item identifiers by client key, performs the server-authoritative removal, and broadcasts apply/clear events so other clients with LuaCs and C# scripting enabled can see the active look.
-- Multiplayer bot targeting appears only after protocol-4 capability negotiation with a supporting server. Older servers remain self-only, so a crew command can never silently fall back onto the sending player. The server independently requires a living friendly human bot and rejects real players or a bot already used by another wardrobe session.
-- A multiplayer bot's active look is round-local. The saved look remains attached to the requesting player's account, but bot activation is never rebound to the player's own character after round start or reconnect.
-- Apply requests carry stable visual identifiers so a look can be imported across campaigns and servers. The server resolves every identifier against its own `ItemPrefab` data, verifies the wearable/slot relationship, discards client item IDs and names, and broadcasts only canonical state.
-- Server persistence uses schema-v4 `ServerLooks.json` and stable `Client.AccountId` representations. Valid v2/v3 files migrate with versioned backups; authoritative JSON no longer stores `hideHair`. Anonymous clients can sync during the current server session but are never persisted by display name.
-- In multiplayer, `Clear Look` only deactivates the current visual look while keeping the saved look. `Forget Saved Look` also asks the server to delete the saved look for that client, so it will not be restored by later round-start or reconnect sync.
-- Saving a new outfit while an old multiplayer look is active clears the old server-side active look before storing the new saved identifiers, preventing other clients from keeping stale visuals.
-- Protocol 4 retains hello negotiation, operation IDs, revisions, acknowledgements, idempotent retry, and stale-command rejection. It synchronizes each active look's movement-animation source in addition to optional per-slot colors. The original six message names remain as a v1 bridge; mixed protocol versions fall back to v1.
-- Protocol-4 peers advertise attachment visibility (`0x01`) and movement-animation source (`0x02`). The optional look tail carries force-hide/show masks plus the animation source; older look tails still default to fashion-priority movement.
-- The renderer continues through Barotrauma's native `Item.GetSpriteColor()` path. Colored prefab fallbacks set `Item.SpriteColor` before capture; the mod does not recompute or double-multiply tint, limb alpha, or death color.
-- Server synchronization is event-driven: connect sends a targeted snapshot and accepted state changes broadcast once. There is no steady-state heartbeat or per-frame full-client scan; clients still hold early apply/clear messages briefly while a target character entity is spawning.
+## Crew and multiplayer
 
-## Build and verification
+Single-player human crew have independent campaign-scoped profiles. Transfer to unconfigured characters defaults to off; enabling it never overwrites a configured crew member. Active NPC profiles restore after the next scene's initial equipment settles. Ambiguous character fingerprints disable automatic disk restoration. Scenes without a campaign save path use memory-only profiles.
 
-Release builds require explicit paths and write only to the ignored `artifacts` directory:
+Multiplayer retains one saved look per client account. A negotiated crew-target capability allows selecting living human bots on the **same team**. The server independently rejects opposing-team bots, player-controlled targets, unavailable characters and targets owned by another active wardrobe session. Pending commands freeze their target entity ID; a stale UI button cannot silently apply to the player instead. Bot activation is round-local and does not migrate onto the owner's player character after reconnect or round start.
+
+Both updated peers use protocol **5**, wire look schema **4**, revisions, operation IDs, acknowledgements and bounded retries. Older peers retain the six-message v1 bridge, with a five-second hello timeout. V1 cannot synchronize custom colors or the newer preferences. The historical `v2` message names and internal `v3` mode label are implementation names, not the negotiated protocol number.
+
+## Diving appearance
+
+Diving mode cycles through None, Diving suit only and Custom outfit. It follows the native **InPressure environment flag**, including when real pressure protection prevents injury; it does not wait for pressure-affliction damage. Saving a custom diving outfit captures visuals without unequipping items.
+
+While pressure is present, diving appearance temporarily replaces the normal look. Pressure exit restores the latest normal appearance or real equipment if that look was cleared. Normal Apply never reuses the temporary diving payload. Failed activation cleans up and retries after a bounded delay. The mode changes only local rendering; it adds no multiplayer wire fields or pressure protection.
+
+A failed disk write is shown as **session only**. File-read failures remain retryable instead of becoming permanent empty profiles. Unknown future diving-file versions are preserved. Corrupt or oversized files are quarantined with a diagnostic.
+
+## Storage and compatibility
+
+Only stable identifiers, optional packed colors and preferences are stored under the user's Barotrauma ModData directory. Campaign/profile keys are hashed; raw campaign paths are not written into the JSON files.
+
+| File | Schema | Purpose |
+| --- | --- | --- |
+| ClientLook.json | 5 | Multiplayer client's saved look |
+| ServerLooks.json | 5 | Server-authoritative stable-account looks |
+| SinglePlayerProfiles.json | 3 | Campaign crew profiles and transfer preference |
+| DivingProfiles.json | 1 | Independent local diving profiles |
+
+Valid legacy formats migrate with backups; missing legacy colors use prefab base colors. Anonymous clients have session-only server state. See [ARCHITECTURE.md](ARCHITECTURE.md) and [COMPATIBILITY.md](COMPATIBILITY.md) for boundaries and exact source references.
+
+## Build, verify and package
+
+Use the scripts in [TESTING.md](TESTING.md) with explicit game/Publicized paths. Build products go only under ignored `artifacts`. To create and check an explicit source-only package:
 
 ```powershell
-./scripts/Build.ps1 `
-  -BarotraumaInstallDir "C:\Program Files (x86)\Steam\steamapps\common\Barotrauma" `
-  -LuaCsPublicizedDir "C:\Program Files (x86)\Steam\steamapps\common\Barotrauma\Publicized"
+python scripts/verify_package.py
+python scripts/package_mod.py artifacts/package/BaroWardrobeSwitcher-0.5.13
+python scripts/verify_package.py --package-root artifacts/package/BaroWardrobeSwitcher-0.5.13
 ```
 
-Run `scripts/Test-Compatibility.ps1` against the same installation, execute the pure Lua tests under MoonSharp, and run `scripts/verify_package.py` before packaging. After the manual matrix is complete and compatibility metadata is promoted, `scripts/verify_package.py --release` is the final manifest gate. Game assemblies and generated binaries must never be committed or included in the Workshop source package.
+The package contains a SHA-256 manifest. `--release` intentionally fails while compatibility is marked release-candidate; promote it only after the required in-game matrix passes. Game assemblies, compiled output, tests and player runtime data are not deployment inputs.

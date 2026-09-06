@@ -12,6 +12,7 @@ namespace BaroWardrobeSwitcher
         private const int DivingProfilesVersion = 1;
         private const string DivingProfilesFileName = "DivingProfiles.json";
         private const int MaximumDivingProfiles = 512;
+        private const long MaximumDivingProfilesBytes = 4 * 1024 * 1024;
 
         public static string GetDivingProfilesPath()
         {
@@ -89,9 +90,19 @@ namespace BaroWardrobeSwitcher
             if (!File.Exists(path)) { return CreateEmptyDivingProfiles(); }
             try
             {
+                if (new FileInfo(path).Length > MaximumDivingProfilesBytes)
+                {
+                    throw new InvalidDataException("Diving appearance profile document is too large.");
+                }
                 string json = File.ReadAllText(path);
                 using JsonDocument parsed = JsonDocument.Parse(json);
-                if (ReadSchemaVersion(parsed.RootElement) != DivingProfilesVersion)
+                int version = ReadSchemaVersion(parsed.RootElement);
+                if (version > DivingProfilesVersion)
+                {
+                    // A newer mod may own this file. Preserve it for that version.
+                    throw new NotSupportedException("Diving appearance profile version is newer than this mod.");
+                }
+                if (version != DivingProfilesVersion)
                 {
                     throw new InvalidDataException("Diving appearance profile document is not canonical.");
                 }
@@ -103,12 +114,12 @@ namespace BaroWardrobeSwitcher
             catch (JsonException ex)
             {
                 QuarantineCorruptFile(path, ex);
-                return CreateEmptyDivingProfiles();
+                throw;
             }
             catch (InvalidDataException ex)
             {
                 QuarantineCorruptFile(path, ex);
-                return CreateEmptyDivingProfiles();
+                throw;
             }
         }
 

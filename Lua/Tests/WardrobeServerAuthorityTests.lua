@@ -211,13 +211,13 @@ local function lastSentMessage(name, connection)
 end
 
 local targetOwnerCharacter = {
-    ID = 80, Name = "Target Owner", IsHuman = true, IsOnPlayerTeam = true, IsBot = false
+    ID = 80, Name = "Target Owner", TeamID = 1, IsHuman = true, IsOnPlayerTeam = true, IsBot = false
 }
 local friendlyBot = {
-    ID = 81, Name = "Friendly Bot", IsHuman = true, IsOnPlayerTeam = true, IsBot = true
+    ID = 81, Name = "Friendly Bot", TeamID = 1, IsHuman = true, IsOnPlayerTeam = true, IsBot = true
 }
 local enemyBot = {
-    ID = 82, Name = "Enemy Bot", IsHuman = true, IsOnPlayerTeam = false, IsBot = true
+    ID = 82, Name = "Enemy Bot", TeamID = 2, IsHuman = true, IsOnPlayerTeam = true, IsBot = true
 }
 local targetOwner = { Connection = {}, Character = targetOwnerCharacter }
 connectedClients[2] = targetOwner
@@ -280,8 +280,29 @@ local rejectedEnemy = sendTargetCommand({
 assert(not rejectedEnemy.accepted and rejectedEnemy.reason == "target_not_permitted" and
     rejectedEnemy.revision == 1, "an enemy bot target mutated server state")
 
+do
+    local function denied(operationId)
+        local ack = sendTargetCommand({
+            clientSessionId = "target-owner-session", operationId = operationId,
+            baseRevision = 1, kind = Core.COMMAND.Save,
+            targetCharacterId = friendlyBot.ID
+        }, targetOwner)
+        assert(not ack.accepted and ack.reason == "target_not_permitted" and ack.revision == 1,
+            "queued target command bypassed current team/control validation: " .. operationId)
+    end
+    friendlyBot.TeamID = 2
+    denied("target-changed-team")
+    friendlyBot.TeamID = 1
+    targetOwnerCharacter.TeamID = nil
+    denied("target-unknown-owner-team")
+    targetOwnerCharacter.TeamID = 1
+    connectedClients[#connectedClients + 1] = { Connection = {}, Character = friendlyBot }
+    denied("target-now-player-controlled")
+    connectedClients[#connectedClients] = nil
+end
+
 local secondOwnerCharacter = {
-    ID = 83, Name = "Second Owner", IsHuman = true, IsOnPlayerTeam = true, IsBot = false
+    ID = 83, Name = "Second Owner", TeamID = 1, IsHuman = true, IsOnPlayerTeam = true, IsBot = false
 }
 local secondOwner = { Connection = {}, Character = secondOwnerCharacter }
 connectedClients[3] = secondOwner

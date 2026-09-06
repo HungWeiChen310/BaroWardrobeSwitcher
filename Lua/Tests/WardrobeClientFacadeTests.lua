@@ -38,6 +38,7 @@ for _, candidate in ipairs(clientPathCandidates) do
     end
 end
 assert(clientPath ~= nil, "could not locate Lua/WardrobeSwitcher.lua")
+clientPath = os.getenv("WARDROBE_CLIENT_SOURCE") or clientPath
 local clientSourceFile = assert(io.open(clientPath, "r"))
 local clientSource = clientSourceFile:read("*a")
 clientSourceFile:close()
@@ -133,7 +134,8 @@ assert(clientSource:find("bridge.GetPanelKeyName()", 1, true) ~= nil and
 assert(clientSource:find("local CONFIG", 1, true) == nil,
     "the obsolete source-edited panel key config must not shadow Mod Gameplay Settings")
 assert(clientSource:find("function Helpers.singlePlayerSelectableCharacters()", 1, true) ~= nil and
-       clientSource:find('Helpers.userDataMember(character, "IsBot") == true', 1, true) ~= nil and
+       (clientSource:find('Helpers.userDataMember(character, "IsBot") == true', 1, true) ~= nil or
+        clientSource:find('Helpers.isFriendlyWardrobeBot(character, actual)', 1, true) ~= nil) and
        clientSource:find("NET_V2_TARGET_COMMAND", 1, true) ~= nil and
        clientSource:find("serverSupportsCrewTargeting()", 1, true) ~= nil and
        clientSource:find('tr("button.next_page")', 1, true) ~= nil and
@@ -286,6 +288,7 @@ local clearAttempts = 0
 local clearFailuresRemaining = 0
 local visualOverrideReady = true
 local configuredPanelKey = "F7"
+local panelInputBlocked = false
 local attachmentVisibilityCalls = 0
 local lastForceHideMask = nil
 local lastForceShowMask = nil
@@ -314,6 +317,7 @@ end
 local visualOverride = {
     GetVersion = function() return WardrobeCore.MOD_VERSION end,
     GetPanelKeyName = function() return configuredPanelKey end,
+    IsPanelInputBlocked = function() return panelInputBlocked end,
     IsReady = function() return visualOverrideReady end,
     GetReadinessStatus = function()
         return visualOverrideReady and
@@ -528,6 +532,8 @@ local function widget(onRemove)
     local removed = false
     local result = {
         RectTransform = {},
+        SetTextPos = function() end,
+        CalculateHeightFromText = function() end,
         AddToGUIUpdateList = function() end
     }
     if onRemove ~= nil then
@@ -580,6 +586,7 @@ local function makeCharacter(entityId, infoId, name, isBot)
         Name = name,
         IsHuman = true,
         IsOnPlayerTeam = true,
+        TeamID = 1,
         IsBot = isBot == true,
         Info = {
             ID = infoId,
@@ -603,7 +610,14 @@ profiles[profileStorageKey(campaignStorageKey, stableCharacterProfileKey("Twin N
 profiles[profileStorageKey(campaignStorageKey, stableCharacterProfileKey("No Stable ID"))] =
     "captured=true|active=false|auto=true|hidehair=false|Head=unstablehelmet,"
 
-assert(dofile(clientPath) == nil)
+-- Expose adapter actions only inside the test chunk. Lifecycle tests below do
+-- not click GUI objects that were already removed after a character change.
+local clientHarness = assert(load(clientSource .. [[
+return { helpers = Helpers, invoke = function(action)
+    action()
+    windowNeedsRefresh = true
+end }
+]], clientPath))()
 assert(loadCalls == 0, "single-player profiles should load only after a campaign character exists")
 
 local function hasVisibleText(expected)
@@ -630,7 +644,7 @@ local existingNpc = makeCharacter(44, 300, "Existing NPC", true)
 local selectorNpc = makeCharacter(50, 900, "A Target NPC", true)
 local otherPlayer = makeCharacter(45, 400, "Other Player", false)
 local enemyBot = makeCharacter(46, 500, "Enemy Bot", true)
-enemyBot.IsOnPlayerTeam = false
+enemyBot.TeamID = 2 -- PvP opponents also have IsOnPlayerTeam=true in Barotrauma.
 local nonHumanBot = makeCharacter(47, 600, "Nonhuman Bot", true)
 nonHumanBot.IsHuman = false
 local removedBot = makeCharacter(48, 700, "Removed Bot", true)
@@ -656,6 +670,16 @@ assert(profiles[importedPlayerProfileKey] ~= nil and
     "the legacy client look was not imported into the first controlled profile")
 assert(activationCount == 0 and prefabCaptureCount == 0,
     "an imported legacy look activated before the player manually applied it")
+
+if os.getenv("WARDROBE_CLIENT_SOURCE") == nil then
+    panelInputBlocked = true
+    openPanel = true
+    local removesBeforeTyping = removedWidgets
+    hooks.think()
+    assert(liveOverlayRoots == 1 and removedWidgets == removesBeforeTyping,
+        "typing in a chat/text field toggled the wardrobe panel")
+    panelInputBlocked = false
+end
 
 local tutorialText = assert(localizedText["barowardrobeswitcher.panel.tutorial"]):gsub("{key}", "F7")
 local _, tutorialLineBreaks = tutorialText:gsub("\n", "")
@@ -763,6 +787,89 @@ assert(savedCustomDiving:find("customdivecoat", 1, true) ~= nil and
        divingSlots[InvSlotType.OuterClothes] == customSuit and
        divingEquipmentMutations == 0,
     "custom diving outfit was not saved and applied without changing equipment")
+
+-- Same stable-pressure workload can run against a saved upstream client source.
+-- C# measures only these ticks, excluding fixture setup and compilation.
+if MeasureWardrobeWorkload ~= nil then
+    local capturesBefore, savesBefore, packetsBefore = prefabCaptureCount, saveCalls + divingSaveCalls, #networkSent
+    MeasureWardrobeWorkload("600 stable custom-diving ticks", function()
+        for _ = 1, 600 do hooks.think() end
+    end)
+    assert(prefabCaptureCount == capturesBefore and saveCalls + divingSaveCalls == savesBefore and
+           #networkSent == packetsBefore, "steady diving state recaptured, persisted, or sent a command")
+end
+if os.getenv("WARDROBE_BENCHMARK_ONLY") == "1" then
+    print = originalPrint
+    return
+end
+
+do
+    local helpers = clientHarness.helpers
+    -- Explicit Apply must use the normal saved payload, never the committed
+    -- temporary diving payload; the pressure overlay can then resume.
+    helpers.applyFashionToCurrentEquipment(false)
+    assert(capturedIdentifierByCharacterId[player.ID] == "helmet",
+        "normal Apply reused the temporary diving outfit")
+    for _ = 1, 7 do hooks.think() end
+    assert(capturedIdentifierByCharacterId[player.ID] == "customdivecoat",
+        "unchanged pressure did not restore diving appearance after normal Apply")
+    helpers.clearActiveLook()
+    for _ = 1, 7 do hooks.think() end
+    assert(activeCharacterIds[player.ID] == true,
+        "clearing the base look accidentally disabled the independent diving mode")
+    player.InPressure = false
+    for _ = 1, 7 do hooks.think() end
+    assert(activeCharacterIds[player.ID] ~= true,
+        "pressure exit resurrected the manually cleared base look")
+
+    -- A failure after committing temporary sprites must clear them and back off.
+    player.InPressure = true
+    activationFailuresRemaining = 1
+    local failuresBefore = activationAttempts
+    for _ = 1, 7 do hooks.think() end
+    assert(activationAttempts == failuresBefore + 1 and reusableCharacters[player.ID] == nil,
+        "failed diving activation left a reusable temporary session")
+    for _ = 1, 40 do hooks.think() end
+    assert(activationAttempts == failuresBefore + 1, "diving activation failure retried every poll")
+    for _ = 1, 30 do hooks.think() end
+    assert(activeCharacterIds[player.ID] == true, "diving appearance did not recover after its retry delay")
+
+    -- Isolate file-read errors from a legitimate absent profile.
+    local testCharacter = makeCharacter(971, 971, "Diving Read Failure", true)
+    local originalLoad, originalError, originalSave = persistence.LoadDivingProfile, persistence.GetLastError, persistence.SaveDivingProfile
+    local reads = 0
+    persistence.LoadDivingProfile = function()
+        reads = reads + 1
+        return reads == 1 and "" or "mode=2|captured=true|Head=recoveredhat,"
+    end
+    persistence.GetLastError = function() return reads == 1 and "synthetic sharing violation" or "" end
+    local profile = helpers.divingProfile(testCharacter)
+    assert(not profile.loaded, "file-read error became a permanently empty profile")
+    for _ = 1, 61 do hooks.think() end
+    profile = helpers.divingProfile(testCharacter)
+    assert(reads == 2 and profile.loaded and profile.look.Head.identifier == "recoveredhat",
+        "failed profile load did not retry and recover")
+    persistence.LoadDivingProfile, persistence.GetLastError = originalLoad, originalError
+    testCharacter.InPressure = true
+    helpers.refreshDivingAppearance(testCharacter, true)
+    local replacement = makeCharacter(972, 971, "Diving Read Failure", true)
+    replacement.InPressure = true
+    helpers.refreshDivingAppearance(replacement, true)
+    assert(activeCharacterIds[testCharacter.ID] ~= true and activeCharacterIds[replacement.ID] == true,
+        "replacement Character reused the old diving runtime or retained its render session")
+    hooks["character.removed"](testCharacter)
+    assert(helpers.divingRuntime(replacement).active, "late removal erased the replacement's diving state")
+    replacement.IsDead = true
+    helpers.refreshDivingAppearance(replacement, true)
+    assert(activeCharacterIds[replacement.ID] ~= true, "a dead character retained temporary diving visuals")
+    hooks["character.removed"](replacement)
+    persistence.SaveDivingProfile = function() return false end
+    clientHarness.invoke(helpers.saveCustomDivingLook)
+    hooks.think()
+    assert(hasVisibleText(localizedText["barowardrobeswitcher.panel.last"] .. ": Custom diving outfit saved for this session only."),
+        "session-only diving save was not shown in the panel")
+    persistence.SaveDivingProfile = originalSave
+end
 
 player.InPressure = false
 for _ = 1, 7 do hooks.think() end
@@ -1103,8 +1210,8 @@ assert(lastSaved ~= nil and lastSaved:find("auto=true", 1, true) ~= nil,
     "successful transferred look was not persisted for the target NPC")
 
 -- Clear/reapply on the same NPC must reuse its committed renderer session.
-clearButton.OnClicked()
-applyButton.OnClicked()
+clientHarness.invoke(clientHarness.helpers.clearActiveLook)
+clientHarness.invoke(clientHarness.helpers.applyFashionToCurrentEquipment)
 assert(activationCount == 4, "NPC clear/reapply did not reactivate the renderer")
 assert(prefabCaptureCount == 2,
     "clear/reapply discarded the reusable renderer session and rebuilt from the prefab")
@@ -1142,7 +1249,7 @@ local existingProfileKey =
 assert(profiles[existingProfileKey] ~= nil and
     profiles[existingProfileKey]:find("existinghelmet", 1, true) ~= nil,
     "appearance transfer replaced an existing NPC profile")
-applyButton.OnClicked()
+clientHarness.invoke(clientHarness.helpers.applyFashionToCurrentEquipment)
 assert(activationCount == 5,
     "manual apply did not activate the existing NPC profile")
 assert(capturedIdentifierByCharacterId[44] == "existinghelmet",
@@ -1160,7 +1267,7 @@ Character.Controlled = nil
 hooks.think()
 Character.Controlled = player
 hooks.think()
-clearButton.OnClicked()
+clientHarness.invoke(clientHarness.helpers.clearActiveLook)
 Character.Controlled = nil
 hooks.think()
 Character.Controlled = npc
@@ -1195,8 +1302,8 @@ Character.Controlled = nil
 hooks.think()
 Character.Controlled = npcNextScene
 hooks.think()
-clearButton.OnClicked()
-forgetButton.OnClicked()
+clientHarness.invoke(clientHarness.helpers.clearActiveLook)
+clientHarness.invoke(clientHarness.helpers.clearSavedLook)
 assert(activeCharacterIds[144] == true,
     "clearing or forgetting one NPC removed another NPC's active appearance")
 assert(profiles[npcProfileKey] == nil,
@@ -1245,8 +1352,8 @@ Character.Controlled = memoryPlayer
 hooks.roundStart()
 hooks.think()
 local savesBeforeMemoryProfile = saveCalls
-saveButton.OnClicked()
-applyButton.OnClicked()
+clientHarness.invoke(clientHarness.helpers.saveFashionAndUnequip)
+clientHarness.invoke(clientHarness.helpers.applyFashionToCurrentEquipment)
 assert(activationCount == 11,
     "campaign-less player profile did not apply; activations=" ..
     tostring(activationCount))
@@ -1812,6 +1919,20 @@ do
     hooks.think()
     assert(hasVisibleButton("Wardrobe target: Multiplayer Bot"),
         "multiplayer selector included a player or enemy before the friendly bot")
+    multiplayerBot.TeamID = 2
+    local packetsBeforeTeamChange = #networkSent
+    buttons["Apply Saved Look"].OnClicked()
+    assert(#networkSent == packetsBeforeTeamChange,
+        "a stale NPC panel applied its look to the local player after a team change")
+    hooks.think()
+    assert(hasVisibleButton("Wardrobe target: Late Local Player"),
+        "a cached selected bot stayed selectable after joining the opposing team")
+    multiplayerBot.TeamID = 1
+    for _ = 1, 16 do hooks.think() end
+    buttons["Wardrobe target: Late Local Player"].OnClicked()
+    hooks.think()
+    assert(hasVisibleButton("Wardrobe target: Multiplayer Bot"),
+        "returning to the friendly team did not restore bot selection")
     buttons["Apply Saved Look"].OnClicked()
     hooks.think()
     local targetedApplyMessage = networkSent[#networkSent]
@@ -1849,7 +1970,7 @@ do
     ))
     movementOnlyHello.FinalizeForTransport()
     networkHandlers[WardrobeCore.NET.V2_HELLO](movementOnlyHello)
-    openPanel = true
+    buttons["Next Page"].OnClicked()
     hooks.think()
     local movementOnlyButton = buttons["Movement: Equipped Gear"]
     assert(movementOnlyButton ~= nil and type(movementOnlyButton.OnClicked) == "function",
@@ -1871,12 +1992,16 @@ do
     networkHandlers[WardrobeCore.NET.V2_ACK](movementOnlyRejection)
     hooks.think()
 
+    buttons["Back"].OnClicked()
+    hooks.think()
     buttons["Save Current Outfit"].OnClicked()
     hooks.think()
     local movementOnlySave = assert(WardrobeCore.readCommand(networkSent[#networkSent]))
     assert(movementOnlySave.kind == WardrobeCore.COMMAND.Save and
            movementOnlySave.look.useFashionMovementAnimations == false,
         "movement-only capability dropped equipped-gear movement from Save")
+    clientHarness.helpers.requestWindowClose()
+    hooks.think()
 end
 
 -- Reload an isolated probing client to cover the compatibility bridge. The
@@ -1886,7 +2011,14 @@ local v1Character = makeCharacter(903, 903, "Late Legacy Player", false)
 Character.Controlled = v1Character
 Character.CharacterList = { v1Character }
 gameSessionDataPath.SavePath = "p2p-session-a.save"
-assert(dofile(clientPath) == nil)
+-- Expose adapter actions only inside the test chunk. Lifecycle tests below do
+-- not click GUI objects that were already removed after a character change.
+local clientHarness = assert(load(clientSource .. [[
+return { helpers = Helpers, invoke = function(action)
+    action()
+    windowNeedsRefresh = true
+end }
+]], clientPath))()
 hooks.roundStart()
 hooks.think()
 local function legacyApplyFrame(characterId)

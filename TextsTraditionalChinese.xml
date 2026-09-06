@@ -92,4 +92,9 @@
   <barowardrobeswitcher.status.profile_collision>角色身分重複；已停用自動恢復</barowardrobeswitcher.status.profile_collision>
   <barowardrobeswitcher.status.saved_cleared>已清除儲存的外觀。</barowardrobeswitcher.status.saved_cleared>
   <barowardrobeswitcher.status.none>無</barowardrobeswitcher.status.none>
+  <barowardrobeswitcher.status.diving_saved>已儲存自訂潛水外觀，實際裝備未變更。</barowardrobeswitcher.status.diving_saved>
+  <barowardrobeswitcher.status.diving_session_only>自訂潛水外觀僅本次遊戲有效；未能寫入存檔。</barowardrobeswitcher.status.diving_session_only>
+  <barowardrobeswitcher.status.diving_mode_saved>已儲存潛水模式。</barowardrobeswitcher.status.diving_mode_saved>
+  <barowardrobeswitcher.status.diving_mode_session_only>潛水模式僅本次遊戲有效；未能寫入存檔。</barowardrobeswitcher.status.diving_mode_session_only>
+  <barowardrobeswitcher.status.diving_load_failed>無法讀取潛水外觀存檔，稍後重試。</barowardrobeswitcher.status.diving_load_failed>
 </infotexts>

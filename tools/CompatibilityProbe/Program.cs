@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.Loader;
+using System.Text.Json;
 
 const BindingFlags AllMembers = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static;
 
@@ -13,6 +14,12 @@ if (args.Length < 2)
 string installDir = Path.GetFullPath(args[0]);
 string publicizedDir = Path.GetFullPath(args[1]);
 bool requireOptional = args.Contains("--require-optional", StringComparer.Ordinal);
+int metadataIndex = Array.IndexOf(args, "--metadata");
+string metadataPath = metadataIndex >= 0 && metadataIndex + 1 < args.Length
+    ? args[metadataIndex + 1] : Path.Combine(Environment.CurrentDirectory, "version.json");
+using JsonDocument metadata = JsonDocument.Parse(File.ReadAllText(metadataPath));
+string requiredGameVersion = metadata.RootElement.GetProperty("barotraumaGameVersion").GetString()!;
+string requiredLuaCsCommit = metadata.RootElement.GetProperty("luaCsCommit").GetString()!;
 var failures = new List<string>();
 var optionalFailures = new List<string>();
 
@@ -261,6 +268,9 @@ RequirePublicStaticField("Character.CharacterList", character, "CharacterList");
 RequirePublicProperty("Character.IsBot", character, "IsBot", typeof(bool));
 RequirePublicProperty("Character.IsHuman", character, "IsHuman", typeof(bool));
 RequirePublicProperty("Character.IsOnPlayerTeam", character, "IsOnPlayerTeam", typeof(bool));
+RequirePublicProperty("Character.TeamID", character, "TeamID", RequireType("Barotrauma.CharacterTeamType"));
+RequireProperty("GUI.InputBlockingMenuOpen", RequireType("Barotrauma.GUI"), "InputBlockingMenuOpen");
+RequireProperty("GUI.KeyboardDispatcher", RequireType("Barotrauma.GUI"), "KeyboardDispatcher");
 RequirePublicProperty("Character.InPressure", character, "InPressure", typeof(bool));
 RequireAnyPublicField("CharacterInfo.ID", characterInfo, "ID");
 RequirePublicProperty("CharacterInfo.OriginalName", characterInfo, "OriginalName");
@@ -432,9 +442,9 @@ else
 if (File.Exists(installedAssemblyPath))
 {
     string? version = FileVersionInfo.GetVersionInfo(installedAssemblyPath).FileVersion;
-    if (version is null || !version.StartsWith("1.13.4.0", StringComparison.Ordinal))
+    if (!string.Equals(version, requiredGameVersion, StringComparison.Ordinal))
     {
-        failures.Add($"expected Barotrauma 1.13.4.0, found {version ?? "unknown"}");
+        failures.Add($"expected Barotrauma {requiredGameVersion}, found {version ?? "unknown"}");
     }
     else
     {
@@ -446,16 +456,15 @@ else
     failures.Add($"game assembly missing: {installedAssemblyPath}");
 }
 
-const string RequiredLuaCsCommit = "0d380afcd1feeb842c0c86290d46bcaf198cd5e4";
 string? publicizedProductVersion = FileVersionInfo.GetVersionInfo(barotraumaPath).ProductVersion;
 if (publicizedProductVersion is null ||
-    !publicizedProductVersion.Contains(RequiredLuaCsCommit, StringComparison.OrdinalIgnoreCase))
+    !publicizedProductVersion.Contains(requiredLuaCsCommit, StringComparison.OrdinalIgnoreCase))
 {
-    failures.Add($"expected LuaCs publicized commit {RequiredLuaCsCommit}, found {publicizedProductVersion ?? "unknown"}");
+    failures.Add($"expected LuaCs publicized commit {requiredLuaCsCommit}, found {publicizedProductVersion ?? "unknown"}");
 }
 else
 {
-    Console.WriteLine($"PASS LuaCs publicized commit {RequiredLuaCsCommit}");
+    Console.WriteLine($"PASS LuaCs publicized commit {requiredLuaCsCommit}");
 }
 
 foreach (string warning in optionalFailures)

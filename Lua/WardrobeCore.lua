@@ -3,7 +3,7 @@
 
 local Core = {}
 
-Core.MOD_VERSION = "0.5.10"
+Core.MOD_VERSION = "0.5.13"
 Core.PROTOCOL_VERSION = 5
 Core.LOOK_SCHEMA_VERSION = 4
 Core.PERSISTENCE_VERSION = 5

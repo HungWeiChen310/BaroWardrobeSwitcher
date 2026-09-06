@@ -358,6 +358,12 @@ local function resolveCrewTarget(client, targetCharacterId)
         userDataMember(target, "IsBot") ~= true then
         return nil, "target_not_permitted"
     end
+    -- IsOnPlayerTeam includes BOTH PvP teams. Recheck current allegiance at
+    -- execution time, including commands queued before a team change.
+    local requesterTeam = userDataMember(requester, "TeamID")
+    if requesterTeam == nil or userDataMember(target, "TeamID") ~= requesterTeam then
+        return nil, "target_not_permitted"
+    end
     for _, connected in ipairs(connectedClients()) do
         if clientCharacter(connected) == target then return nil, "target_not_permitted" end
     end

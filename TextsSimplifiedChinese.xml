@@ -92,4 +92,9 @@
   <barowardrobeswitcher.status.profile_collision>角色身份重复；已停用自动恢复</barowardrobeswitcher.status.profile_collision>
   <barowardrobeswitcher.status.saved_cleared>已清除保存的外观。</barowardrobeswitcher.status.saved_cleared>
   <barowardrobeswitcher.status.none>无</barowardrobeswitcher.status.none>
+  <barowardrobeswitcher.status.diving_saved>已保存自定义潜水外观，实际装备未变更。</barowardrobeswitcher.status.diving_saved>
+  <barowardrobeswitcher.status.diving_session_only>自定义潜水外观仅本次游戏有效；未能写入存档。</barowardrobeswitcher.status.diving_session_only>
+  <barowardrobeswitcher.status.diving_mode_saved>已保存潜水模式。</barowardrobeswitcher.status.diving_mode_saved>
+  <barowardrobeswitcher.status.diving_mode_session_only>潜水模式仅本次游戏有效；未能写入存档。</barowardrobeswitcher.status.diving_mode_session_only>
+  <barowardrobeswitcher.status.diving_load_failed>无法读取潜水外观存档，稍后重试。</barowardrobeswitcher.status.diving_load_failed>
 </infotexts>
