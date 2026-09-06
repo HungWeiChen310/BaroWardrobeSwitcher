@@ -229,15 +229,19 @@ Type item = RequireType("Barotrauma.Item");
 Type hull = RequireType("Barotrauma.Hull");
 Type itemComponent = RequireType("Barotrauma.Items.Components.ItemComponent");
 Type actionType = RequireType("Barotrauma.ActionType");
+Type affliction = RequireType("Barotrauma.Affliction");
 Type afflictionHusk = RequireType("Barotrauma.AfflictionHusk");
 Type afflictionPrefab = RequireType("Barotrauma.AfflictionPrefab");
 Type afflictionPrefabHusk = RequireType("Barotrauma.AfflictionPrefabHusk");
 Type characterParams = RequireType("Barotrauma.CharacterParams");
+Type characterHealth = RequireType("Barotrauma.CharacterHealth");
 Type ragdoll = RequireType("Barotrauma.Ragdoll");
 Type identifier = RequireGameOrCoreType("Barotrauma.Identifier");
 Type contentXElement = RequireType("Barotrauma.ContentXElement");
 Type networkClient = RequireType("Barotrauma.Networking.Client");
 Type guiComponent = RequireType("Barotrauma.GUIComponent");
+Type configService = RequireType("Barotrauma.LuaCs.ConfigService");
+Type settingBase = RequireType("Barotrauma.LuaCs.Data.ISettingBase");
 string monoGameFile = new[]
 {
     "MonoGame.Framework.Windows.NetStandard.dll",
@@ -270,6 +274,15 @@ RequirePublicProperty("Entity.Removed", entity, "Removed", typeof(bool));
 RequireMethod("Entity.FreeID()", entity, "FreeID", Array.Empty<Type>(), typeof(void));
 RequireMethod("GUIComponent.RemoveFromGUIUpdateList(bool)", guiComponent, "RemoveFromGUIUpdateList",
     new[] { typeof(bool) }, typeof(void));
+MethodInfo? saveConfigValue = FindExact(configService, "SaveConfigValue", settingBase);
+if (saveConfigValue?.ReturnType.GetProperty("IsFailed", AllMembers) is null)
+{
+    failures.Add("ConfigService.SaveConfigValue(ISettingBase) result contract mismatch");
+}
+else
+{
+    Console.WriteLine("PASS ConfigService.SaveConfigValue(ISettingBase)");
+}
 
 RequireMethod("Limb.Draw(SpriteBatch,Camera,Color?,bool)", limb, "Draw",
     new[] { spriteBatch, camera, typeof(Nullable<>).MakeGenericType(color), typeof(bool) }, typeof(void));
@@ -277,6 +290,7 @@ RequireMethod("Limb.DrawWearable(WearableSprite,float,SpriteBatch,Color,float,Sp
     new[] { wearableSprite, typeof(float), spriteBatch, color, typeof(float), spriteEffects }, typeof(void));
 RequireMethod("Limb.UpdateWearableTypesToHide()", limb, "UpdateWearableTypesToHide",
     Array.Empty<Type>(), typeof(void));
+RequireField("Limb.HuskSprite backing field", limb, "<HuskSprite>k__BackingField");
 RequirePublicField(
     "Limb.WearingItems",
     limb,
@@ -288,6 +302,12 @@ RequireMethod("AfflictionHusk.AttachHuskAppendage(...)", afflictionHusk, "Attach
 RequireMethod("AfflictionHusk.GetHuskedSpeciesName(CharacterParams,AfflictionPrefabHusk)",
     afflictionHusk, "GetHuskedSpeciesName",
     new[] { characterParams, afflictionPrefabHusk }, identifier);
+RequireField("AfflictionHusk.huskAppendage", afflictionHusk, "huskAppendage");
+RequirePublicProperty("Affliction.Identifier", affliction, "Identifier", identifier);
+RequireMethod("Affliction.GetBodyTint()", affliction, "GetBodyTint", Array.Empty<Type>(), color);
+RequireMethod("Affliction.GetFaceTint()", affliction, "GetFaceTint", Array.Empty<Type>(), color);
+RequireMethod("CharacterHealth.ForceUpdateVisuals()", characterHealth, "ForceUpdateVisuals",
+    Array.Empty<Type>(), typeof(void));
 RequireMethod("Ragdoll.RemoveLimb(Limb)", ragdoll, "RemoveLimb", new[] { limb }, typeof(void));
 RequireMethod("Ragdoll.PlayImpactSound(Limb)", ragdoll, "PlayImpactSound",
     new[] { limb }, typeof(void), optional: true);

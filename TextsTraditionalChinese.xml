@@ -9,7 +9,7 @@
   <barowardrobeswitcher.panel.main_page>主頁</barowardrobeswitcher.panel.main_page>
   <barowardrobeswitcher.panel.tools_page>選項與診斷</barowardrobeswitcher.panel.tools_page>
   <barowardrobeswitcher.panel.target_character>衣櫃目標</barowardrobeswitcher.panel.target_character>
-  <barowardrobeswitcher.panel.multiplayer_shared_look>多人模式每位玩家共用一份已保存外觀；此處選擇操作要套用的船員。</barowardrobeswitcher.panel.multiplayer_shared_look>
+  <barowardrobeswitcher.panel.multiplayer_shared_look>每位船員都有獨立的時裝欄位。</barowardrobeswitcher.panel.multiplayer_shared_look>
   <barowardrobeswitcher.panel.saved_look>已儲存外觀</barowardrobeswitcher.panel.saved_look>
   <barowardrobeswitcher.panel.look>外觀</barowardrobeswitcher.panel.look>
   <barowardrobeswitcher.panel.active>啟用</barowardrobeswitcher.panel.active>
@@ -40,6 +40,12 @@
   <barowardrobeswitcher.button.animation_equipment>移動動畫：實際裝備</barowardrobeswitcher.button.animation_equipment>
   <barowardrobeswitcher.button.footstep_fashion>走路音效：跟隨時裝</barowardrobeswitcher.button.footstep_fashion>
   <barowardrobeswitcher.button.footstep_equipment>走路音效：跟隨裝備</barowardrobeswitcher.button.footstep_equipment>
+  <barowardrobeswitcher.button.hide_husk_yes>隱藏畫皮外觀：是</barowardrobeswitcher.button.hide_husk_yes>
+  <barowardrobeswitcher.button.hide_husk_no>隱藏畫皮外觀：否</barowardrobeswitcher.button.hide_husk_no>
+  <barowardrobeswitcher.button.unequip_on_save_yes>保存脫衣：開</barowardrobeswitcher.button.unequip_on_save_yes>
+  <barowardrobeswitcher.button.unequip_on_save_no>保存脫衣：關</barowardrobeswitcher.button.unequip_on_save_no>
+  <barowardrobeswitcher.button.override_gene_splicer_yes>覆蓋基因拼接器外觀：是</barowardrobeswitcher.button.override_gene_splicer_yes>
+  <barowardrobeswitcher.button.override_gene_splicer_no>覆蓋基因拼接器外觀：否</barowardrobeswitcher.button.override_gene_splicer_no>
   <barowardrobeswitcher.button.hide_standard_hair>隱藏標準頭髮</barowardrobeswitcher.button.hide_standard_hair>
   <barowardrobeswitcher.button.all_auto>全部自動</barowardrobeswitcher.button.all_auto>
   <barowardrobeswitcher.button.back>返回</barowardrobeswitcher.button.back>
@@ -75,7 +81,9 @@
   <barowardrobeswitcher.status.empty>空</barowardrobeswitcher.status.empty>
   <barowardrobeswitcher.status.already_handled>已處理</barowardrobeswitcher.status.already_handled>
   <barowardrobeswitcher.status.server_removal_requested>已儲存；已要求伺服器移除</barowardrobeswitcher.status.server_removal_requested>
+  <barowardrobeswitcher.status.server_keep_requested>已儲存；已要求伺服器保留裝備</barowardrobeswitcher.status.server_keep_requested>
   <barowardrobeswitcher.status.saved_removed>已儲存並移除</barowardrobeswitcher.status.saved_removed>
+  <barowardrobeswitcher.status.saved_kept_equipped>已儲存；保留穿戴</barowardrobeswitcher.status.saved_kept_equipped>
   <barowardrobeswitcher.status.synced_server>已從伺服器同步</barowardrobeswitcher.status.synced_server>
   <barowardrobeswitcher.status.saved_applied_sync>已從多人同步套用儲存外觀。</barowardrobeswitcher.status.saved_applied_sync>
   <barowardrobeswitcher.status.auto_applied>已自動套用儲存外觀。</barowardrobeswitcher.status.auto_applied>

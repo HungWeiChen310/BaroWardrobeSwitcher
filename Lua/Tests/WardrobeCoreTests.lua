@@ -282,6 +282,10 @@ assertEqual(hello.capabilities, Core.CAPABILITY.AttachmentVisibility)
 assert(Core.CAPABILITY.CrewTargeting == 0x04, "crew targeting capability changed unexpectedly")
 assert(Core.CAPABILITY.FootstepSoundSource == 0x08,
     "footstep sound-source capability changed unexpectedly")
+assert(Core.CAPABILITY.CrewDivingProfiles == 0x10,
+    "crew diving-profile capability changed unexpectedly")
+assert(Core.CAPABILITY.SaveWithoutUnequip == 0x20,
+    "save-without-unequip capability changed unexpectedly")
 local oldHelloBuffer = newBuffer()
 oldHelloBuffer.WriteUInt16(Core.PROTOCOL_VERSION)
 oldHelloBuffer.WriteUInt32(8)
@@ -309,6 +313,20 @@ local decodedCommand = assert(Core.readCommand(commandBuffer))
 assertEqual(decodedCommand.operationId, command.operationId)
 assertEqual(decodedCommand.baseRevision, 3)
 assert(Core.lookEquals(decodedCommand.look, look))
+
+local saveKeepBuffer = newBuffer()
+assert(Core.writeCommand(saveKeepBuffer, {
+    clientSessionId = "session-1",
+    operationId = "session-1:save-keep",
+    baseRevision = 3,
+    kind = Core.COMMAND.SaveKeep,
+    look = look
+}))
+saveKeepBuffer.FinalizeForTransport()
+local saveKeepCommand = assert(Core.readCommand(saveKeepBuffer))
+assertEqual(saveKeepCommand.kind, Core.COMMAND.SaveKeep)
+assert(Core.lookEquals(saveKeepCommand.look, look),
+    "save-without-unequip command lost its look payload")
 
 local targetCommand = {
     clientSessionId = "session-1",
@@ -1435,5 +1453,19 @@ local v1Forget = Core.createClientController(duplicateState, v1Adapters(v1Forget
 v1Forget.dispatch({ type = "CommandRequested", operationId = "v1:forget", kind = Core.COMMAND.Forget })
 assertEqual(v1Forget.getState().phase, Core.PHASE.Idle)
 assertEqual(v1Forget.getViewModel().hasSavedLook, false)
+
+local divingBuffer = newBuffer()
+assert(Core.writeDivingProfile(divingBuffer, {
+    characterId = 42,
+    mode = 2,
+    captured = true,
+    look = look
+}))
+local divingProfile = assert(Core.tryReadDivingProfile(divingBuffer))
+assertEqual(divingProfile.characterId, 42)
+assertEqual(divingProfile.mode, 2)
+assertEqual(divingProfile.captured, true)
+assert(Core.lookEquals(divingProfile.look, look))
+assert(Core.validateDivingProfile({ characterId = 42, mode = 3, captured = false }) == nil)
 
 print("WardrobeCore tests passed")

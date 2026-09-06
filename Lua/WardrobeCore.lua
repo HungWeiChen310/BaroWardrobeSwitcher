@@ -19,6 +19,8 @@ Core.NET = {
     V2_TARGET_COMMAND = "barowardrobeswitcher.v2.target-command",
     V2_STATE = "barowardrobeswitcher.v2.state",
     V2_ACK = "barowardrobeswitcher.v2.ack",
+    V2_DIVING_COMMAND = "barowardrobeswitcher.v2.diving-command",
+    V2_DIVING_STATE = "barowardrobeswitcher.v2.diving-state",
     V1_SAVE_REQUEST = "barowardrobeswitcher.save",
     V1_APPLY_REQUEST = "barowardrobeswitcher.apply",
     V1_CLEAR_REQUEST = "barowardrobeswitcher.clear",
@@ -67,7 +69,9 @@ Core.CAPABILITY = {
     AttachmentVisibility = 0x01,
     MovementAnimationSource = 0x02,
     CrewTargeting = 0x04,
-    FootstepSoundSource = 0x08
+    FootstepSoundSource = 0x08,
+    CrewDivingProfiles = 0x10,
+    SaveWithoutUnequip = 0x20
 }
 
 Core.LIMITS = {
@@ -94,6 +98,7 @@ Core.PHASE = {
 
 Core.COMMAND = {
     Save = "save",
+    SaveKeep = "savekeep",
     Apply = "apply",
     Clear = "clear",
     Forget = "forget",
@@ -104,6 +109,7 @@ Core.COMMAND = {
 
 local validCommands = {
     [Core.COMMAND.Save] = true,
+    [Core.COMMAND.SaveKeep] = true,
     [Core.COMMAND.Apply] = true,
     [Core.COMMAND.Clear] = true,
     [Core.COMMAND.Forget] = true,
@@ -962,6 +968,74 @@ function Core.tryReadState(message)
     local ok, state, reason = pcall(Core.readState, message)
     if not ok then return nil, "malformed state payload: " .. tostring(state) end
     return state, reason
+end
+
+function Core.validateDivingProfile(profile)
+    if type(profile) ~= "table" then return nil, "diving profile must be a table" end
+    local characterId = tonumber(profile.characterId)
+    local mode = tonumber(profile.mode)
+    if characterId == nil or characterId <= 0 or characterId > 65535 or characterId % 1 ~= 0 then
+        return nil, "characterId must be a positive unsigned 16-bit integer"
+    end
+    if mode == nil or mode < 0 or mode > 2 or mode % 1 ~= 0 then
+        return nil, "diving mode must be 0, 1 or 2"
+    end
+    local captured = profile.captured == true
+    local look = nil
+    if captured then
+        local reason
+        look, reason = Core.validateLook(profile.look or {
+            schemaVersion = Core.LOOK_SCHEMA_VERSION,
+            captured = true,
+            slots = {}
+        })
+        if look == nil then return nil, reason end
+        look.captured = true
+    elseif profile.look ~= nil then
+        return nil, "uncaptured diving profile must not contain a look"
+    end
+    return {
+        protocolVersion = Core.PROTOCOL_VERSION,
+        characterId = characterId,
+        mode = mode,
+        captured = captured,
+        look = look
+    }
+end
+
+function Core.writeDivingProfile(message, profile)
+    local valid, reason = Core.validateDivingProfile(profile)
+    if valid == nil then return false, reason end
+    message.WriteUInt16(Core.PROTOCOL_VERSION)
+    message.WriteUInt16(valid.characterId)
+    message.WriteByte(valid.mode)
+    message.WriteBoolean(valid.captured)
+    if valid.captured then return Core.writeLook(message, valid.look) end
+    return true
+end
+
+function Core.readDivingProfile(message)
+    local version = message.ReadUInt16()
+    if version ~= Core.PROTOCOL_VERSION then
+        return nil, "unsupported protocol version " .. tostring(version)
+    end
+    local profile = {
+        characterId = message.ReadUInt16(),
+        mode = message.ReadByte(),
+        captured = message.ReadBoolean() == true
+    }
+    if profile.captured then
+        local look, reason = Core.readLook(message)
+        if look == nil then return nil, reason end
+        profile.look = look
+    end
+    return Core.validateDivingProfile(profile)
+end
+
+function Core.tryReadDivingProfile(message)
+    local ok, profile, reason = pcall(Core.readDivingProfile, message)
+    if not ok then return nil, "malformed diving profile payload: " .. tostring(profile) end
+    return profile, reason
 end
 
 function Core.writeAck(message, ack)

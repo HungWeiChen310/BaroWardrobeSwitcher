@@ -135,7 +135,10 @@ assert(clientSource:find("local CONFIG", 1, true) == nil,
 assert(clientSource:find("function Helpers.singlePlayerSelectableCharacters()", 1, true) ~= nil and
        clientSource:find('Helpers.userDataMember(character, "IsBot") == true', 1, true) ~= nil and
        clientSource:find("NET_V2_TARGET_COMMAND", 1, true) ~= nil and
+       clientSource:find("NET_V2_DIVING_COMMAND", 1, true) ~= nil and
+       clientSource:find("NET_V2_DIVING_STATE", 1, true) ~= nil and
        clientSource:find("serverSupportsCrewTargeting()", 1, true) ~= nil and
+       clientSource:find("serverSupportsCrewDivingProfiles()", 1, true) ~= nil and
        clientSource:find('tr("button.next_page")', 1, true) ~= nil and
        clientSource:find("GUI.ListBox(", 1, true) ~= nil and
        clientSource:find("(tutorialExpanded and 0.58 or 0.46)", 1, true) ~= nil,
@@ -153,8 +156,11 @@ end
 local settingsXml = assert(settingsFile, "could not load Config/SettingsClient.xml"):read("*a")
 settingsFile:close()
 assert(settingsXml:find("<Settings>", 1, true) ~= nil and
-       settingsXml:find('Name="PanelKey" Type="string" Value="F8"', 1, true) ~= nil,
-    "the Mod Gameplay Settings panel key must default to F8")
+       settingsXml:find('Name="PanelKey" Type="string" Value="F8"', 1, true) ~= nil and
+       settingsXml:find('Name="HideHuskVisuals" Type="bool" Value="false" ShowInMenus="false"', 1, true) ~= nil and
+       settingsXml:find('Name="UnequipOnSave" Type="bool" Value="true" ShowInMenus="false"', 1, true) ~= nil and
+       settingsXml:find('Name="OverrideGeneSplicerAppearance" Type="bool" Value="false" ShowInMenus="false"', 1, true) ~= nil,
+    "client settings must default to F8, visible husk visuals, unequip-on-save enabled, and gene-splicer override disabled")
 
 local localizedText = {}
 local textFile = nil
@@ -176,6 +182,12 @@ TextManager = {
 assert(TextManager.ContainsTag("barowardrobeswitcher.button.save"))
 assert(TextManager.ContainsTag("barowardrobeswitcher.button.animation_fashion"))
 assert(TextManager.ContainsTag("barowardrobeswitcher.button.animation_equipment"))
+assert(TextManager.ContainsTag("barowardrobeswitcher.button.hide_husk_no"))
+assert(TextManager.ContainsTag("barowardrobeswitcher.button.hide_husk_yes"))
+assert(TextManager.ContainsTag("barowardrobeswitcher.button.unequip_on_save_yes"))
+assert(TextManager.ContainsTag("barowardrobeswitcher.button.unequip_on_save_no"))
+assert(TextManager.ContainsTag("barowardrobeswitcher.button.override_gene_splicer_yes"))
+assert(TextManager.ContainsTag("barowardrobeswitcher.button.override_gene_splicer_no"))
 assert(TextManager.ContainsTag("barowardrobeswitcher.button.next_page"))
 assert(TextManager.ContainsTag("barowardrobeswitcher.button.diving_mode_none"))
 assert(TextManager.ContainsTag("barowardrobeswitcher.button.save_diving_outfit"))
@@ -295,6 +307,12 @@ local movementAnimationByCharacterId = {}
 local footstepSoundCalls = 0
 local lastUseFashionFootstepSounds = nil
 local footstepSoundByCharacterId = {}
+local hideHuskVisuals = false
+local hideHuskVisualCalls = 0
+local unequipOnSave = true
+local unequipOnSaveCalls = 0
+local overrideGeneSplicerAppearance = false
+local overrideGeneSplicerAppearanceCalls = 0
 local activationCharacterIds = {}
 local activeCharacterIds = {}
 local capturedIdentifierByCharacterId = {}
@@ -303,6 +321,8 @@ local lastEmptyCaptureCharacterId = nil
 local prefabCaptureCount = 0
 local reuseCheckCount = 0
 local fashionSlotCalls = 0
+local lastFashionSavedSlots = nil
+local lastFashionEmptySlots = nil
 local equipmentRegistrationCalls = 0
 local equipmentRemovalCalls = 0
 local stalePruneCalls = 0
@@ -319,6 +339,25 @@ local visualOverride = {
         return visualOverrideReady and
             "ready; capabilities(renderer=True,animation=True,statusSound=True,itemSound=True)" or
             "loading"
+    end,
+    HasCapability = function() return visualOverrideReady end,
+    GetHideHuskVisuals = function() return hideHuskVisuals end,
+    SetHideHuskVisuals = function(hidden)
+        hideHuskVisualCalls = hideHuskVisualCalls + 1
+        hideHuskVisuals = hidden == true
+        return true
+    end,
+    GetUnequipOnSave = function() return unequipOnSave end,
+    SetUnequipOnSave = function(enabled)
+        unequipOnSaveCalls = unequipOnSaveCalls + 1
+        unequipOnSave = enabled == true
+        return true
+    end,
+    GetOverrideGeneSplicerAppearance = function() return overrideGeneSplicerAppearance end,
+    SetOverrideGeneSplicerAppearance = function(enabled)
+        overrideGeneSplicerAppearanceCalls = overrideGeneSplicerAppearanceCalls + 1
+        overrideGeneSplicerAppearance = enabled == true
+        return true
     end,
     GetCharacterDebugStatus = function() return "test" end,
     HasHighPressureAffliction = function(character) return character.InPressure == true end,
@@ -358,8 +397,10 @@ local visualOverride = {
         lastEmptyCaptureCharacterId = characterId(character)
         return true
     end,
-    SetFashionSlots = function()
+    SetFashionSlots = function(_, savedSlots, emptySlots)
         fashionSlotCalls = fashionSlotCalls + 1
+        lastFashionSavedSlots = tostring(savedSlots or "")
+        lastFashionEmptySlots = tostring(emptySlots or "")
         return true
     end,
     SetAttachmentVisibility = function(_, forceHideMask, forceShowMask)
@@ -803,6 +844,8 @@ local lockedSlots = {}
 local lockedUnequipCalls = 0
 local lockedDropCalls = 0
 local lockedInventoryMoves = 0
+local healthUnequipCalls = 0
+local healthDropCalls = 0
 local lockedItem = {
     ID = 702,
     Name = "Locked Fashion Gear",
@@ -815,7 +858,15 @@ lockedItem.Drop = function(dropper)
     lockedDropCalls = lockedDropCalls + 1
     lockedSlots[InvSlotType.Head] = nil
 end
+local healthItem = {
+    ID = 703,
+    Name = "Arbitrary Health Interface Gear",
+    Prefab = { Identifier = "notagenesplicer", Name = "Arbitrary Health Interface Gear" }
+}
+healthItem.Unequip = function() healthUnequipCalls = healthUnequipCalls + 1 end
+healthItem.Drop = function() healthDropCalls = healthDropCalls + 1 end
 lockedSlots[InvSlotType.Head] = lockedItem
+lockedSlots[InvSlotType.HealthInterface] = healthItem
 selectorNpc.Inventory = {
     GetItemInLimbSlot = function(slot) return lockedSlots[slot] end,
     IsInLimbSlot = function(item, slot) return lockedSlots[slot] == item end,
@@ -828,8 +879,12 @@ selectorNpc.Inventory = {
 buttons["Save Current Outfit"].OnClicked()
 hooks.think()
 assert(lockedUnequipCalls == 1 and lockedDropCalls == 1 and lockedInventoryMoves == 0 and
-       lockedSlots[InvSlotType.Head] == nil,
-    "Save must drop locked fashion gear instead of moving it into character inventory")
+       lockedSlots[InvSlotType.Head] == nil and
+       lockedSlots[InvSlotType.HealthInterface] == healthItem and
+       healthUnequipCalls == 0 and healthDropCalls == 0 and
+       not lastFashionSavedSlots:find("HealthInterface", 1, true) and
+       not lastFashionEmptySlots:find("HealthInterface", 1, true),
+    "Save must remove managed gear but leave every HealthInterface item outside fashion")
 
 local nextPageButton = buttons["Next Page"]
 assert(nextPageButton ~= nil and type(nextPageButton.OnClicked) == "function",
@@ -844,8 +899,47 @@ assert(removedWidgets == removesBeforeNextPage + 1 and liveOverlayRoots == 1,
 assert(not hasVisibleButton("Appearance Layers...") and
        hasVisibleButton("Movement: Fashion Priority") and
        hasVisibleButton("Footstep Sounds: Follow Equipment") and
+       hasVisibleButton("Hide Husk Appearance: No") and
+       hasVisibleButton("Unequip on Save: On") and
+       hasVisibleButton("Override Gene Splicer Appearance: No") and
        hasVisibleButton("Diagnostics"),
-    "page two did not contain movement, footsteps, and diagnostic controls")
+    "page two did not contain movement, footsteps, save behavior, gene-splicer, husk appearance, and diagnostic controls")
+local overrideGeneSplicerButton = buttons["Override Gene Splicer Appearance: No"]
+assert(overrideGeneSplicerButton ~= nil and type(overrideGeneSplicerButton.OnClicked) == "function",
+    "page two did not expose the default-off gene-splicer appearance setting")
+local removesBeforeGeneSplicerOverride = removedWidgets
+overrideGeneSplicerButton.OnClicked()
+assert(removedWidgets == removesBeforeGeneSplicerOverride,
+    "changing gene-splicer appearance rebuilt the overlay inside its click callback")
+hooks.think()
+assert(removedWidgets == removesBeforeGeneSplicerOverride + 1 and liveOverlayRoots == 1 and
+       overrideGeneSplicerAppearanceCalls == 1 and overrideGeneSplicerAppearance == true and
+       hasVisibleButton("Override Gene Splicer Appearance: Yes"),
+    "the gene-splicer appearance toggle did not persist its enabled state in the visual bridge")
+local unequipOnSaveButton = buttons["Unequip on Save: On"]
+assert(unequipOnSaveButton ~= nil and type(unequipOnSaveButton.OnClicked) == "function",
+    "page two did not expose the default-on unequip-on-save setting")
+local removesBeforeDisableUnequip = removedWidgets
+unequipOnSaveButton.OnClicked()
+assert(removedWidgets == removesBeforeDisableUnequip,
+    "changing unequip-on-save rebuilt the overlay inside its click callback")
+hooks.think()
+assert(removedWidgets == removesBeforeDisableUnequip + 1 and liveOverlayRoots == 1 and
+       unequipOnSaveCalls == 1 and unequipOnSave == false and
+       hasVisibleButton("Unequip on Save: Off"),
+    "the unequip-on-save toggle did not persist its disabled state in the visual bridge")
+local showHuskButton = buttons["Hide Husk Appearance: No"]
+assert(showHuskButton ~= nil and type(showHuskButton.OnClicked) == "function",
+    "page two did not expose the default-visible husk appearance setting")
+local removesBeforeHideHusk = removedWidgets
+showHuskButton.OnClicked()
+assert(removedWidgets == removesBeforeHideHusk,
+    "changing husk appearance rebuilt the overlay inside its click callback")
+hooks.think()
+assert(removedWidgets == removesBeforeHideHusk + 1 and liveOverlayRoots == 1 and
+       hideHuskVisualCalls == 1 and hideHuskVisuals == true and
+       hasVisibleButton("Hide Husk Appearance: Yes"),
+    "the husk appearance toggle did not persist its enabled state in the visual bridge")
 local fashionMovementButton = buttons["Movement: Fashion Priority"]
 assert(fashionMovementButton ~= nil and type(fashionMovementButton.OnClicked) == "function",
     "page two did not expose the default fashion-priority movement setting")
@@ -917,6 +1011,24 @@ hooks.think()
 assert(removedWidgets == removesBeforePageBack + 1 and liveOverlayRoots == 1 and
        hasVisibleButton("Appearance Layers...") and not hasVisibleButton("Diagnostics"),
     "Back did not return to the main page on the next tick")
+
+local keptUnequipCalls = 0
+local keptDropCalls = 0
+local keptItem = {
+    ID = 704,
+    Name = "Kept Fashion Gear",
+    Prefab = { Identifier = "keptfashiongear", Name = "Kept Fashion Gear" }
+}
+keptItem.Unequip = function() keptUnequipCalls = keptUnequipCalls + 1 end
+keptItem.Drop = function() keptDropCalls = keptDropCalls + 1 end
+lockedSlots[InvSlotType.Head] = keptItem
+buttons["Save Current Outfit"].OnClicked()
+hooks.think()
+assert(keptUnequipCalls == 0 and keptDropCalls == 0 and
+       lockedSlots[InvSlotType.Head] == keptItem and
+       lockedSlots[InvSlotType.HealthInterface] == healthItem and
+       lastFashionSavedSlots:find("HealthInterface", 1, true) ~= nil,
+    "enabled gene-splicer override did not capture the health-interface appearance while keeping equipment")
 
 buttons["Wardrobe target: A Target NPC"].OnClicked()
 hooks.think()
@@ -1288,7 +1400,9 @@ assert(WardrobeCore.writeServerHello(
     WardrobeCore.CAPABILITY.AttachmentVisibility +
         WardrobeCore.CAPABILITY.MovementAnimationSource +
         WardrobeCore.CAPABILITY.CrewTargeting +
-        WardrobeCore.CAPABILITY.FootstepSoundSource
+        WardrobeCore.CAPABILITY.FootstepSoundSource +
+        WardrobeCore.CAPABILITY.CrewDivingProfiles +
+        WardrobeCore.CAPABILITY.SaveWithoutUnequip
 ))
 serverHello.FinalizeForTransport()
 assert(type(networkHandlers[WardrobeCore.NET.V2_HELLO]) == "function")
@@ -1394,7 +1508,8 @@ assert(buttons["Save Current Outfit"].Enabled == false,
 local sentSave = networkSent[#networkSent]
 assert(sentSave ~= nil and sentSave.name == WardrobeCore.NET.V2_COMMAND)
 local decodedSave = assert(WardrobeCore.readCommand(sentSave))
-assert(decodedSave.kind == WardrobeCore.COMMAND.Save)
+assert(decodedSave.kind == WardrobeCore.COMMAND.SaveKeep,
+    "multiplayer save ignored the disabled unequip-on-save setting")
 local acceptedAck = newNetworkBuffer(WardrobeCore.NET.V2_ACK)
 assert(WardrobeCore.writeAck(acceptedAck, {
     operationId = decodedSave.operationId,
@@ -1567,7 +1682,9 @@ do
     Character.CharacterList[#Character.CharacterList + 1] = earlyPlayer
     hooks["character.created"](earlyPlayer)
     assert(activationCount == beforeLateEntity + 1 and activeCharacterIds[remoteId] == true,
-        "character.created did not immediately retry its retained snapshot")
+        "character.created did not immediately retry its retained snapshot: activations=" ..
+        tostring(activationCount) .. ", expected=" .. tostring(beforeLateEntity + 1) ..
+        ", active=" .. tostring(activeCharacterIds[remoteId]))
     assert(capturedIdentifierByCharacterId[remoteId] == "helmet",
         "the late Character received the wrong wardrobe look")
     assert(movementAnimationByCharacterId[remoteId] == false,
@@ -1806,33 +1923,45 @@ do
     hooks.think()
     local multiplayerTargetButton = buttons["Wardrobe target: Late Local Player"]
     assert(multiplayerTargetButton ~= nil and type(multiplayerTargetButton.OnClicked) == "function" and
-        hasVisibleText("Multiplayer uses one saved look per player; this selects who the actions affect."),
-        "crew-target capable multiplayer did not expose its shared-look target selector")
+        hasVisibleText("Each crew member has an independent saved look."),
+        "crew-target capable multiplayer did not expose its per-character target selector")
     multiplayerTargetButton.OnClicked()
     hooks.think()
     assert(hasVisibleButton("Wardrobe target: Multiplayer Bot"),
         "multiplayer selector included a player or enemy before the friendly bot")
-    buttons["Apply Saved Look"].OnClicked()
+    assert(buttons["Apply Saved Look"].Enabled == false,
+        "an unconfigured multiplayer bot inherited the player's saved look")
+    deliverState({
+        revision = 25,
+        characterId = multiplayerPlayer.ID,
+        active = true,
+        look = nextRoundLook
+    })
     hooks.think()
-    local targetedApplyMessage = networkSent[#networkSent]
-    assert(targetedApplyMessage ~= nil and
-        targetedApplyMessage.name == WardrobeCore.NET.V2_TARGET_COMMAND,
+    assert(hasVisibleButton("Wardrobe target: Multiplayer Bot") and
+           buttons["Apply Saved Look"].Enabled == false,
+        "a player-state broadcast overwrote the selected bot's independent wardrobe")
+    buttons["Save Current Outfit"].OnClicked()
+    hooks.think()
+    local targetedSaveMessage = networkSent[#networkSent]
+    assert(targetedSaveMessage ~= nil and
+        targetedSaveMessage.name == WardrobeCore.NET.V2_TARGET_COMMAND,
         "selected multiplayer bot used the self-only command channel")
-    local targetedApply = assert(WardrobeCore.readTargetCommand(targetedApplyMessage))
-    assert(targetedApply.kind == WardrobeCore.COMMAND.Apply and
-        targetedApply.targetCharacterId == multiplayerBot.ID,
-        "multiplayer Apply did not freeze the selected bot entity ID")
+    local targetedSave = assert(WardrobeCore.readTargetCommand(targetedSaveMessage))
+    assert(targetedSave.kind == WardrobeCore.COMMAND.SaveKeep and
+        targetedSave.targetCharacterId == multiplayerBot.ID,
+        "multiplayer SaveKeep did not freeze the selected bot entity ID")
     assert(buttons["Wardrobe target: Multiplayer Bot"].Enabled == false,
         "multiplayer target selector stayed enabled while a command was pending")
-    local rejectedTargetApplyAck = newNetworkBuffer(WardrobeCore.NET.V2_ACK)
-    assert(WardrobeCore.writeAck(rejectedTargetApplyAck, {
-        operationId = targetedApply.operationId,
+    local rejectedTargetSaveAck = newNetworkBuffer(WardrobeCore.NET.V2_ACK)
+    assert(WardrobeCore.writeAck(rejectedTargetSaveAck, {
+        operationId = targetedSave.operationId,
         accepted = false,
         revision = 24,
         reason = "synthetic target rejection"
     }))
-    rejectedTargetApplyAck.FinalizeForTransport()
-    networkHandlers[WardrobeCore.NET.V2_ACK](rejectedTargetApplyAck)
+    rejectedTargetSaveAck.FinalizeForTransport()
+    networkHandlers[WardrobeCore.NET.V2_ACK](rejectedTargetSaveAck)
     hooks.think()
     buttons["Wardrobe target: Multiplayer Bot"].OnClicked()
     hooks.think()
@@ -1841,6 +1970,7 @@ do
 
     -- Capabilities are independent. A relay may expose animation sync without
     -- attachment visibility; the animation command and false setting must survive.
+    unequipOnSave = true
     local movementOnlyHello = newNetworkBuffer(WardrobeCore.NET.V2_HELLO)
     assert(WardrobeCore.writeServerHello(
         movementOnlyHello,

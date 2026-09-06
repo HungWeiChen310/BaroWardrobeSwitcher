@@ -24,6 +24,9 @@ local CAPABILITY_ATTACHMENT_VISIBILITY = Core.CAPABILITY.AttachmentVisibility
 local CAPABILITY_MOVEMENT_ANIMATION_SOURCE = Core.CAPABILITY.MovementAnimationSource
 local CAPABILITY_CREW_TARGETING = Core.CAPABILITY.CrewTargeting
 local CAPABILITY_FOOTSTEP_SOUND_SOURCE = Core.CAPABILITY.FootstepSoundSource
+local CAPABILITY_CREW_DIVING_PROFILES = Core.CAPABILITY.CrewDivingProfiles
+local CAPABILITY_SAVE_WITHOUT_UNEQUIP = Core.CAPABILITY.SaveWithoutUnequip
+local COMMAND_SAVE_KEEP = Core.COMMAND.SaveKeep
 local COMMAND_VISIBILITY = Core.COMMAND.Visibility
 local COMMAND_ANIMATION = Core.COMMAND.Animation
 local COMMAND_FOOTSTEP = Core.COMMAND.Footstep
@@ -45,23 +48,26 @@ local slots = {
     { key = "InnerClothes", slot = InvSlotType.InnerClothes },
     { key = "OuterClothes", slot = InvSlotType.OuterClothes },
     { key = "Bag", slot = InvSlotType.Bag },
-    { key = "HealthInterface", slot = InvSlotType.HealthInterface }
+    { key = "HealthInterface", slot = InvSlotType.HealthInterface, optional = true }
 }
 local slotByKey = {}
 for _, entry in ipairs(slots) do slotByKey[entry.key] = entry end
 
 local persistentRecords = {}
+local persistentCrewRecords = {}
 local legacySteamRecords = {}
 local migratedLegacySteamIds = {}
 local sessionsByClient = setmetatable({}, { __mode = "k" })
 local operationCachesByAccount = {}
 local activeByCharacterId = {}
+local crewRuntimeSession = { revision = 0 }
 local observerRevisionByCharacterId = {}
 local serverSessionId = tostring(os.time()) .. "-" .. tostring(math.random(100000, 999999))
 local lastGameSessionKey = nil
 local roundReactivationGeneration = 0
 local OPERATION_CACHE_RETENTION_SECONDS = 120
 local MAX_RETAINED_OPERATION_ACCOUNTS = 64
+local CREW_PERSISTENCE_VERSION = 2
 local SERVER_LOG_MAX_BYTES = 65536
 local SERVER_LOG_MAX_WRITES_PER_SECOND = 20
 local serverLogWindowSecond = nil
@@ -147,7 +153,7 @@ local function cloneLook(look)
         slots = {}
     }
     for _, entry in ipairs(slots) do
-        local source = look.slots ~= nil and look.slots[entry.key] or nil
+        local source = entry.managed ~= false and look.slots ~= nil and look.slots[entry.key] or nil
         if source ~= nil then
             if type(source) == "table" then
                 cloned.slots[entry.key] = {
@@ -232,6 +238,38 @@ local function currentGameSessionKey()
         return "runtime:" .. serverSessionId .. ":" .. presetIdentifier
     end
     return nil
+end
+
+local function profileIdentifierPart(value)
+    local text = normalizedSessionValue(value) or ""
+    return tostring(#text) .. ":" .. text
+end
+
+local function crewCharacterKey(character)
+    local info = userDataMember(character, "Info")
+    local infoId = tonumber(userDataMember(info, "ID"))
+    if infoId ~= nil and infoId > 0 then return "info:" .. tostring(math.floor(infoId)) end
+    local originalName = normalizedSessionValue(userDataMember(info, "OriginalName"))
+    local speciesName = normalizedSessionValue(userDataMember(info, "SpeciesName"))
+    if originalName ~= nil and speciesName ~= nil then
+        local prefabIds = userDataMember(info, "HumanPrefabIds")
+        return table.concat({
+            profileIdentifierPart(originalName),
+            profileIdentifierPart(speciesName),
+            profileIdentifierPart(userDataMember(prefabIds, "Item1")),
+            profileIdentifierPart(userDataMember(prefabIds, "Item2"))
+        }, "|")
+    end
+    local name = normalizedSessionValue(userDataMember(info, "Name")) or
+        normalizedSessionValue(userDataMember(character, "Name"))
+    return name ~= nil and ("name:" .. profileIdentifierPart(name)) or nil
+end
+
+local function crewStorageKey(character)
+    local sessionKey = currentGameSessionKey()
+    local characterKey = crewCharacterKey(character)
+    if sessionKey == nil or characterKey == nil then return nil end
+    return sessionKey .. "\n" .. characterKey, sessionKey, characterKey
 end
 
 local function isRuntimeSessionKey(key)
@@ -571,7 +609,8 @@ local function encodeLookJson(look)
     local slotMembers = {}
     local colorMembers = {}
     for _, entry in ipairs(slots) do
-        local slot = look ~= nil and look.slots ~= nil and look.slots[entry.key] or nil
+        local slot = entry.managed ~= false and look ~= nil and look.slots ~= nil and
+            look.slots[entry.key] or nil
         local identifier = slot ~= nil and (type(slot) == "table" and slot.identifier or slot) or nil
         identifier = trim(identifier)
         if identifier ~= nil then
@@ -634,10 +673,43 @@ local function encodePersistenceDocument()
     }, ",") .. "}\n"
 end
 
+local function encodeCrewPersistenceDocument()
+    local keys = {}
+    for key in pairs(persistentCrewRecords) do keys[#keys + 1] = key end
+    table.sort(keys)
+    local records = {}
+    for _, key in ipairs(keys) do
+        local record = persistentCrewRecords[key]
+        if record ~= nil and (record.look ~= nil or record.divingCaptured == true or
+            (tonumber(record.divingMode) or 0) ~= 0) then
+            records[#records + 1] = "{" .. table.concat({
+                '"sessionKey":"' .. jsonEscape(record.sessionKey) .. '"',
+                '"characterKey":"' .. jsonEscape(record.characterKey) .. '"',
+                '"displayName":"' .. jsonEscape(record.displayName or "") .. '"',
+                '"active":' .. tostring(record.active == true),
+                '"look":' .. (record.look ~= nil and encodeLookJson(record.look) or "null"),
+                '"divingMode":' .. tostring(math.floor(tonumber(record.divingMode) or 0)),
+                '"divingCaptured":' .. tostring(record.divingCaptured == true),
+                '"divingLook":' .. (record.divingLook ~= nil and
+                    encodeLookJson(record.divingLook) or "null")
+            }, ",") .. "}"
+        end
+    end
+    return '{"schemaVersion":' .. tostring(CREW_PERSISTENCE_VERSION) ..
+        ',"records":[' .. table.concat(records, ",") .. "]}\n"
+end
+
 local function persistLooks()
     local path = storagePath("ServerLooks.json")
     local ok, reason = atomicWrite(path, encodePersistenceDocument())
     if not ok then warn("Could not atomically persist server wardrobes: " .. tostring(reason)) end
+    return ok
+end
+
+local function persistCrewLooks()
+    local path = storagePath("ServerCrewLooks.json")
+    local ok, reason = atomicWrite(path, encodeCrewPersistenceDocument())
+    if not ok then warn("Could not atomically persist server crew wardrobes: " .. tostring(reason)) end
     return ok
 end
 
@@ -775,20 +847,24 @@ local function validateStoredLook(raw, persistenceVersion)
     }
     local count = 0
     for key, identifier in pairs(raw.slots) do
-        if slotByKey[key] == nil or type(identifier) ~= "string" or byteLength(identifier) > MAX_IDENTIFIER_BYTES then return nil end
-        identifier = trim(identifier)
-        if identifier == nil then return nil end
-        count = count + 1
-        if count > MAX_SLOTS then return nil end
-        look.slots[key] = { identifier = identifier, itemId = 0, name = "" }
+        local entry = slotByKey[key]
+        if entry == nil or type(identifier) ~= "string" or byteLength(identifier) > MAX_IDENTIFIER_BYTES then return nil end
+        if entry.managed ~= false then
+            identifier = trim(identifier)
+            if identifier == nil then return nil end
+            count = count + 1
+            if count > MAX_SLOTS then return nil end
+            look.slots[key] = { identifier = identifier, itemId = 0, name = "" }
+        end
     end
     if persistenceVersion == PERSISTENCE_VERSION or persistenceVersion == 4 then
         for key, color in pairs(raw.colors) do
-            if slotByKey[key] == nil or look.slots[key] == nil or type(color) ~= "number" or
+            local entry = slotByKey[key]
+            if entry == nil or (entry.managed ~= false and look.slots[key] == nil) or type(color) ~= "number" or
                 color < 0 or color > MAX_REVISION or color % 1 ~= 0 then
                 return nil
             end
-            look.slots[key].color = math.floor(color)
+            if entry.managed ~= false then look.slots[key].color = math.floor(color) end
         end
     end
     return look
@@ -1025,11 +1101,6 @@ local function itemSpriteColor(item)
     return math.floor(color)
 end
 
-local function isIgnoredItem(item)
-    local identifier = itemIdentifier(item)
-    return identifier == "genesplicer" or identifier == "advancedgenesplicer"
-end
-
 local function isLockedWardrobeItem(item)
     if item == nil then return false end
     local ok, locked = pcall(function()
@@ -1040,6 +1111,86 @@ local function isLockedWardrobeItem(item)
         return item.HasTag("lock") or item.HasTag("locked")
     end)
     return ok and locked == true
+end
+
+local function loadCrewPersistence()
+    local path = storagePath("ServerCrewLooks.json")
+    if path == nil or not fileExists(path) then return end
+    local text = readAllText(path)
+    local ok, document = pcall(decodeJson, text or "")
+    local documentVersion = ok and type(document) == "table" and
+        tonumber(document.schemaVersion) or nil
+    if not ok or (documentVersion ~= 1 and documentVersion ~= CREW_PERSISTENCE_VERSION) or
+        type(document.records) ~= "table" or
+        not hasOnlyFields(document, { schemaVersion = true, records = true }) then
+        quarantine(path, ok and "invalid_crew_schema" or document)
+        persistentCrewRecords = {}
+        persistCrewLooks()
+        return
+    end
+    local loaded = {}
+    for _, raw in ipairs(document.records) do
+        local allowedFields = documentVersion == 1 and {
+            sessionKey = true,
+            characterKey = true,
+            displayName = true,
+            active = true,
+            look = true
+        } or {
+            sessionKey = true,
+            characterKey = true,
+            displayName = true,
+            active = true,
+            look = true,
+            divingMode = true,
+            divingCaptured = true,
+            divingLook = true
+        }
+        local valid = type(raw) == "table" and hasOnlyFields(raw, allowedFields) and
+            type(raw.sessionKey) == "string" and
+            type(raw.characterKey) == "string" and type(raw.displayName) == "string" and
+            type(raw.active) == "boolean"
+        local look = valid and raw.look ~= nil and
+            validateStoredLook(raw.look, PERSISTENCE_VERSION) or nil
+        valid = valid and (raw.look == nil or look ~= nil) and
+            (raw.active ~= true or look ~= nil)
+        local divingMode = documentVersion == 1 and 0 or tonumber(raw.divingMode)
+        local divingCaptured = documentVersion ~= 1 and raw.divingCaptured == true
+        if documentVersion == CREW_PERSISTENCE_VERSION then
+            valid = valid and type(raw.divingMode) == "number" and
+                divingMode >= 0 and divingMode <= 2 and divingMode % 1 == 0 and
+                type(raw.divingCaptured) == "boolean" and
+                ((divingCaptured and raw.divingLook ~= nil) or
+                 (not divingCaptured and raw.divingLook == nil))
+        end
+        local divingLook = valid and divingCaptured and
+            validateStoredLook(raw.divingLook, PERSISTENCE_VERSION) or nil
+        local sessionKey = valid and normalizedSessionValue(raw.sessionKey) or nil
+        local characterKey = valid and trim(raw.characterKey) or nil
+        local key = sessionKey ~= nil and characterKey ~= nil and
+            (sessionKey .. "\n" .. characterKey) or nil
+        if key == nil or (documentVersion == 1 and look == nil) or
+            (divingCaptured and divingLook == nil) or
+            (look == nil and not divingCaptured and divingMode == 0) or
+            loaded[key] ~= nil then
+            quarantine(path, "invalid_crew_record")
+            persistentCrewRecords = {}
+            persistCrewLooks()
+            return
+        end
+        loaded[key] = {
+            sessionKey = sessionKey,
+            characterKey = characterKey,
+            displayName = raw.displayName,
+            active = raw.active == true,
+            look = look,
+            divingMode = divingMode,
+            divingCaptured = divingCaptured,
+            divingLook = divingLook
+        }
+    end
+    persistentCrewRecords = loaded
+    if documentVersion ~= CREW_PERSISTENCE_VERSION then persistCrewLooks() end
 end
 
 local function getSlotItem(character, slot)
@@ -1085,11 +1236,21 @@ local function unequipItem(character, item)
     return clear()
 end
 
-local function collectWardrobeItems(character)
+local function collectWardrobeItems(character, look)
     local result, byItem = {}, {}
+    local preserved = {}
     for _, entry in ipairs(slots) do
-        local item = getSlotItem(character, entry.slot)
-        if item ~= nil and not isIgnoredItem(item) then
+        if entry.optional == true and
+            (look == nil or look.slots == nil or look.slots[entry.key] == nil) then
+            local item = getSlotItem(character, entry.slot)
+            if item ~= nil then preserved[item] = true end
+        end
+    end
+    for _, entry in ipairs(slots) do
+        local included = entry.optional ~= true or
+            (look ~= nil and look.slots ~= nil and look.slots[entry.key] ~= nil)
+        local item = included and getSlotItem(character, entry.slot) or nil
+        if item ~= nil and preserved[item] ~= true then
             local snapshot = byItem[item]
             if snapshot == nil then
                 snapshot = { item = item, slots = {} }
@@ -1166,26 +1327,30 @@ local function canonicalizeLook(raw, requireCaptured)
     }
     local count, payloadBytes = 0, 16
     for key, color in pairs(raw.colors or {}) do
-        if type(key) ~= "string" or slotByKey[key] == nil then return nil, "unknown_color_slot" end
-        if raw.slots[key] == nil then return nil, "orphan_color" end
+        local entry = type(key) == "string" and slotByKey[key] or nil
+        if entry == nil then return nil, "unknown_color_slot" end
+        if entry.managed ~= false and raw.slots[key] == nil then return nil, "orphan_color" end
         if type(color) ~= "number" or color < 0 or color > MAX_REVISION or color % 1 ~= 0 then
             return nil, "invalid_color"
         end
     end
     for key, rawSlot in pairs(raw.slots) do
-        if type(key) ~= "string" or slotByKey[key] == nil then return nil, "unknown_slot" end
-        count = count + 1
-        if count > MAX_SLOTS then return nil, "too_many_slots" end
-        local identifier = type(rawSlot) == "table" and rawSlot.identifier or rawSlot
-        local color = raw.colors ~= nil and raw.colors[key] or
-            (type(rawSlot) == "table" and rawSlot.color or nil)
-        if type(identifier) ~= "string" then return nil, "invalid_identifier" end
-        payloadBytes = payloadBytes + byteLength(key) + byteLength(identifier) + 5
-        if color ~= nil then payloadBytes = payloadBytes + 4 end
-        if payloadBytes > MAX_PAYLOAD_BYTES then return nil, "payload_too_large" end
-        local slot, reason = canonicalSlot(identifier, key, color)
-        if slot == nil then return nil, reason .. ":" .. key end
-        canonical.slots[key] = slot
+        local entry = type(key) == "string" and slotByKey[key] or nil
+        if entry == nil then return nil, "unknown_slot" end
+        if entry.managed ~= false then
+            count = count + 1
+            if count > MAX_SLOTS then return nil, "too_many_slots" end
+            local identifier = type(rawSlot) == "table" and rawSlot.identifier or rawSlot
+            local color = raw.colors ~= nil and raw.colors[key] or
+                (type(rawSlot) == "table" and rawSlot.color or nil)
+            if type(identifier) ~= "string" then return nil, "invalid_identifier" end
+            payloadBytes = payloadBytes + byteLength(key) + byteLength(identifier) + 5
+            if color ~= nil then payloadBytes = payloadBytes + 4 end
+            if payloadBytes > MAX_PAYLOAD_BYTES then return nil, "payload_too_large" end
+            local slot, reason = canonicalSlot(identifier, key, color)
+            if slot == nil then return nil, reason .. ":" .. key end
+            canonical.slots[key] = slot
+        end
     end
     return canonical
 end
@@ -1209,8 +1374,11 @@ local function captureAuthoritativeLook(character, clientLook)
         slots = {}
     }
     for _, entry in ipairs(slots) do
-        local item = getSlotItem(character, entry.slot)
-        if item ~= nil and not isIgnoredItem(item) then
+        local requested = entry.optional ~= true or
+            (type(clientLook) == "table" and type(clientLook.slots) == "table" and
+                clientLook.slots[entry.key] ~= nil)
+        local item = requested and getSlotItem(character, entry.slot) or nil
+        if item ~= nil then
             local identifier = itemIdentifier(item)
             if identifier ~= nil then
                 raw.slots[entry.key] = {
@@ -1510,13 +1678,126 @@ local function sendLegacyState(client, characterId, active, look)
     end
 end
 
-local function sendStateTo(client, ownerSession, ownerRevision, observerRevision, characterId, active, look)
+local function sendStateTo(client, ownerSession, ownerRevision, observerRevision, characterId, active, look, crewOwned)
     local recipient = sessionFor(client)
     if recipient ~= nil and recipient.protocol == PROTOCOL_VERSION then
-        local revision = recipient == ownerSession and ownerRevision or observerRevision
+        local revision = crewOwned == true and recipient.revision or
+            (recipient == ownerSession and ownerRevision or observerRevision)
         sendV2State(client, revision, characterId, active, look)
     elseif recipient ~= nil and recipient.protocol == 1 then
         sendLegacyState(client, characterId, active, look)
+    end
+end
+
+local function cloneCrewRecord(record)
+    if record == nil then return nil end
+    return {
+        sessionKey = record.sessionKey,
+        characterKey = record.characterKey,
+        displayName = record.displayName,
+        active = record.active == true,
+        look = cloneLook(record.look),
+        divingMode = math.floor(tonumber(record.divingMode) or 0),
+        divingCaptured = record.divingCaptured == true,
+        divingLook = cloneLook(record.divingLook)
+    }
+end
+
+local function snapshotCrewState(character)
+    local key, sessionKey, characterKey = crewStorageKey(character)
+    if key == nil then return nil end
+    return {
+        key = key,
+        sessionKey = sessionKey,
+        characterKey = characterKey,
+        record = cloneCrewRecord(persistentCrewRecords[key])
+    }
+end
+
+local function crewLook(character)
+    local key = crewStorageKey(character)
+    local record = key ~= nil and persistentCrewRecords[key] or nil
+    return record ~= nil and cloneLook(record.look) or nil
+end
+
+local function crewDivingProfile(character)
+    local key = crewStorageKey(character)
+    local record = key ~= nil and persistentCrewRecords[key] or nil
+    if record == nil then return nil end
+    return {
+        mode = math.floor(tonumber(record.divingMode) or 0),
+        captured = record.divingCaptured == true,
+        look = cloneLook(record.divingLook)
+    }
+end
+
+local function crewRecordHasData(record)
+    return record ~= nil and (record.look ~= nil or record.divingCaptured == true or
+        (tonumber(record.divingMode) or 0) ~= 0)
+end
+
+local function setCrewLook(snapshot, character, look, active)
+    if snapshot == nil then return false end
+    local record = cloneCrewRecord(persistentCrewRecords[snapshot.key]) or {}
+    record.sessionKey = snapshot.sessionKey
+    record.characterKey = snapshot.characterKey
+    record.displayName = tostring(userDataMember(character, "Name") or "")
+    record.active = active == true and look ~= nil
+    record.look = cloneLook(look)
+    persistentCrewRecords[snapshot.key] = crewRecordHasData(record) and record or nil
+    return true
+end
+
+local function setCrewDivingProfile(snapshot, character, profile)
+    if snapshot == nil or profile == nil then return false end
+    local record = cloneCrewRecord(persistentCrewRecords[snapshot.key]) or {}
+    record.sessionKey = snapshot.sessionKey
+    record.characterKey = snapshot.characterKey
+    record.displayName = tostring(userDataMember(character, "Name") or "")
+    record.active = record.active == true and record.look ~= nil
+    record.divingMode = math.floor(tonumber(profile.mode) or 0)
+    record.divingCaptured = profile.captured == true
+    record.divingLook = record.divingCaptured and cloneLook(profile.look) or nil
+    persistentCrewRecords[snapshot.key] = crewRecordHasData(record) and record or nil
+    return true
+end
+
+local function persistCrewOrRollback(snapshot)
+    if snapshot == nil then return false end
+    if persistCrewLooks() then return true end
+    persistentCrewRecords[snapshot.key] = cloneCrewRecord(snapshot.record)
+    return false
+end
+
+local function sendCrewDivingState(client, character, profile)
+    if client == nil or client.Connection == nil or character == nil or profile == nil then return false end
+    local recipient = sessionFor(client)
+    if recipient == nil or recipient.protocol ~= PROTOCOL_VERSION then return false end
+    local message = Networking.Start(NET.V2_DIVING_STATE)
+    local written, reason = Core.writeDivingProfile(message, {
+        characterId = characterEntityId(character),
+        mode = profile.mode,
+        captured = profile.captured == true,
+        look = profile.look
+    })
+    if not written then
+        warn("Could not encode crew diving profile: " .. tostring(reason))
+        return false
+    end
+    Networking.Send(message, client.Connection)
+    return true
+end
+
+local function broadcastCrewDivingState(character, profile)
+    for _, client in ipairs(connectedClients()) do
+        sendCrewDivingState(client, character, profile)
+    end
+end
+
+local function sendCrewDivingSnapshot(client)
+    for _, character in ipairs(characterListSnapshot()) do
+        local profile = crewDivingProfile(character)
+        if profile ~= nil then sendCrewDivingState(client, character, profile) end
     end
 end
 
@@ -1529,19 +1810,21 @@ local function nextObserverRevision(characterId)
     return revision
 end
 
-local function broadcastState(ownerSession, ownerRevision, characterId, active, look, observerRevision)
+local function broadcastState(ownerSession, ownerRevision, characterId, active, look, observerRevision, crewOwned)
     if tonumber(characterId) == nil or tonumber(characterId) <= 0 then return end
     observerRevision = tonumber(observerRevision) or nextObserverRevision(characterId)
     for _, client in ipairs(connectedClients()) do
-        sendStateTo(client, ownerSession, ownerRevision, observerRevision, characterId, active, look)
+        sendStateTo(client, ownerSession, ownerRevision, observerRevision, characterId, active, look, crewOwned)
     end
     return observerRevision
 end
 
 local activateRuntime
+local restoreCrewRuntimes
 local handleGameSessionChange
 
 local function sendActiveSnapshot(client)
+    if restoreCrewRuntimes ~= nil then restoreCrewRuntimes() end
     local reboundCharacterIds = {}
     local requestingSession = sessionFor(client)
     -- Rebuild runtime entries lost during round transitions. A ready owner's
@@ -1572,7 +1855,26 @@ local function sendActiveSnapshot(client)
                 active.observerRevision,
                 characterId,
                 true,
-                active.look
+                active.look,
+                active.crewKey ~= nil
+            )
+        end
+    end
+    for _, character in ipairs(characterListSnapshot()) do
+        local characterId = characterEntityId(character)
+        local key = crewStorageKey(character)
+        local record = key ~= nil and persistentCrewRecords[key] or nil
+        if characterId > 0 and record ~= nil and record.look ~= nil and
+            activeByCharacterId[characterId] == nil then
+            sendStateTo(
+                client,
+                crewRuntimeSession,
+                0,
+                0,
+                characterId,
+                false,
+                record.look,
+                true
             )
         end
     end
@@ -1585,23 +1887,30 @@ local function sendOwnInactiveState(session)
     sendV2State(session.client, session.revision, characterId, false, session.savedLook)
 end
 
-local function clearActiveRuntime(session, shouldBroadcast)
+local function clearActiveRuntime(session, shouldBroadcast, targetCharacterId, inactiveLook, crewOwned)
     if session == nil then return nil end
-    local characterId = tonumber(session.activeCharacterId)
-    session.active = false
-    session.activePersistent = false
-    session.persistentSessionKey = nil
-    session.activeCharacterId = nil
+    local characterId = tonumber(targetCharacterId) or tonumber(session.activeCharacterId)
+    if characterId == tonumber(session.activeCharacterId) then
+        session.active = false
+        session.activePersistent = false
+        session.persistentSessionKey = nil
+        session.activeCharacterId = nil
+    end
     if characterId ~= nil and characterId > 0 then
         local active = activeByCharacterId[characterId]
-        if active == nil or active.session == session then activeByCharacterId[characterId] = nil end
-        if shouldBroadcast then broadcastState(session, session.revision, characterId, false, nil) end
+        if active == nil or active.session == session or active.crewKey ~= nil then
+            activeByCharacterId[characterId] = nil
+        end
+        if shouldBroadcast then
+            broadcastState(session, session.revision, characterId, false, inactiveLook, nil, crewOwned)
+        end
     end
     return characterId
 end
 
-activateRuntime = function(session, character, look, restoring)
+activateRuntime = function(session, character, look, restoring, targeted)
     local characterId = characterEntityId(character)
+    targeted = targeted == true
     local restoreSessionKey = restoring == true and currentGameSessionKey() or nil
     local expectedSessionKey = restoring == true and session ~= nil and
         session.persistentSessionKey or nil
@@ -1611,25 +1920,30 @@ activateRuntime = function(session, character, look, restoring)
             (expectedSessionKey ~= nil and restoreSessionKey ~= expectedSessionKey))) then
         return false
     end
-    if session.activeCharacterId ~= nil and tonumber(session.activeCharacterId) ~= characterId then
+    if not targeted and session.activeCharacterId ~= nil and
+        tonumber(session.activeCharacterId) ~= characterId then
         clearActiveRuntime(session, true)
     end
     local previous = activeByCharacterId[characterId]
-    if previous ~= nil and previous.session ~= session then
+    if previous ~= nil and previous.session ~= session and previous.crewKey == nil then
         return false
     end
-    session.active = true
-    session.activePersistent = character == clientCharacter(session.client)
-    session.persistentSessionKey = nil
-    session.activeCharacterId = characterId
+    if not targeted then
+        session.active = true
+        session.activePersistent = character == clientCharacter(session.client)
+        session.persistentSessionKey = nil
+        session.activeCharacterId = characterId
+    end
     local observerRevision = nextObserverRevision(characterId)
+    local crewKey = targeted and crewStorageKey(character) or nil
     activeByCharacterId[characterId] = {
         session = session,
         revision = session.revision,
         observerRevision = observerRevision,
-        look = cloneLook(look)
+        look = cloneLook(look),
+        crewKey = crewKey
     }
-    broadcastState(session, session.revision, characterId, true, look, observerRevision)
+    broadcastState(session, session.revision, characterId, true, look, observerRevision, targeted)
     return true
 end
 
@@ -1684,14 +1998,18 @@ local function nextRevision(session)
     return true
 end
 
-local function commitSave(session, character, clientLook)
+local function commitSave(session, character, clientLook, targeted, unequipOnSave)
     if not canAdvanceRevision(session) then return false, "revision_exhausted" end
     local look, reason = captureAuthoritativeLook(character, clientLook)
     if look == nil then return false, reason end
+    targeted = targeted == true
+    local crewSnapshot = targeted and snapshotCrewState(character) or nil
+    if targeted and crewSnapshot == nil then return false, "crew_identity_unavailable" end
 
     -- Verify durable storage before Save changes physical equipment. This keeps
     -- an unavailable server filesystem from turning a rejected Save into lost gear.
-    if session.accountId ~= nil and not persistLooks() then
+    if (targeted and not persistCrewLooks()) or
+        (not targeted and session.accountId ~= nil and not persistLooks()) then
         return false, "persistence_failed"
     end
 
@@ -1699,7 +2017,7 @@ local function commitSave(session, character, clientLook)
     -- the revision, persist, or broadcast unless every captured item left all
     -- managed slots. Best-effort re-equip restores already removed items when a
     -- later item fails, including persistence failures after removal.
-    local itemSnapshots = collectWardrobeItems(character)
+    local itemSnapshots = unequipOnSave == false and {} or collectWardrobeItems(character, look)
     local removed = 0
     for _, snapshot in ipairs(itemSnapshots) do
         if not unequipItem(character, snapshot.item) then
@@ -1711,39 +2029,71 @@ local function commitSave(session, character, clientLook)
 
     local previous = snapshotCommitState(session)
     nextRevision(session)
-    session.savedLook = look
-    session.active = false
-    session.activePersistent = false
-    session.persistentSessionKey = nil
-    if not persistStableSessionOrRollback(session, previous) then
+    local persisted
+    if targeted then
+        setCrewLook(crewSnapshot, character, look, false)
+        persisted = persistCrewOrRollback(crewSnapshot)
+    else
+        session.savedLook = look
+        session.active = false
+        session.activePersistent = false
+        session.persistentSessionKey = nil
+        persisted = persistStableSessionOrRollback(session, previous)
+    end
+    if not persisted then
+        restoreCommitState(session, previous)
         local restored = restoreWardrobeItems(character, itemSnapshots)
         return false, restored and "persistence_failed" or "persistence_failed_equipment_rollback_failed"
     end
-    clearActiveRuntime(session, true)
+    clearActiveRuntime(
+        session,
+        true,
+        targeted and characterEntityId(character) or nil,
+        look,
+        targeted
+    )
     if session.protocol == PROTOCOL_VERSION then
         -- SAVE is intentionally inactive. Send the canonical server capture so
         -- the v2 client can leave ApplyPending even when there was no prior
         -- active character state to clear.
         sendV2State(session.client, session.revision, characterEntityId(character), false, look)
     end
-    log("Saved authoritative wardrobe for " .. tostring(character.Name) .. "; removed " .. tostring(removed) .. " item(s).")
+    log("Saved authoritative wardrobe for " .. tostring(character.Name) ..
+        (unequipOnSave == false and "; equipment kept." or
+            "; removed " .. tostring(removed) .. " item(s)."))
     return true, "ok"
 end
 
-local function commitApply(session, character, look)
+local function commitApply(session, character, look, targeted)
     if not canAdvanceRevision(session) then return false, "revision_exhausted" end
     if look == nil then return false, "look_unavailable" end
     if characterEntityId(character) <= 0 then return false, "character_unavailable" end
+    targeted = targeted == true
+    local crewSnapshot = targeted and snapshotCrewState(character) or nil
+    if targeted and crewSnapshot == nil then return false, "crew_identity_unavailable" end
     local previous = snapshotCommitState(session)
     nextRevision(session)
-    session.savedLook = cloneLook(look)
-    session.active = true
-    session.activePersistent = character == clientCharacter(session.client)
-    session.persistentSessionKey = nil
-    if not persistStableSessionOrRollback(session, previous) then return false, "persistence_failed" end
-    if not activateRuntime(session, character, look) then
+    local persisted
+    if targeted then
+        setCrewLook(crewSnapshot, character, look, true)
+        persisted = persistCrewOrRollback(crewSnapshot)
+    else
+        session.savedLook = cloneLook(look)
+        session.active = true
+        session.activePersistent = character == clientCharacter(session.client)
+        session.persistentSessionKey = nil
+        persisted = persistStableSessionOrRollback(session, previous)
+    end
+    if not persisted then
         restoreCommitState(session, previous)
-        if session.accountId ~= nil and not persistLooks() then
+        return false, "persistence_failed"
+    end
+    if not activateRuntime(session, character, look, false, targeted) then
+        restoreCommitState(session, previous)
+        if targeted then
+            persistentCrewRecords[crewSnapshot.key] = cloneCrewRecord(crewSnapshot.record)
+            if not persistCrewLooks() then warn("Could not roll back persisted crew wardrobe after activation failure.") end
+        elseif session.accountId ~= nil and not persistLooks() then
             warn("Could not roll back persisted wardrobe after activation failure.")
         end
         return false, "character_unavailable"
@@ -1751,14 +2101,16 @@ local function commitApply(session, character, look)
     return true, "ok"
 end
 
-local function commitVisualPreference(session, requestedLook, preference)
+local function commitVisualPreference(session, character, requestedLook, preference, targeted)
     if not canAdvanceRevision(session) then return false, "revision_exhausted" end
-    if session.savedLook == nil then return false, "look_unavailable" end
+    targeted = targeted == true
+    local baseLook = targeted and crewLook(character) or cloneLook(session.savedLook)
+    if baseLook == nil then return false, "look_unavailable" end
     if type(requestedLook) ~= "table" then return false, preference .. "_unavailable" end
 
     -- Preference commands merge only their own policy field. Client-supplied
     -- slots are deliberately ignored so they cannot replace equipment IDs.
-    local merged = cloneLook(session.savedLook)
+    local merged = baseLook
     if preference == COMMAND_VISIBILITY then
         local attachmentVisibility, visibilityReason =
             Core.validateAttachmentVisibility(requestedLook.attachmentVisibility, requestedLook.hideHair == true)
@@ -1777,36 +2129,82 @@ local function commitVisualPreference(session, requestedLook, preference)
     end
 
     local previous = snapshotCommitState(session)
+    local crewSnapshot = targeted and snapshotCrewState(character) or nil
+    if targeted and crewSnapshot == nil then return false, "crew_identity_unavailable" end
     nextRevision(session)
-    session.savedLook = merged
-    if not persistStableSessionOrRollback(session, previous) then return false, "persistence_failed" end
+    local persisted
+    if targeted then
+        local wasActive = crewSnapshot.record ~= nil and crewSnapshot.record.active == true
+        setCrewLook(crewSnapshot, character, merged, wasActive)
+        persisted = persistCrewOrRollback(crewSnapshot)
+    else
+        session.savedLook = merged
+        persisted = persistStableSessionOrRollback(session, previous)
+    end
+    if not persisted then
+        restoreCommitState(session, previous)
+        return false, "persistence_failed"
+    end
 
-    local characterId = tonumber(session.activeCharacterId)
-    if session.active == true and characterId ~= nil and characterId > 0 then
+    local characterId = targeted and characterEntityId(character) or tonumber(session.activeCharacterId)
+    local runtime = characterId ~= nil and activeByCharacterId[characterId] or nil
+    if characterId ~= nil and characterId > 0 and
+        ((targeted and runtime ~= nil and runtime.crewKey ~= nil) or
+         (not targeted and session.active == true)) then
         local observerRevision = nextObserverRevision(characterId)
         activeByCharacterId[characterId] = {
             session = session,
             revision = session.revision,
             observerRevision = observerRevision,
-            look = cloneLook(merged)
+            look = cloneLook(merged),
+            crewKey = targeted and crewSnapshot.key or nil
         }
-        broadcastState(session, session.revision, characterId, true, merged, observerRevision)
+        broadcastState(session, session.revision, characterId, true, merged, observerRevision, targeted)
+    elseif targeted then
+        sendV2State(session.client, session.revision, characterEntityId(character), false, merged)
     else
         sendOwnInactiveState(session)
     end
     return true, "ok"
 end
 
-local function commitClear(session, deleteSaved)
+local function commitClear(session, character, deleteSaved, targeted)
     if not canAdvanceRevision(session) then return false, "revision_exhausted" end
+    targeted = targeted == true
     local previous = snapshotCommitState(session)
+    local crewSnapshot = targeted and snapshotCrewState(character) or nil
+    if targeted and crewSnapshot == nil then return false, "crew_identity_unavailable" end
     nextRevision(session)
-    session.active = false
-    session.activePersistent = false
-    session.persistentSessionKey = nil
-    if deleteSaved then session.savedLook = nil end
-    if not persistStableSessionOrRollback(session, previous) then return false, "persistence_failed" end
-    clearActiveRuntime(session, true)
+    local inactiveLook = nil
+    local persisted
+    if targeted then
+        local record = crewSnapshot.record
+        inactiveLook = not deleteSaved and record ~= nil and cloneLook(record.look) or nil
+        if deleteSaved then
+            setCrewLook(crewSnapshot, character, nil, false)
+        elseif record ~= nil then
+            setCrewLook(crewSnapshot, character, record.look, false)
+        end
+        persisted = persistCrewOrRollback(crewSnapshot)
+    else
+        session.active = false
+        session.activePersistent = false
+        session.persistentSessionKey = nil
+        if deleteSaved then session.savedLook = nil end
+        inactiveLook = session.savedLook
+        persisted = persistStableSessionOrRollback(session, previous)
+    end
+    if not persisted then
+        restoreCommitState(session, previous)
+        return false, "persistence_failed"
+    end
+    clearActiveRuntime(
+        session,
+        true,
+        targeted and characterEntityId(character) or nil,
+        inactiveLook,
+        targeted
+    )
     return true, "ok"
 end
 
@@ -1838,6 +2236,7 @@ end
 
 local validCommandKinds = {
     save = true,
+    [COMMAND_SAVE_KEEP] = true,
     apply = true,
     clear = true,
     forget = true,
@@ -1873,12 +2272,20 @@ local function validateV2Envelope(command)
 end
 
 local function resendCurrentState(session, operation)
-    if session.active and session.activeCharacterId ~= nil then
+    local targetId = operation ~= nil and tonumber(operation.targetCharacterId) or nil
+    if targetId ~= nil then
+        local runtime = activeByCharacterId[targetId]
+        if runtime ~= nil and runtime.crewKey ~= nil then
+            sendV2State(session.client, session.revision, targetId, true, runtime.look)
+            return
+        end
+        local character = nil
+        for _, candidate in ipairs(characterListSnapshot()) do
+            if characterEntityId(candidate) == targetId then character = candidate break end
+        end
+        sendV2State(session.client, session.revision, targetId, false, crewLook(character))
+    elseif session.active and session.activeCharacterId ~= nil then
         sendV2State(session.client, session.revision, session.activeCharacterId, true, session.savedLook)
-    elseif operation ~= nil and tonumber(operation.targetCharacterId) ~= nil and
-        (operation.kind == "save" or operation.kind == "clear" or operation.kind == "forget") then
-        local look = operation.kind == "save" and session.savedLook or nil
-        sendV2State(session.client, session.revision, operation.targetCharacterId, false, look)
     else
         sendOwnInactiveState(session)
     end
@@ -1902,11 +2309,13 @@ Networking.Receive(NET.V2_HELLO, function(message, client)
         response,
         math.max(0, session.revision),
         CAPABILITY_ATTACHMENT_VISIBILITY + CAPABILITY_MOVEMENT_ANIMATION_SOURCE +
-            CAPABILITY_CREW_TARGETING + CAPABILITY_FOOTSTEP_SOUND_SOURCE
+            CAPABILITY_CREW_TARGETING + CAPABILITY_FOOTSTEP_SOUND_SOURCE +
+            CAPABILITY_CREW_DIVING_PROFILES + CAPABILITY_SAVE_WITHOUT_UNEQUIP
     )
     if not written then warn("Could not encode v2 hello response: " .. tostring(writeReason)) return end
     Networking.Send(response, client.Connection)
     sendActiveSnapshot(client)
+    sendCrewDivingSnapshot(client)
     sendOwnInactiveState(session)
 end)
 
@@ -1950,43 +2359,87 @@ local function handleV2Command(message, client, targeted)
     local accepted, reason = false, "character_unavailable"
     if character == nil and targetReason ~= nil then reason = targetReason end
     local runtime = character ~= nil and activeByCharacterId[characterEntityId(character)] or nil
-    if runtime ~= nil and runtime.session ~= session then
+    if runtime ~= nil and runtime.session ~= session and
+        (not command.targeted or runtime.crewKey == nil) then
         character = nil
         reason = "target_in_use"
-    elseif command.targeted and session.active and
-        (command.kind == "clear" or command.kind == COMMAND_VISIBILITY or
-            command.kind == COMMAND_ANIMATION or command.kind == COMMAND_FOOTSTEP) and
-        tonumber(session.activeCharacterId) ~= characterEntityId(character) then
-        character = nil
-        reason = "target_not_active"
     end
     if command.kind == "save" then
-        if character ~= nil then accepted, reason = commitSave(session, character, command.look) end
+        if character ~= nil then accepted, reason = commitSave(session, character, command.look, command.targeted) end
+    elseif command.kind == COMMAND_SAVE_KEEP then
+        if character ~= nil then
+            accepted, reason = commitSave(session, character, command.look, command.targeted, false)
+        end
     elseif command.kind == "apply" then
         local look, lookReason = nil, nil
         if command.hasLook then look, lookReason = canonicalizeLook(command.look, true)
+        elseif command.targeted then look = crewLook(character)
         else look = cloneLook(session.savedLook) end
-        if character ~= nil and look ~= nil then accepted, reason = commitApply(session, character, look)
+        if character ~= nil and look ~= nil then accepted, reason = commitApply(session, character, look, command.targeted)
         elseif character ~= nil and look == nil then reason = lookReason or "look_unavailable" end
     elseif command.kind == COMMAND_VISIBILITY then
         if character ~= nil or not command.targeted then
-            accepted, reason = commitVisualPreference(session, command.look, COMMAND_VISIBILITY)
+            accepted, reason = commitVisualPreference(session, character, command.look, COMMAND_VISIBILITY, command.targeted)
         end
     elseif command.kind == COMMAND_ANIMATION then
         if character ~= nil or not command.targeted then
-            accepted, reason = commitVisualPreference(session, command.look, COMMAND_ANIMATION)
+            accepted, reason = commitVisualPreference(session, character, command.look, COMMAND_ANIMATION, command.targeted)
         end
     elseif command.kind == COMMAND_FOOTSTEP then
         if character ~= nil or not command.targeted then
-            accepted, reason = commitVisualPreference(session, command.look, COMMAND_FOOTSTEP)
+            accepted, reason = commitVisualPreference(session, character, command.look, COMMAND_FOOTSTEP, command.targeted)
         end
     elseif command.kind == "clear" then
-        if character ~= nil or not command.targeted then accepted, reason = commitClear(session, false) end
+        if character ~= nil or not command.targeted then
+            accepted, reason = commitClear(session, character, false, command.targeted)
+        end
     elseif command.kind == "forget" then
-        if character ~= nil or not command.targeted then accepted, reason = commitClear(session, true) end
+        if character ~= nil or not command.targeted then
+            accepted, reason = commitClear(session, character, true, command.targeted)
+        end
     end
     local result = rememberOperation(session, command.operationId, accepted, reason, command)
     sendV2Ack(session, command.operationId, result.accepted, result.reason, result.revision)
+end
+
+local function releaseSessionCrewRuntimes(session)
+    for _, runtime in pairs(activeByCharacterId) do
+        if runtime.session == session and runtime.crewKey ~= nil then
+            runtime.session = crewRuntimeSession
+        end
+    end
+end
+
+local function restoreCrewRuntime(character)
+    if character == nil or userDataMember(character, "IsHuman") ~= true or
+        userDataMember(character, "IsOnPlayerTeam") ~= true or
+        userDataMember(character, "IsBot") ~= true or
+        userDataMember(character, "IsDead") == true or
+        userDataMember(character, "Removed") == true then
+        return false
+    end
+    local key = crewStorageKey(character)
+    local record = key ~= nil and persistentCrewRecords[key] or nil
+    if record == nil or record.active ~= true or record.look == nil then return false end
+    local runtime = activeByCharacterId[characterEntityId(character)]
+    if runtime ~= nil and runtime.crewKey == key then return true end
+    local look, reason = canonicalizeLook(record.look, true)
+    if look == nil then
+        record.active = false
+        persistCrewLooks()
+        warn("Ignored invalid stored crew wardrobe for " .. tostring(record.displayName) .. ": " .. tostring(reason))
+        return false
+    end
+    record.look = cloneLook(look)
+    return activateRuntime(crewRuntimeSession, character, look, false, true)
+end
+
+restoreCrewRuntimes = function()
+    local restored = false
+    for _, character in ipairs(characterListSnapshot()) do
+        restored = restoreCrewRuntime(character) or restored
+    end
+    return restored
 end
 
 Networking.Receive(NET.V2_COMMAND, function(message, client)
@@ -1995,6 +2448,38 @@ end)
 
 Networking.Receive(NET.V2_TARGET_COMMAND, function(message, client)
     handleV2Command(message, client, true)
+end)
+
+Networking.Receive(NET.V2_DIVING_COMMAND, function(message, client)
+    local session = sessionFor(client)
+    if session == nil or session.protocol ~= PROTOCOL_VERSION then return end
+    local wireBytes = messageLengthBytes(message)
+    if wireBytes ~= nil and wireBytes > MAX_PAYLOAD_BYTES then return end
+    local profile, reason = Core.tryReadDivingProfile(message)
+    if profile == nil then
+        warn("Rejected malformed crew diving profile: " .. tostring(reason))
+        return
+    end
+    if profile.captured then
+        local look
+        look, reason = canonicalizeLook(profile.look, true)
+        if look == nil then
+            warn("Rejected invalid crew diving look: " .. tostring(reason))
+            return
+        end
+        profile.look = look
+    end
+    local character = resolveCrewTarget(client, profile.characterId)
+    if character == nil then return end
+    local snapshot = snapshotCrewState(character)
+    if snapshot == nil then return end
+    setCrewDivingProfile(snapshot, character, profile)
+    if not persistCrewOrRollback(snapshot) then return end
+    broadcastCrewDivingState(character, crewDivingProfile(character) or {
+        mode = 0,
+        captured = false,
+        look = nil
+    })
 end)
 
 local function readLegacyApplyLook(message)
@@ -2074,14 +2559,14 @@ Networking.Receive(NET.V1_CLEAR_REQUEST, function(_, client)
     local session = sessionFor(client)
     if session == nil then return end
     if not selectLegacyProtocol(session) then return end
-    commitClear(session, false)
+    commitClear(session, clientCharacter(client), false, false)
 end)
 
 Networking.Receive(NET.V1_FORGET_REQUEST, function(_, client)
     local session = sessionFor(client)
     if session == nil then return end
     if not selectLegacyProtocol(session) then return end
-    commitClear(session, true)
+    commitClear(session, clientCharacter(client), true, false)
 end)
 
 local function clearRoundRuntime()
@@ -2162,7 +2647,7 @@ local function rebindCreatedCharacter(character)
             return true
         end
     end
-    return false
+    return restoreCrewRuntime(character)
 end
 
 local function scheduleSessionReactivation(session, generation)
@@ -2202,6 +2687,7 @@ end)
 Hook.Add("client.disconnected", "barowardrobeswitcher.v2-disconnected", function(client)
     local session = sessionsByClient[client]
     if session == nil then return end
+    releaseSessionCrewRuntimes(session)
     clearActiveRuntime(session, true)
     -- Disconnect only clears the runtime binding. The durable account record
     -- already contains the active intent and must not be rewritten from a
@@ -2217,7 +2703,14 @@ Hook.Add("character.created", "barowardrobeswitcher.v2-character-created", funct
     local attempts = 0
     local function attemptRebind()
         attempts = attempts + 1
-        if rebindCreatedCharacter(character) or attempts >= 3 then return end
+        local rebound = rebindCreatedCharacter(character)
+        local profile = crewDivingProfile(character)
+        if profile ~= nil then
+            broadcastCrewDivingState(character, profile)
+            return
+        end
+        if rebound then return end
+        if attempts >= 3 then return end
         if Timer ~= nil and Timer.Wait ~= nil then
             Timer.Wait(attemptRebind, attempts == 1 and 100 or 500)
         end
@@ -2230,8 +2723,10 @@ Hook.Add("roundStart", "barowardrobeswitcher.v2-round-start", function()
     local generation = roundReactivationGeneration
     handleGameSessionChange()
     clearRoundRuntime()
+    restoreCrewRuntimes()
     for _, client in ipairs(connectedClients()) do
         scheduleSessionReactivation(sessionFor(client), generation)
+        sendCrewDivingSnapshot(client)
     end
 end)
 
@@ -2241,6 +2736,7 @@ Hook.Add("roundEnd", "barowardrobeswitcher.v2-round-end", function()
 end)
 
 loadPersistence()
+loadCrewPersistence()
 lastGameSessionKey = currentGameSessionKey()
 log("Server authority v" .. tostring(Core.MOD_VERSION) ..
     " loaded (protocol " .. tostring(PROTOCOL_VERSION) ..

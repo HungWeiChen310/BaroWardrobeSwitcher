@@ -101,6 +101,22 @@ local fakeHelmetPrefab = {
     }
 }
 local gameSessionDataPath = {}
+local fakeGeneSplicerWearableElement = {
+    GetAttributeString = function(name, defaultValue)
+        if tostring(name):lower() == "slots" then return "HealthInterface" end
+        return defaultValue
+    end
+}
+local fakeGeneSplicerPrefab = {
+    Identifier = "notagenesplicer",
+    Name = "Arbitrary Health Interface Gear",
+    ConfigElement = {
+        GetChildElement = function(name)
+            if tostring(name):lower() == "wearable" then return fakeGeneSplicerWearableElement end
+            return nil
+        end
+    }
+}
 local gameSession = {
     DataPath = gameSessionDataPath,
     GameMode = { Preset = { Identifier = "sandbox" } }
@@ -115,7 +131,10 @@ LuaUserData = {
     end,
     CreateStatic = function(name)
         if name == "Barotrauma.ItemPrefab" then
-            return { Prefabs = { helmet = fakeHelmetPrefab } }
+            return { Prefabs = {
+                helmet = fakeHelmetPrefab,
+                notagenesplicer = fakeGeneSplicerPrefab
+            } }
         end
         if name == "Barotrauma.Networking.Client" then
             return { ClientList = connectedClients }
@@ -162,7 +181,7 @@ assert(memoryFiles[serverLogPath] ~= nil and
 
 local handlerCount = 0
 for _ in pairs(Networking.handlers) do handlerCount = handlerCount + 1 end
-assert(handlerCount == 7, "server must register four v1 and three v2 receivers")
+assert(handlerCount == 8, "server must register four v1 and four v2 receivers")
 assert(Hook.handlers.think == nil, "server authority must not install a think heartbeat")
 
 local client = { Connection = {}, Character = { ID = 42, Name = "Tester" } }
@@ -174,7 +193,8 @@ local serverHello = assert(Core.readServerHello(Networking.sent[#Networking.sent
 assert(serverHello.revision == 0)
 assert(serverHello.capabilities == Core.CAPABILITY.AttachmentVisibility +
     Core.CAPABILITY.MovementAnimationSource + Core.CAPABILITY.CrewTargeting +
-    Core.CAPABILITY.FootstepSoundSource,
+    Core.CAPABILITY.FootstepSoundSource + Core.CAPABILITY.CrewDivingProfiles +
+    Core.CAPABILITY.SaveWithoutUnequip,
     "server did not advertise all authoritative appearance preferences")
 
 local logWritesBeforeFlood = serverLogWriteCount
@@ -214,14 +234,19 @@ local targetOwnerCharacter = {
     ID = 80, Name = "Target Owner", IsHuman = true, IsOnPlayerTeam = true, IsBot = false
 }
 local friendlyBot = {
-    ID = 81, Name = "Friendly Bot", IsHuman = true, IsOnPlayerTeam = true, IsBot = true
+    ID = 81, Name = "Friendly Bot", Info = { ID = 1001 },
+    IsHuman = true, IsOnPlayerTeam = true, IsBot = true
+}
+local friendlyBotTwo = {
+    ID = 84, Name = "Friendly Bot Two", Info = { ID = 1002 },
+    IsHuman = true, IsOnPlayerTeam = true, IsBot = true
 }
 local enemyBot = {
     ID = 82, Name = "Enemy Bot", IsHuman = true, IsOnPlayerTeam = false, IsBot = true
 }
 local targetOwner = { Connection = {}, Character = targetOwnerCharacter }
 connectedClients[2] = targetOwner
-Character.CharacterList = { targetOwnerCharacter, friendlyBot, enemyBot }
+Character.CharacterList = { targetOwnerCharacter, friendlyBot, friendlyBotTwo, enemyBot }
 local targetHello = newBuffer()
 assert(Core.writeClientHello(targetHello, "target-owner-session"))
 Networking.handlers[Core.NET.V2_HELLO](targetHello, targetOwner)
@@ -269,16 +294,43 @@ local duplicateBotState = assert(Core.readState(
 assert(duplicateBotState.active and duplicateBotState.characterId == friendlyBot.ID,
     "a targeted retry resent state for the owner's player character")
 
+local secondBotLook = assert(Core.newLook(
+    true,
+    false,
+    { Head = "helmet" },
+    nil,
+    { Head = 0x112233FF }
+))
+local sentBeforeSecondBot = #Networking.sent
+local secondBotApply = sendTargetCommand({
+    clientSessionId = "target-owner-session",
+    operationId = "target-second-bot",
+    baseRevision = 1,
+    kind = Core.COMMAND.Apply,
+    targetCharacterId = friendlyBotTwo.ID,
+    look = secondBotLook
+}, targetOwner)
+assert(secondBotApply.accepted and secondBotApply.revision == 2,
+    "a second bot did not receive an independent wardrobe")
+for index = sentBeforeSecondBot + 1, #Networking.sent do
+    local sent = Networking.sent[index]
+    if sent.message.name == Core.NET.V2_STATE then
+        local state = assert(Core.readState(sent.message))
+        assert(state.characterId ~= friendlyBot.ID or state.active,
+            "applying the second bot cleared the first bot's appearance")
+    end
+end
+
 local rejectedEnemy = sendTargetCommand({
     clientSessionId = "target-owner-session",
     operationId = "target-enemy",
-    baseRevision = 1,
+    baseRevision = 2,
     kind = Core.COMMAND.Apply,
     targetCharacterId = enemyBot.ID,
     look = targetLook
 }, targetOwner)
 assert(not rejectedEnemy.accepted and rejectedEnemy.reason == "target_not_permitted" and
-    rejectedEnemy.revision == 1, "an enemy bot target mutated server state")
+    rejectedEnemy.revision == 2, "an enemy bot target mutated server state")
 
 local secondOwnerCharacter = {
     ID = 83, Name = "Second Owner", IsHuman = true, IsOnPlayerTeam = true, IsBot = false
@@ -297,49 +349,82 @@ local contested = sendTargetCommand({
     targetCharacterId = friendlyBot.ID,
     look = targetLook
 }, secondOwner)
-assert(not contested.accepted and contested.reason == "target_in_use" and contested.revision == 0,
-    "a second player silently stole an active bot target")
+assert(contested.accepted and contested.revision == 1,
+    "server-owned bot fashion could not be edited by another authorized player")
 
 local firstOwnerClear = sendTargetCommand({
     clientSessionId = "target-owner-session",
     operationId = "target-owner-clear",
-    baseRevision = 1,
+    baseRevision = 2,
     kind = Core.COMMAND.Clear,
     targetCharacterId = friendlyBot.ID
 }, targetOwner)
-assert(firstOwnerClear.accepted and firstOwnerClear.revision == 2)
+assert(firstOwnerClear.accepted and firstOwnerClear.revision == 3)
 local observerClear = assert(Core.readState(
     lastSentMessage(Core.NET.V2_STATE, client.Connection)))
 local secondOwnerApply = sendTargetCommand({
     clientSessionId = "second-target-session",
     operationId = "target-second-owner-apply",
-    baseRevision = 0,
+    baseRevision = 1,
     kind = Core.COMMAND.Apply,
     targetCharacterId = friendlyBot.ID,
     look = targetLook
 }, secondOwner)
-assert(secondOwnerApply.accepted and secondOwnerApply.revision == 1,
+assert(secondOwnerApply.accepted and secondOwnerApply.revision == 2,
     "bot takeover changed the second owner's account/base revision semantics")
 local observerTakeover = assert(Core.readState(
     lastSentMessage(Core.NET.V2_STATE, client.Connection)))
 local secondOwnerState = assert(Core.readState(
     lastSentMessage(Core.NET.V2_STATE, secondOwner.Connection)))
 assert(not observerClear.active and observerTakeover.active and
-       observerTakeover.revision > observerClear.revision and
+       observerTakeover.revision >= observerClear.revision and
        secondOwnerState.revision == secondOwnerApply.revision,
-    "a third-party observer saw bot takeover revisions move backward across owners")
+    "bot takeover did not keep recipient-local revision semantics")
+assert(memoryFiles[storageRoot .. "/ServerCrewLooks.json"]:find("Friendly Bot", 1, true) and
+       memoryFiles[storageRoot .. "/ServerCrewLooks.json"]:find("Friendly Bot Two", 1, true),
+    "independent AI wardrobes were not persisted on the host/server")
+
+local divingCommand = newBuffer()
+assert(Core.writeDivingProfile(divingCommand, {
+    characterId = friendlyBot.ID,
+    mode = 2,
+    captured = true,
+    look = secondBotLook
+}))
+divingCommand.FinalizeForTransport()
+Networking.handlers[Core.NET.V2_DIVING_COMMAND](divingCommand, targetOwner)
+local divingState = assert(Core.tryReadDivingProfile(
+    lastSentMessage(Core.NET.V2_DIVING_STATE, targetOwner.Connection)))
+assert(divingState.characterId == friendlyBot.ID and divingState.mode == 2 and
+       divingState.captured and divingState.look.colors.Head == 0x112233FF,
+    "the authoritative crew diving profile was not broadcast: id=" ..
+    tostring(divingState.characterId) .. ", mode=" .. tostring(divingState.mode) ..
+    ", captured=" .. tostring(divingState.captured) .. ", color=" ..
+    tostring(divingState.look ~= nil and divingState.look.colors.Head or nil))
+assert(memoryFiles[storageRoot .. "/ServerCrewLooks.json"]:find('"divingMode":2', 1, true) and
+       memoryFiles[storageRoot .. "/ServerCrewLooks.json"]:find('"divingCaptured":true', 1, true),
+    "the crew diving mode and custom outfit were not persisted by the host")
 
 local sentBeforeTargetRoundStart = #Networking.sent
 Hook.handlers.roundEnd()
+friendlyBot.ID = 181
+friendlyBotTwo.ID = 184
 Hook.handlers.roundStart()
+local restoredDiving = false
 for index = sentBeforeTargetRoundStart + 1, #Networking.sent do
     local sent = Networking.sent[index]
     if sent.message.name == Core.NET.V2_STATE then
         local state = assert(Core.readState(sent.message))
         assert(state.characterId ~= targetOwnerCharacter.ID,
             "a bot-only active look was rebound to its owner's player character")
+    elseif sent.message.name == Core.NET.V2_DIVING_STATE then
+        local profile = assert(Core.tryReadDivingProfile(sent.message))
+        if profile.characterId == friendlyBot.ID and profile.mode == 2 and profile.captured then
+            restoredDiving = true
+        end
     end
 end
+assert(restoredDiving, "the host did not restore the AI diving profile across rounds")
 Hook.handlers["client.disconnected"](secondOwner)
 Hook.handlers["client.disconnected"](targetOwner)
 table.remove(connectedClients, 3)
@@ -435,19 +520,26 @@ do
     local lateHello = newBuffer()
     assert(Core.writeClientHello(lateHello, "late-client-session"))
     Networking.handlers[Core.NET.V2_HELLO](lateHello, lateClient)
-    local lateStates = {}
+    local lateSnapshot = nil
+    local restoredCrew = {}
     for index = sentBeforeLateHello + 1, #Networking.sent do
         local sent = Networking.sent[index]
         if sent.connection == lateClient.Connection and sent.message.name == Core.NET.V2_STATE then
-            lateStates[#lateStates + 1] = assert(Core.readState(sent.message))
+            local state = assert(Core.readState(sent.message))
+            assert(state.characterId ~= lateClient.Character.ID,
+                "a player without a saved look received an unexpected own state")
+            if state.characterId == 143 then lateSnapshot = state end
+            if state.characterId == friendlyBot.ID or state.characterId == friendlyBotTwo.ID then
+                restoredCrew[state.characterId] = state.active == true
+            end
         end
     end
-    assert(#lateStates == 1, "a player without a saved look received an unexpected own state")
-    local lateSnapshot = lateStates[1]
-    assert(lateSnapshot.active and lateSnapshot.revision > 0 and
+    assert(lateSnapshot ~= nil and lateSnapshot.active and lateSnapshot.revision > 0 and
         lateSnapshot.characterId == 143 and lateSnapshot.look.slots.Head == "helmet" and
         lateSnapshot.look.useFashionMovementAnimations == false,
         "a late client did not receive the active next-round wardrobe snapshot")
+    assert(restoredCrew[friendlyBot.ID] and restoredCrew[friendlyBotTwo.ID],
+        "host-persisted AI looks did not restore independently next round")
 
     local sentBeforeOwnHello = #Networking.sent
     local ownHello = newBuffer()
@@ -512,8 +604,11 @@ do
     Networking.handlers[Core.NET.V2_HELLO](observerHello, observer)
     for index = sentBeforeObserverHello + 1, #Networking.sent do
         local sent = Networking.sent[index]
-        assert(sent.connection ~= observer.Connection or sent.message.name ~= Core.NET.V2_STATE,
-            "a saved-but-cleared look was incorrectly activated for another client")
+        if sent.connection == observer.Connection and sent.message.name == Core.NET.V2_STATE then
+            local state = assert(Core.readState(sent.message))
+            assert(state.characterId ~= client.Character.ID,
+                "a saved-but-cleared player look was incorrectly activated for another client")
+        end
     end
     connectedClients[2] = nil
 end
@@ -603,7 +698,8 @@ local visibilityServerHello =
     assert(Core.readServerHello(lastSentMessage(Core.NET.V2_HELLO, visibilityClient.Connection)))
 assert(visibilityServerHello.capabilities ==
         Core.CAPABILITY.AttachmentVisibility + Core.CAPABILITY.MovementAnimationSource +
-        Core.CAPABILITY.CrewTargeting + Core.CAPABILITY.FootstepSoundSource,
+        Core.CAPABILITY.CrewTargeting + Core.CAPABILITY.FootstepSoundSource +
+        Core.CAPABILITY.CrewDivingProfiles + Core.CAPABILITY.SaveWithoutUnequip,
     "new server hello must advertise visibility, movement, crew targeting, and footsteps")
 
 local visibilityApply = sendCommand({
@@ -852,9 +948,20 @@ assert(not stuckSave.accepted and stuckSave.reason == "unequip_failed" and stuck
     "a failed authoritative unequip must reject Save without advancing revision")
 assert(stuckSlots[InvSlotType.Head] == stuckItem,
     "a failed authoritative unequip must preserve the equipped item")
+local stuckKeepSave = sendCommand({
+    clientSessionId = "stuck-session",
+    operationId = "stuck-save-keep",
+    baseRevision = 0,
+    kind = Core.COMMAND.SaveKeep
+}, stuckClient)
+assert(stuckKeepSave.accepted and stuckKeepSave.revision == 1 and
+       stuckSlots[InvSlotType.Head] == stuckItem,
+    "SaveKeep must capture the look without trying to unequip physical gear")
 
 local lockedDropCalls = 0
 local lockedInventoryMoves = 0
+local healthUnequipCalls = 0
+local healthDropCalls = 0
 local lockedItem = {
     Prefab = fakeHelmetPrefab,
     HasTag = function(tag) return tag == "lock" end,
@@ -862,6 +969,15 @@ local lockedItem = {
     Equip = function() end
 }
 local lockedSlots = { [InvSlotType.Head] = lockedItem }
+local arbitraryHealthItem = {
+    Prefab = fakeGeneSplicerPrefab,
+    Unequip = function()
+        healthUnequipCalls = healthUnequipCalls + 1
+        lockedSlots[InvSlotType.HealthInterface] = nil
+    end,
+    Drop = function() healthDropCalls = healthDropCalls + 1 end
+}
+lockedSlots[InvSlotType.HealthInterface] = arbitraryHealthItem
 local lockedClient = {
     Connection = {},
     Character = {
@@ -894,8 +1010,21 @@ local lockedSave = sendCommand({
     kind = Core.COMMAND.Save
 }, lockedClient)
 assert(lockedSave.accepted and lockedSave.revision == 1 and lockedDropCalls == 1 and
-       lockedInventoryMoves == 0 and lockedSlots[InvSlotType.Head] == nil,
-    "authoritative Save must drop lock-tagged fashion gear instead of moving it into inventory")
+       lockedInventoryMoves == 0 and lockedSlots[InvSlotType.Head] == nil and
+       lockedSlots[InvSlotType.HealthInterface] == arbitraryHealthItem and
+       healthUnequipCalls == 0 and healthDropCalls == 0,
+    "authoritative Save must remove managed gear but preserve every HealthInterface item")
+local geneSplicerSave = sendCommand({
+    clientSessionId = "locked-session",
+    operationId = "gene-splicer-save",
+    baseRevision = 1,
+    kind = Core.COMMAND.Save,
+    look = assert(Core.newLook(true, false, { HealthInterface = "notagenesplicer" }))
+}, lockedClient)
+assert(geneSplicerSave.accepted and geneSplicerSave.revision == 2 and
+       lockedSlots[InvSlotType.HealthInterface] == nil and
+       healthUnequipCalls == 1 and healthDropCalls == 0,
+    "an explicitly included HealthInterface look was not captured and unequipped")
 
 local stableAccount = { StringRepresentation = "stable-account" }
 local stableClient = {

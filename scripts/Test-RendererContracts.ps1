@@ -210,8 +210,91 @@ $contracts = @(
             "session.SuppressedEquipmentAnimations.Contains(animationInfo)",
             "FashionEffectPolicy.ShouldSuppressEquipmentAnimation(item, animationInfo)"
         )
+    },
+    @{
+        Name = "unequip-on-save-setting"
+        Source = $renderer
+        Required = @(
+            'ConfigService.TryGetConfig(package, "UnequipOnSave", out ISettingBase<bool> unequipOnSave)',
+            'public static bool GetUnequipOnSave()',
+            'public static bool SetUnequipOnSave(bool enabled)',
+            'private static bool SaveBooleanSetting(ISettingBase<bool> setting)',
+            'private static bool unequipOnSaveFallback = true;'
+        )
+    },
+    @{
+        Name = "gene-splicer-appearance-setting"
+        Source = $renderer
+        Required = @(
+            'ConfigService.TryGetConfig(package, "OverrideGeneSplicerAppearance", out ISettingBase<bool> overrideGeneSplicerAppearance)',
+            'public static bool GetOverrideGeneSplicerAppearance()',
+            'public static bool SetOverrideGeneSplicerAppearance(bool enabled)',
+            'private static bool overrideGeneSplicerAppearanceFallback;'
+        )
+    },
+    @{
+        Name = "husk-appearance-suppression"
+        Source = $renderer
+        Required = @(
+            'public static bool GetHideHuskVisuals()',
+            'public static bool SetHideHuskVisuals(bool enabled)',
+            'AccessTools.Field(typeof(AfflictionHusk), "huskAppendage")',
+            'AccessTools.Field(typeof(Limb), "<HuskSprite>k__BackingField")',
+            'new Identifier("huskinfection")',
+            'new Identifier("husksymbiosis")',
+            'internal static bool ShouldSuppressAfflictionAppendage(Limb limb)',
+            'HuskAppearanceAfflictionIdentifiers.Contains(affliction.Identifier)',
+            'TouhouWingAfflictionIdentifiers.Contains(affliction.Identifier)',
+            'session.IsActive &&',
+            'session.IsValid;',
+            'if (ReferenceEquals(appendage, limb)) { return true; }',
+            'internal static void SuppressHuskTint(Affliction affliction, ref Color result)',
+            'result = Color.TransparentBlack;',
+            'AccessTools.Method(',
+            '"SaveConfigValue",',
+            'AccessTools.Property(result.GetType(), "IsFailed")'
+        )
+    },
+    @{
+        Name = "husk-appearance-compatibility-probe"
+        Source = $compatibilityProbe
+        Required = @(
+            'RequireField("Limb.HuskSprite backing field", limb, "<HuskSprite>k__BackingField");',
+            'RequireField("AfflictionHusk.huskAppendage", afflictionHusk, "huskAppendage");',
+            'RequirePublicProperty("Affliction.Identifier", affliction, "Identifier", identifier);',
+            'RequireMethod("Affliction.GetBodyTint()", affliction, "GetBodyTint", Array.Empty<Type>(), color);',
+            'RequireMethod("Affliction.GetFaceTint()", affliction, "GetFaceTint", Array.Empty<Type>(), color);',
+            'FindExact(configService, "SaveConfigValue", settingBase);'
+        )
     }
 )
+
+if ($session.Contains("ownedSprite.HideLimb = false;")) {
+    throw "Fashion capture must preserve a source head sprite's HideLimb mask."
+}
+Write-Host "PASS fashion-head-limb-mask"
+
+$huskAppearanceBlock = Get-Section $renderer `
+    "private static readonly HashSet<Identifier> HuskAppearanceAfflictionIdentifiers" `
+    "private static readonly HashSet<Identifier> TouhouWingAfflictionIdentifiers"
+$huskAppearanceIdentifiers = @([regex]::Matches($huskAppearanceBlock, 'new Identifier\("([^"]+)"\)') |
+    ForEach-Object { $_.Groups[1].Value })
+if ($huskAppearanceIdentifiers.Count -ne 2 -or
+    $huskAppearanceIdentifiers -notcontains "huskinfection" -or
+    $huskAppearanceIdentifiers -notcontains "husksymbiosis") {
+    throw "Husk appearance suppression must contain only huskinfection and husksymbiosis."
+}
+Write-Host "PASS vanilla-husk-appearance-scope"
+
+$touhouWingBlock = Get-Section $renderer `
+    "private static readonly HashSet<Identifier> TouhouWingAfflictionIdentifiers" `
+    "private static readonly WearableType[] FashionHideableAttachmentTypes"
+$touhouWingIdentifiers = [regex]::Matches($touhouWingBlock, 'new Identifier\("([^"]+)"\)')
+if ($touhouWingIdentifiers.Count -ne 16 -or
+    @($touhouWingIdentifiers | Where-Object { -not $_.Groups[1].Value.EndsWith("_Wings_Spawn") }).Count -ne 0) {
+    throw "Eastern Abyss compatibility must contain only its 16 wing afflictions."
+}
+Write-Host "PASS eastern-abyss-wing-scope"
 
 foreach ($contract in $contracts) {
     Assert-Contract $contract.Name $contract.Source $contract.Required
@@ -455,11 +538,13 @@ Assert-Order "xds-experimental-appendage-lifecycle" $xdsAppendage @(
 )
 
 $limbDrawPrefix = Get-Section $renderer `
-    "private static bool Prefix(Limb __instance, out VisualOverride.LimbRenderTransaction __state)" `
+    "private static bool Prefix(Limb __instance, out State __state)" `
     "private static void Postfix("
 Assert-Order "appendage-check-before-render-transaction" $limbDrawPrefix @(
+    "ShouldSuppressAfflictionAppendage(__instance)",
     "ShouldSuppressEquipmentAppendage(__instance)",
     "return false;",
+    "BeginHuskSpriteSuppression(__instance)",
     "BeginLimbDraw(__instance)"
 )
 
