@@ -13,6 +13,8 @@ namespace BaroWardrobeSwitcher
         private const string DivingProfilesFileName = "DivingProfiles.json";
         private const int MaximumDivingProfiles = 512;
 
+        private static ProfileReadCache<DivingProfilesDocument> divingProfilesCache;
+
         public static string GetDivingProfilesPath()
         {
             return Path.Combine(GetStorageDirectory(), DivingProfilesFileName);
@@ -24,7 +26,7 @@ namespace BaroWardrobeSwitcher
             try
             {
                 string profileHash = HashRequiredKey(profileKey, nameof(profileKey));
-                DivingProfile profile = ReadDivingProfiles().Profiles.FirstOrDefault(
+                DivingProfile profile = ReadDivingProfiles(cached: true).Profiles.FirstOrDefault(
                     candidate => string.Equals(candidate.ProfileHash, profileHash, StringComparison.Ordinal));
                 return profile == null ? string.Empty : EncodeDivingProfile(profile);
             }
@@ -83,10 +85,11 @@ namespace BaroWardrobeSwitcher
             }
         }
 
-        private static DivingProfilesDocument ReadDivingProfiles()
+        private static DivingProfilesDocument ReadDivingProfiles(bool cached = false)
         {
             string path = GetDivingProfilesPath();
-            if (!File.Exists(path)) { return CreateEmptyDivingProfiles(); }
+            if (cached) { return ReadCachedProfiles(path, ref divingProfilesCache, () => ReadDivingProfiles()); }
+            if (ProfileFileStamp(path).Length < 0) { return CreateEmptyDivingProfiles(); }
             try
             {
                 string json = File.ReadAllText(path);
@@ -114,6 +117,7 @@ namespace BaroWardrobeSwitcher
 
         private static void WriteDivingProfiles(DivingProfilesDocument document)
         {
+            divingProfilesCache = null;
             ValidateDivingProfiles(document);
             document.Profiles = document.Profiles
                 .OrderBy(profile => profile.ProfileHash, StringComparer.Ordinal)

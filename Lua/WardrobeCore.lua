@@ -3,7 +3,7 @@
 
 local Core = {}
 
-Core.MOD_VERSION = "0.5.10"
+Core.MOD_VERSION = "0.5.19"
 Core.PROTOCOL_VERSION = 5
 Core.LOOK_SCHEMA_VERSION = 4
 Core.PERSISTENCE_VERSION = 5
@@ -18,6 +18,7 @@ Core.NET = {
     V2_COMMAND = "barowardrobeswitcher.v2.command",
     V2_TARGET_COMMAND = "barowardrobeswitcher.v2.target-command",
     V2_STATE = "barowardrobeswitcher.v2.state",
+    V2_DIVING_STATE = "barowardrobeswitcher.v2.diving-state",
     V2_ACK = "barowardrobeswitcher.v2.ack",
     V1_SAVE_REQUEST = "barowardrobeswitcher.save",
     V1_APPLY_REQUEST = "barowardrobeswitcher.apply",
@@ -67,7 +68,8 @@ Core.CAPABILITY = {
     AttachmentVisibility = 0x01,
     MovementAnimationSource = 0x02,
     CrewTargeting = 0x04,
-    FootstepSoundSource = 0x08
+    FootstepSoundSource = 0x08,
+    DivingAppearance = 0x10
 }
 
 Core.LIMITS = {
@@ -99,7 +101,9 @@ Core.COMMAND = {
     Forget = "forget",
     Visibility = "visibility",
     Animation = "animation",
-    Footstep = "footstep"
+    Footstep = "footstep",
+    Diving = "diving",
+    DivingSave = "diving-save"
 }
 
 local validCommands = {
@@ -109,8 +113,43 @@ local validCommands = {
     [Core.COMMAND.Forget] = true,
     [Core.COMMAND.Visibility] = true,
     [Core.COMMAND.Animation] = true,
-    [Core.COMMAND.Footstep] = true
+    [Core.COMMAND.Footstep] = true,
+    [Core.COMMAND.Diving] = true,
+    [Core.COMMAND.DivingSave] = true
 }
+
+function Core.isDivingCommand(kind)
+    return kind == Core.COMMAND.Diving or kind == Core.COMMAND.DivingSave
+end
+
+function Core.hasCapability(capabilities, capability)
+    return math.floor((tonumber(capabilities) or 0) / capability) % 2 == 1
+end
+
+function Core.validDivingMode(mode)
+    return type(mode) == "number" and mode >= 0 and mode <= 2 and mode % 1 == 0
+end
+
+-- Identifier equality is case insensitive but punctuation and Unicode survive.
+-- A length prefix makes the identifier/color boundary unambiguous.
+function Core.appearanceKey(identifier, color)
+    local value = tostring(identifier or ""):lower()
+    return tostring(#value) .. ":" .. value .. "@" .. tostring(color or "base")
+end
+
+-- State-dependent retries are bounded and reset only when their input changes.
+function Core.retryReady(retry, signature, tick, force)
+    if force or retry.signature ~= signature then
+        retry.signature, retry.attempts, retry.nextTick = signature, 0, 0
+    end
+    return tick >= (retry.nextTick or 0)
+end
+
+function Core.retryFailed(retry, tick, permanent)
+    retry.attempts = (retry.attempts or 0) + 1
+    retry.nextTick = (permanent or retry.attempts >= 6) and math.huge or
+        tick + math.min(300, 15 * 2 ^ (retry.attempts - 1))
+end
 
 local function shallowCopy(source)
     local copy = {}
@@ -709,7 +748,7 @@ function Core.readLook(message)
     })
 end
 
-function Core.writeClientHello(message, clientSessionId)
+function Core.writeClientHello(message, clientSessionId, capabilities)
     local sessionId, reason = checkBoundedString(
         clientSessionId,
         "clientSessionId",
@@ -718,7 +757,14 @@ function Core.writeClientHello(message, clientSessionId)
     )
     if sessionId == nil then return false, reason end
     message.WriteUInt16(Core.PROTOCOL_VERSION)
+    if capabilities ~= nil and (type(capabilities) ~= "number" or capabilities < 0 or
+        capabilities > 255 or capabilities % 1 ~= 0) then return false, "invalid capabilities" end
     message.WriteString(sessionId)
+    if capabilities ~= nil then
+        message.WriteByte(Core.HELLO_EXTENSION_MARKER)
+        message.WriteByte(Core.HELLO_EXTENSION_VERSION)
+        message.WriteByte(capabilities)
+    end
     return true
 end
 
@@ -735,7 +781,18 @@ function Core.readClientHello(message)
         false
     )
     if valid == nil then return nil, reason end
-    return { protocolVersion = version, clientSessionId = valid }
+    local capabilities = 0
+    local remaining = messageRemainingBits(message)
+    if remaining == 24 then
+        if message.ReadByte() ~= Core.HELLO_EXTENSION_MARKER or
+            message.ReadByte() ~= Core.HELLO_EXTENSION_VERSION then
+            return nil, "unsupported client hello extension"
+        end
+        capabilities = message.ReadByte()
+    elseif remaining ~= 0 then
+        return nil, "malformed client hello extension"
+    end
+    return { protocolVersion = version, clientSessionId = valid, capabilities = capabilities }
 end
 
 function Core.writeServerHello(message, revision, capabilities)
@@ -826,6 +883,13 @@ function Core.validateCommand(command)
         return nil, command.kind .. " command requires a look"
     end
 
+    if Core.isDivingCommand(command.kind) then
+        if not Core.validDivingMode(command.divingMode) then return nil, "invalid diving mode" end
+        if command.kind == Core.COMMAND.DivingSave and
+            (look ~= nil or command.divingMode ~= 2) then return nil, "invalid diving save" end
+        if look ~= nil and not Core.hasLook(look) then return nil, "diving look must be captured" end
+    end
+
     return {
         protocolVersion = Core.PROTOCOL_VERSION,
         clientSessionId = clientSessionId,
@@ -833,7 +897,8 @@ function Core.validateCommand(command)
         baseRevision = revision,
         kind = command.kind,
         look = look,
-        targetCharacterId = targetCharacterId
+        targetCharacterId = targetCharacterId,
+        divingMode = command.divingMode
     }
 end
 
@@ -845,6 +910,7 @@ function Core.writeCommand(message, command)
     message.WriteString(valid.operationId)
     message.WriteUInt32(valid.baseRevision)
     message.WriteString(valid.kind)
+    if Core.isDivingCommand(valid.kind) then message.WriteByte(valid.divingMode) end
     message.WriteBoolean(valid.look ~= nil)
     if valid.look ~= nil then
         return Core.writeLook(message, valid.look)
@@ -864,6 +930,7 @@ function Core.readCommand(message)
         baseRevision = message.ReadUInt32(),
         kind = message.ReadString()
     }
+    if Core.isDivingCommand(command.kind) then command.divingMode = message.ReadByte() end
     if message.ReadBoolean() then
         local look, reason = Core.readLook(message)
         if look == nil then return nil, reason end
@@ -884,6 +951,7 @@ function Core.writeTargetCommand(message, command)
     message.WriteUInt32(valid.baseRevision)
     message.WriteString(valid.kind)
     message.WriteUInt16(valid.targetCharacterId)
+    if Core.isDivingCommand(valid.kind) then message.WriteByte(valid.divingMode) end
     message.WriteBoolean(valid.look ~= nil)
     if valid.look ~= nil then
         return Core.writeLook(message, valid.look)
@@ -904,12 +972,69 @@ function Core.readTargetCommand(message)
         kind = message.ReadString(),
         targetCharacterId = message.ReadUInt16()
     }
+    if Core.isDivingCommand(command.kind) then command.divingMode = message.ReadByte() end
     if message.ReadBoolean() then
         local look, reason = Core.readLook(message)
         if look == nil then return nil, reason end
         command.look = look
     end
     return Core.validateCommand(command)
+end
+
+function Core.writeDivingState(message, state)
+    local operationId, operationReason = checkBoundedString(state.operationId or "", "operationId", Core.LIMITS.MAX_OPERATION_ID_BYTES, true)
+    if operationId == nil then return false, operationReason end
+    local epoch, reason = checkBoundedString(state.serverSessionId, "serverSessionId", Core.LIMITS.MAX_SESSION_ID_BYTES, false)
+    if epoch == nil then return false, reason end
+    local generation = normalizeRevision(state.generation, "generation")
+    local revision = normalizeRevision(state.revision, "revision")
+    local characterId = tonumber(state.characterId)
+    if generation == nil or revision == nil or characterId == nil or
+        characterId < 0 or characterId > 65535 or characterId % 1 ~= 0 or
+        not Core.validDivingMode(state.mode) then return false, "invalid diving state" end
+    local look
+    if state.look ~= nil then
+        look, reason = Core.validateLook(state.look)
+        if look == nil or not Core.hasLook(look) then return false, reason or "uncaptured diving look" end
+    end
+    if characterId == 0 and (state.mode ~= 0 or look ~= nil) then return false, "invalid diving snapshot marker" end
+    message.WriteUInt16(Core.PROTOCOL_VERSION)
+    message.WriteString(epoch)
+    message.WriteUInt32(generation)
+    message.WriteUInt32(revision)
+    message.WriteUInt16(characterId)
+    message.WriteString(operationId)
+    message.WriteByte(state.mode)
+    message.WriteBoolean(look ~= nil)
+    if look ~= nil then return Core.writeLook(message, look) end
+    return true
+end
+
+function Core.tryReadDivingState(message)
+    local ok, state, reason = pcall(function()
+        local bytes = tonumber(message.LengthBytes) or math.ceil((tonumber(message.LengthBits) or 0) / 8)
+        if bytes > Core.LIMITS.MAX_PAYLOAD_BYTES then return nil, "payload too large" end
+        if message.ReadUInt16() ~= Core.PROTOCOL_VERSION then return nil, "unsupported protocol" end
+        local value = {
+            serverSessionId = message.ReadString(), generation = message.ReadUInt32(),
+            revision = message.ReadUInt32(), characterId = message.ReadUInt16(),
+            operationId = message.ReadString(), mode = message.ReadByte()
+        }
+        if message.ReadBoolean() then
+            local why
+            value.look, why = Core.readLook(message)
+            if value.look == nil or not Core.hasLook(value.look) then return nil, why or "uncaptured look" end
+        elseif messageRemainingBits(message) ~= 0 then return nil, "unexpected diving state tail" end
+        if not Core.validDivingMode(value.mode) or #value.serverSessionId == 0 or
+            #value.serverSessionId > Core.LIMITS.MAX_SESSION_ID_BYTES or
+            #value.operationId > Core.LIMITS.MAX_OPERATION_ID_BYTES or
+            (value.characterId == 0 and (value.mode ~= 0 or value.look ~= nil)) then
+            return nil, "invalid diving state"
+        end
+        return value
+    end)
+    if not ok then return nil, tostring(state) end
+    return state, reason
 end
 
 function Core.writeState(message, state)
@@ -1458,6 +1583,11 @@ function Core.reduce(currentState, event)
         else
             effects[#effects + 1] = effect("ClearPersistence")
         end
+        return state, effects
+    end
+
+    if event.type == "TransportSessionChanged" then
+        if state.pendingOperationId == nil then state.clientSessionId = event.clientSessionId end
         return state, effects
     end
 

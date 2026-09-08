@@ -66,6 +66,8 @@ local SERVER_LOG_MAX_BYTES = 65536
 local SERVER_LOG_MAX_WRITES_PER_SECOND = 20
 local serverLogWindowSecond = nil
 local serverLogWritesInWindow = 0
+local serverLogContents, serverLogPath
+local Diving = { states = {}, revisions = {}, generation = 0, nextPrune = 0 }
 
 local function writeLog(level, message)
     local line = "[" .. MOD_NAME .. "] " .. tostring(message)
@@ -88,11 +90,17 @@ local function writeLog(level, message)
             local path = directory .. "/WardrobeServer.log"
             local entry = "[" .. os.date("%Y-%m-%d %H:%M:%S") .. "] [" .. level .. "] " .. line .. "\n"
             if #entry > SERVER_LOG_MAX_BYTES then entry = entry:sub(-SERVER_LOG_MAX_BYTES) end
-            local previous = File.Exists(path) and File.Read(path) or ""
+            if serverLogPath ~= path then
+                serverLogContents = File.Exists(path) and File.Read(path) or ""
+                serverLogPath = path
+            end
+            local previous = serverLogContents or ""
             local retainedBytes = SERVER_LOG_MAX_BYTES - #entry
             if retainedBytes <= 0 then previous = ""
             elseif #previous > retainedBytes then previous = previous:sub(-retainedBytes) end
-            File.Write(path, previous .. entry)
+            local contents = previous .. entry
+            File.Write(path, contents)
+            serverLogContents = contents
         end)
     end
     if written then return end
@@ -105,7 +113,7 @@ local function writeLog(level, message)
 end
 
 local function log(message)
-    writeLog("INFO", message)
+    if rawget(_G, "WardrobeDetailedLogging") == true then writeLog("INFO", message) end
 end
 
 local function warn(message)
@@ -1824,6 +1832,7 @@ local function parseV2Command(message, targeted)
         look = nil
     }
     if command.targeted then command.targetCharacterId = tonumber(message.ReadUInt16()) end
+    if Core.isDivingCommand(command.kind) then command.divingMode = tonumber(message.ReadByte()) end
     command.hasLook = message.ReadBoolean() == true
     if command.hasLook then
         local ok, lookOrError, readReason = pcall(readCoreLook, message)
@@ -1843,7 +1852,9 @@ local validCommandKinds = {
     forget = true,
     [COMMAND_VISIBILITY] = true,
     [COMMAND_ANIMATION] = true,
-    [COMMAND_FOOTSTEP] = true
+    [COMMAND_FOOTSTEP] = true,
+    [Core.COMMAND.Diving] = true,
+    [Core.COMMAND.DivingSave] = true
 }
 
 local function validateV2Envelope(command)
@@ -1861,6 +1872,7 @@ local function validateV2Envelope(command)
     end
     if validCommandKinds[command.kind] ~= true then return false, "unknown_command" end
     if command.parseError ~= nil then return false, "malformed_look" end
+    if Core.isDivingCommand(command.kind) and not Core.validDivingMode(command.divingMode) then return false, "invalid_diving_mode" end
     local envelopeBytes = 16 + byteLength(command.clientSessionId) + byteLength(command.operationId) + byteLength(command.kind)
     if envelopeBytes > MAX_PAYLOAD_BYTES then return false, "payload_too_large" end
     if (command.kind == "clear" or command.kind == "forget") and command.hasLook then return false, "unexpected_look" end
@@ -1872,7 +1884,94 @@ local function validateV2Envelope(command)
     return true
 end
 
-local function resendCurrentState(session, operation)
+function Diving.send(client, characterId, state, operationId)
+    local recipient = sessionsByClient[client]
+    if client == nil or client.Connection == nil or recipient == nil or
+        recipient.protocol ~= PROTOCOL_VERSION or
+        not Core.hasCapability(recipient.capabilities, Core.CAPABILITY.DivingAppearance) then return end
+    local message = Networking.Start(NET.V2_DIVING_STATE)
+    local written, reason = Core.writeDivingState(message, {
+        serverSessionId = serverSessionId, generation = Diving.generation,
+        characterId = characterId, revision = Diving.revisions[characterId] or 0,
+        mode = state ~= nil and state.mode or 0, look = state ~= nil and state.look or nil,
+        operationId = operationId or ""
+    })
+    if not written then warn("Could not encode diving state: " .. tostring(reason)) return end
+    Networking.Send(message, client.Connection)
+end
+
+function Diving.broadcast(characterId, state, operationId)
+    for _, client in ipairs(connectedClients()) do Diving.send(client, characterId, state, operationId) end
+end
+
+function Diving.snapshot(client)
+    Diving.send(client, 0, nil)
+    for characterId, state in pairs(Diving.states) do Diving.send(client, characterId, state) end
+end
+
+function Diving.remove(characterId)
+    if Diving.states[characterId] == nil then return end
+    Diving.states[characterId] = nil
+    Diving.revisions[characterId] = math.min(MAX_REVISION, (Diving.revisions[characterId] or 0) + 1)
+    Diving.broadcast(characterId, nil)
+end
+
+function Diving.authorized(client, character)
+    local requester = clientCharacter(client)
+    if requester == nil or character == nil or userDataMember(requester, "IsDead") == true or
+        userDataMember(requester, "Removed") == true or userDataMember(character, "IsDead") == true or
+        userDataMember(character, "Removed") == true or userDataMember(character, "IsHuman") ~= true then return false end
+    if requester == character then return true end
+    if userDataMember(character, "IsBot") ~= true or userDataMember(character, "IsOnPlayerTeam") ~= true then return false end
+    local ownTeam, targetTeam = userDataMember(requester, "TeamID"), userDataMember(character, "TeamID")
+    if ownTeam ~= nil and targetTeam ~= nil and ownTeam ~= targetTeam then return false end
+    for _, connected in ipairs(connectedClients()) do
+        if clientCharacter(connected) == character then return false end
+    end
+    return true
+end
+
+function Diving.commit(session, character, command)
+    if not Core.hasCapability(session.capabilities, Core.CAPABILITY.DivingAppearance) then
+        return false, "unsupported_capability"
+    end
+    if not Core.validDivingMode(command.divingMode) then return false, "invalid_diving_mode" end
+    if character == nil then return false, "character_unavailable" end
+    -- Use the same live human/crew authorization for both own and bot targets.
+    if not Diving.authorized(session.client, character) then return false, "invalid_target" end
+    local reason
+    local characterId = characterEntityId(character)
+    local current = Diving.states[characterId]
+    if current ~= nil and current.session ~= session then return false, "target_in_use" end
+    if not canAdvanceRevision(session) or (Diving.revisions[characterId] or 0) >= MAX_REVISION then
+        return false, "revision_exhausted"
+    end
+    local look
+    if command.kind == Core.COMMAND.DivingSave then
+        if command.hasLook or command.divingMode ~= 2 then return false, "invalid_diving_save" end
+        look, reason = captureAuthoritativeLook(character, nil)
+        if look == nil then return false, reason end
+    elseif command.hasLook then
+        look, reason = canonicalizeLook(command.look, true)
+        if look == nil then return false, reason end
+    end
+    local state = { session = session, character = character, mode = command.divingMode, look = cloneLook(look) }
+    if state.mode == 0 and state.look == nil then state = nil end
+    Diving.states[characterId] = state
+    Diving.revisions[characterId] = (Diving.revisions[characterId] or 0) + 1
+    nextRevision(session)
+    -- No persistence, item relocation or unequip: this is an independent setting.
+    command.targetCharacterId = characterId
+    Diving.broadcast(characterId, state, command.operationId)
+    return true
+end
+
+local function resendCurrentState(session, operation, operationId)
+    if operation ~= nil and Core.isDivingCommand(operation.kind) then
+        local characterId = tonumber(operation.targetCharacterId) or characterEntityId(clientCharacter(session.client))
+        Diving.send(session.client, characterId, Diving.states[characterId], operationId)
+        return
+    end
     if session.active and session.activeCharacterId ~= nil then
         sendV2State(session.client, session.revision, session.activeCharacterId, true, session.savedLook)
     elseif operation ~= nil and tonumber(operation.targetCharacterId) ~= nil and
@@ -1896,18 +1995,20 @@ Networking.Receive(NET.V2_HELLO, function(message, client)
     local session = sessionFor(client)
     if session == nil then return end
     session.protocol = PROTOCOL_VERSION
+    session.capabilities = hello.capabilities or 0
     bindOperationCache(session, clientSessionId)
     local response = Networking.Start(NET.V2_HELLO)
     local written, writeReason = Core.writeServerHello(
         response,
         math.max(0, session.revision),
         CAPABILITY_ATTACHMENT_VISIBILITY + CAPABILITY_MOVEMENT_ANIMATION_SOURCE +
-            CAPABILITY_CREW_TARGETING + CAPABILITY_FOOTSTEP_SOUND_SOURCE
+            CAPABILITY_CREW_TARGETING + CAPABILITY_FOOTSTEP_SOUND_SOURCE + Core.CAPABILITY.DivingAppearance
     )
     if not written then warn("Could not encode v2 hello response: " .. tostring(writeReason)) return end
     Networking.Send(response, client.Connection)
     sendActiveSnapshot(client)
     sendOwnInactiveState(session)
+    Diving.snapshot(client)
 end)
 
 local function handleV2Command(message, client, targeted)
@@ -1936,7 +2037,7 @@ local function handleV2Command(message, client, targeted)
     local duplicate = operationResultFor(session, command.operationId)
     if duplicate ~= nil then
         sendV2Ack(session, command.operationId, duplicate.accepted, duplicate.reason, duplicate.revision)
-        if duplicate.accepted then resendCurrentState(session, duplicate) end
+        if duplicate.accepted then resendCurrentState(session, duplicate, command.operationId) end
         return
     end
     if command.baseRevision ~= session.revision then
@@ -1950,7 +2051,9 @@ local function handleV2Command(message, client, targeted)
     local accepted, reason = false, "character_unavailable"
     if character == nil and targetReason ~= nil then reason = targetReason end
     local runtime = character ~= nil and activeByCharacterId[characterEntityId(character)] or nil
-    if runtime ~= nil and runtime.session ~= session then
+    local divingOwner = character ~= nil and Diving.states[characterEntityId(character)] or nil
+    if (runtime ~= nil and runtime.session ~= session) or
+        (divingOwner ~= nil and divingOwner.session ~= session) then
         character = nil
         reason = "target_in_use"
     elseif command.targeted and session.active and
@@ -1960,7 +2063,9 @@ local function handleV2Command(message, client, targeted)
         character = nil
         reason = "target_not_active"
     end
-    if command.kind == "save" then
+    if Core.isDivingCommand(command.kind) then
+        if character ~= nil then accepted, reason = Diving.commit(session, character, command) end
+    elseif command.kind == "save" then
         if character ~= nil then accepted, reason = commitSave(session, character, command.look) end
     elseif command.kind == "apply" then
         local look, lookReason = nil, nil
@@ -2085,6 +2190,9 @@ Networking.Receive(NET.V1_FORGET_REQUEST, function(_, client)
 end)
 
 local function clearRoundRuntime()
+    Diving.states, Diving.revisions = {}, {}
+    Diving.generation = Diving.generation + 1
+    for _, client in ipairs(connectedClients()) do Diving.snapshot(client) end
     activeByCharacterId = {}
     observerRevisionByCharacterId = {}
     for _, session in pairs(sessionsByClient) do
@@ -2203,6 +2311,9 @@ Hook.Add("client.disconnected", "barowardrobeswitcher.v2-disconnected", function
     local session = sessionsByClient[client]
     if session == nil then return end
     clearActiveRuntime(session, true)
+    for characterId, state in pairs(Diving.states) do
+        if state.session == session then Diving.remove(characterId) end
+    end
     -- Disconnect only clears the runtime binding. The durable account record
     -- already contains the active intent and must not be rewritten from a
     -- transient reconnect session whose Character may not exist yet.
@@ -2215,7 +2326,9 @@ Hook.Add("character.created", "barowardrobeswitcher.v2-character-created", funct
     -- LuaCs may raise character.created just before Client.Character is assigned.
     -- Retry a bounded number of times from this event; never install a frame scan.
     local attempts = 0
+    local generation = roundReactivationGeneration
     local function attemptRebind()
+        if generation ~= roundReactivationGeneration then return end
         attempts = attempts + 1
         if rebindCreatedCharacter(character) or attempts >= 3 then return end
         if Timer ~= nil and Timer.Wait ~= nil then
@@ -2238,6 +2351,23 @@ end)
 Hook.Add("roundEnd", "barowardrobeswitcher.v2-round-end", function()
     roundReactivationGeneration = roundReactivationGeneration + 1
     clearRoundRuntime()
+end)
+
+Hook.Add("think", "barowardrobeswitcher.diving-prune", function()
+    local now = operationCacheNow()
+    if now < Diving.nextPrune then return end
+    Diving.nextPrune = now + 1
+    for characterId, state in pairs(Diving.states) do
+        if not Diving.authorized(state.session.client, state.character) then
+            Diving.remove(characterId)
+        end
+    end
+end)
+
+Hook.Add("stop", "barowardrobeswitcher.server-stop", function()
+    roundReactivationGeneration = roundReactivationGeneration + 1
+    Diving.states, Diving.revisions = {}, {}
+    activeByCharacterId, observerRevisionByCharacterId, sessionsByClient, operationCachesByAccount = {}, {}, {}, {}
 end)
 
 loadPersistence()

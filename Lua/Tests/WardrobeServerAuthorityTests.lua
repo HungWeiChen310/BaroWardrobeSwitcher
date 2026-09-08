@@ -152,6 +152,7 @@ Hook = {
     Add = function(name, _, handler) Hook.handlers[name] = handler end
 }
 
+WardrobeDetailedLogging = true
 loadFirst(candidates("Lua/WardrobeSwitcherServer.lua"), false)
 assert(not requestedSystemStatic,
     "server persistence must use LuaCs native File instead of System.IO userdata")
@@ -163,7 +164,9 @@ assert(memoryFiles[serverLogPath] ~= nil and
 local handlerCount = 0
 for _ in pairs(Networking.handlers) do handlerCount = handlerCount + 1 end
 assert(handlerCount == 7, "server must register four v1 and three v2 receivers")
-assert(Hook.handlers.think == nil, "server authority must not install a think heartbeat")
+local beforePrunePackets = #Networking.sent
+Hook.handlers.think()
+assert(#Networking.sent == beforePrunePackets, "owned-character prune emitted a steady-state heartbeat")
 
 local client = { Connection = {}, Character = { ID = 42, Name = "Tester" } }
 connectedClients[1] = client
@@ -174,7 +177,7 @@ local serverHello = assert(Core.readServerHello(Networking.sent[#Networking.sent
 assert(serverHello.revision == 0)
 assert(serverHello.capabilities == Core.CAPABILITY.AttachmentVisibility +
     Core.CAPABILITY.MovementAnimationSource + Core.CAPABILITY.CrewTargeting +
-    Core.CAPABILITY.FootstepSoundSource,
+    Core.CAPABILITY.FootstepSoundSource + Core.CAPABILITY.DivingAppearance,
     "server did not advertise all authoritative appearance preferences")
 
 local logWritesBeforeFlood = serverLogWriteCount
@@ -193,10 +196,13 @@ local function sendCommand(command, targetClient)
     local message = newBuffer()
     assert(Core.writeCommand(message, command))
     message.FinalizeForTransport()
+    local before = #Networking.sent
     Networking.handlers[Core.NET.V2_COMMAND](message, targetClient)
-    local sent = Networking.sent[#Networking.sent]
-    assert(sent.message.name == Core.NET.V2_ACK)
-    return assert(Core.readAck(sent.message))
+    for index = before + 1, #Networking.sent do
+        local sent = Networking.sent[index]
+        if sent.message.name == Core.NET.V2_ACK then return assert(Core.readAck(sent.message)) end
+    end
+    error("command did not receive an acknowledgement")
 end
 
 local function lastSentMessage(name, connection)
@@ -345,6 +351,8 @@ Hook.handlers["client.disconnected"](targetOwner)
 table.remove(connectedClients, 3)
 table.remove(connectedClients, 2)
 
+-- These independent protocol cases need not retain locals during persistence tests.
+do
 local clear = {
     clientSessionId = "client-session",
     operationId = "op-clear",
@@ -603,7 +611,7 @@ local visibilityServerHello =
     assert(Core.readServerHello(lastSentMessage(Core.NET.V2_HELLO, visibilityClient.Connection)))
 assert(visibilityServerHello.capabilities ==
         Core.CAPABILITY.AttachmentVisibility + Core.CAPABILITY.MovementAnimationSource +
-        Core.CAPABILITY.CrewTargeting + Core.CAPABILITY.FootstepSoundSource,
+        Core.CAPABILITY.CrewTargeting + Core.CAPABILITY.FootstepSoundSource + Core.CAPABILITY.DivingAppearance,
     "new server hello must advertise visibility, movement, crew targeting, and footsteps")
 
 local visibilityApply = sendCommand({
@@ -897,6 +905,7 @@ assert(lockedSave.accepted and lockedSave.revision == 1 and lockedDropCalls == 1
        lockedInventoryMoves == 0 and lockedSlots[InvSlotType.Head] == nil,
     "authoritative Save must drop lock-tagged fashion gear instead of moving it into inventory")
 
+end
 local stableAccount = { StringRepresentation = "stable-account" }
 local stableClient = {
     Connection = {},
@@ -1588,5 +1597,92 @@ Hook.handlers.roundStart()
 assert(memoryFiles[serverJsonPath]:find(
         '"accountId":"restart-campaign-account","revision":8,"active":false', 1, true) ~= nil,
     "loading a genuinely different campaign retained the previous campaign's active intent")
+
+do
+    Hook.handlers.stop()
+    memoryFiles, connectedClients = {}, {}
+    Networking.sent = {}
+    WardrobeDetailedLogging = false
+    local deferred = {}
+    Timer = { Wait = function(callback) deferred[#deferred + 1] = callback end }
+    loadFirst(candidates("Lua/WardrobeSwitcherServer.lua"), false)
+    assert(memoryFiles[serverLogPath] == nil, "detailed server logging was enabled by default")
+    local mutations, reads = 0, 0
+    local helmet = { Prefab = fakeHelmetPrefab, SpriteColor = { PackedValue = 1234567890 },
+        Unequip = function() mutations = mutations + 1 end, Drop = function() mutations = mutations + 1 end }
+    local gear = { [InvSlotType.Head] = helmet }
+    local function human(id, bot)
+        return { ID = id, IsHuman = true, IsBot = bot == true, IsOnPlayerTeam = true, TeamID = 1,
+            Inventory = { GetItemInLimbSlot = function(slot) reads = reads + 1; return gear[slot] end } }
+    end
+    local owner = { Connection = {}, Character = human(501) }
+    local observer = { Connection = {}, Character = human(502) }
+    local old = { Connection = {}, Character = human(503) }
+    local bot = human(504, true)
+    connectedClients[1], connectedClients[2], connectedClients[3] = owner, observer, old
+    Character.CharacterList = { owner.Character, observer.Character, old.Character, bot }
+    local function greet(who, session, caps)
+        local hello = newBuffer()
+        assert(Core.writeClientHello(hello, session, caps))
+        hello.FinalizeForTransport()
+        Networking.handlers[Core.NET.V2_HELLO](hello, who)
+    end
+    greet(owner, "dive-owner", 31)
+    greet(observer, "dive-observer", 31)
+    greet(old, "dive-old", nil)
+    local saved = sendCommand({ clientSessionId = "dive-owner", operationId = "save-dive",
+        baseRevision = 0, kind = Core.COMMAND.DivingSave, divingMode = 2 }, owner)
+    assert(saved.accepted and saved.revision == 1 and mutations == 0 and gear[InvSlotType.Head] == helmet)
+    local state = assert(Core.tryReadDivingState(assert(lastSentMessage(Core.NET.V2_DIVING_STATE, observer.Connection))))
+    assert(state.mode == 2 and state.characterId == 501 and state.look.slots.Head == "helmet" and
+        state.look.colors.Head == 1234567890, "diving save did not broadcast authoritative identifiers/colors")
+    assert(lastSentMessage(Core.NET.V2_DIVING_STATE, old.Connection) == nil, "new message reached an old client")
+    local readsBeforeDuplicate = reads
+    local duplicate = sendCommand({ clientSessionId = "dive-owner", operationId = "save-dive",
+        baseRevision = 0, kind = Core.COMMAND.DivingSave, divingMode = 2 }, owner)
+    assert(duplicate.accepted and duplicate.revision == 1 and reads == readsBeforeDuplicate and mutations == 0,
+        "duplicate diving save recaptured or moved equipment")
+    local clearBase = sendCommand({ clientSessionId = "dive-owner", operationId = "clear-base",
+        baseRevision = 1, kind = Core.COMMAND.Clear }, owner)
+    assert(clearBase.accepted)
+    greet(observer, "dive-observer", 31)
+    local afterClear = assert(Core.tryReadDivingState(lastSentMessage(Core.NET.V2_DIVING_STATE, observer.Connection)))
+    assert(afterClear.mode == 2 and afterClear.look.colors.Head == 1234567890, "normal Clear erased diving settings")
+    local botResult = sendTargetCommand({ clientSessionId = "dive-owner", operationId = "bot-dive",
+        baseRevision = clearBase.revision, targetCharacterId = 504, kind = Core.COMMAND.Diving,
+        divingMode = 2, look = Core.newLook(true, false, {}) }, owner)
+    assert(botResult.accepted, "friendly bot rejected a captured empty diving outfit")
+    local contested = sendTargetCommand({ clientSessionId = "dive-observer", operationId = "bot-steal",
+        baseRevision = 0, targetCharacterId = 504, kind = Core.COMMAND.Diving, divingMode = 1 }, observer)
+    assert(not contested.accepted and contested.reason == "target_in_use", "bot settings lost owner isolation")
+    local crossAppearance = sendTargetCommand({ clientSessionId = "dive-observer", operationId = "normal-steal",
+        baseRevision = 0, targetCharacterId = 504, kind = Core.COMMAND.Apply, look = Core.newLook(true, false, {}) }, observer)
+    assert(not crossAppearance.accepted and crossAppearance.reason == "target_in_use", "normal Apply stole another player's diving target")
+    local oldRequest = sendCommand({ clientSessionId = "dive-old", operationId = "unsupported-dive",
+        baseRevision = 0, kind = Core.COMMAND.Diving, divingMode = 1 }, old)
+    assert(not oldRequest.accepted and oldRequest.reason == "unsupported_capability")
+    local invalid = sendCommand({ clientSessionId = "dive-owner", operationId = "missing-prefab",
+        baseRevision = botResult.revision, kind = Core.COMMAND.Diving, divingMode = 2,
+        look = Core.newLook(true, false, { Head = "nonexistent" }) }, owner)
+    assert(not invalid.accepted and invalid.revision == botResult.revision, "unknown prefab changed authoritative settings")
+    local quietPackets = #Networking.sent
+    for _ = 1, 120 do Hook.handlers.think() end
+    assert(#Networking.sent == quietPackets and mutations == 0, "steady state emitted packets or changed equipment")
+    Hook.handlers["client.disconnected"](owner)
+    local cleared = assert(Core.tryReadDivingState(lastSentMessage(Core.NET.V2_DIVING_STATE, observer.Connection)))
+    assert(cleared.mode == 0 and cleared.look == nil, "disconnect retained diving ownership")
+    Hook.handlers.roundEnd()
+    local reset = assert(Core.tryReadDivingState(lastSentMessage(Core.NET.V2_DIVING_STATE, observer.Connection)))
+    assert(reset.characterId == 0 and reset.generation > state.generation, "round boundary did not advance diving generation")
+    local beforeLateJoin = #Networking.sent
+    greet(observer, "dive-reconnected", 31)
+    for index = beforeLateJoin + 1, #Networking.sent do
+        if Networking.sent[index].message.name == Core.NET.V2_DIVING_STATE then
+            local late = assert(Core.tryReadDivingState(Networking.sent[index].message))
+            assert(late.characterId == 0, "new round rebound an old bot setting")
+        end
+    end
+    Hook.handlers.stop()
+end
 
 print("Wardrobe server authority tests passed")

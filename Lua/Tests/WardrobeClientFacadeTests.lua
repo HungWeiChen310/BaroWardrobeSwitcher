@@ -63,7 +63,7 @@ assert(captureSource:find("savedColor == nil", 1, true) ~= nil,
     "a colorless saved look could incorrectly reuse a live item")
 assert(captureSource:find("Helpers.findItemByIdentifier(character", 1, true) == nil,
     "saved-look capture must not select the first matching inventory prefab")
-assert(captureSource:find('.. "@" .. tostring(color or "base")', 1, true) ~= nil,
+assert(captureSource:find("Core.appearanceKey(identifier, color)", 1, true) ~= nil,
     "prefab fallback dedupe must include the packed color")
 assert(clientSource:find("color = Helpers.itemSpriteColor(item)", 1, true) ~= nil,
     "client visual snapshots must capture Item.SpriteColor.PackedValue")
@@ -87,24 +87,6 @@ assert(clientSource:find("local SessionPollTicks = 30", 1, true) ~= nil and
        clientSource:find("local SelectableCharactersCacheTicks = 15", 1, true) ~= nil,
     "session-key polling or crew-list caching returned to every-frame work")
 
-local equipmentRefreshStart = assert(clientSource:find(
-    "function Helpers.refreshActiveLookIfNeeded",
-    1,
-    true
-))
-local equipmentRefreshEnd = assert(clientSource:find(
-    "function Helpers.autoApplySavedLookIfNeeded",
-    equipmentRefreshStart,
-    true
-))
-local equipmentRefreshSource = clientSource:sub(equipmentRefreshStart, equipmentRefreshEnd - 1)
-assert(equipmentRefreshSource:find("Helpers.applyCapturedFashionToCharacterEquipment", 1, true) ~= nil and
-       equipmentRefreshSource:find("lastEquipmentSignature = signature", 1, true) ~= nil,
-    "equipment changes must refresh the existing renderer session locally")
-assert(equipmentRefreshSource:find("applyFashionToCurrentEquipment", 1, true) == nil and
-       equipmentRefreshSource:find("dispatchReducer", 1, true) == nil,
-    "equipment-only refresh must not persist or send a wardrobe Apply command")
-
 local equipmentApplyStart = assert(clientSource:find(
     "function Helpers.applyCapturedFashionToCharacterEquipment",
     1,
@@ -120,11 +102,6 @@ assert(equipmentApplySource:find("local seenEquippedItems = {}", 1, true) ~= nil
        equipmentApplySource:find("local seenEquippedItemIds = {}", 1, true) ~= nil and
        equipmentApplySource:find("seenEquippedItemIds[equippedId]", 1, true) ~= nil,
     "a multi-slot item must be registered once even when LuaCs returns distinct proxies")
-assert(clientSource:find("Helpers.removeVisualOverrideFromItem(character, item)", 1, true) ~= nil and
-       clientSource:find("VisualOverride.RemoveFashionItemVisual(character, item)", 1, true) ~= nil,
-    "unequipped observer items must release their sound and animation suppression references")
-assert(clientSource:find("Helpers.isManagedEquippedItem(character, item)", 1, true) ~= nil,
-    "observer equipment registration must be limited to the six managed clothing slots")
 assert(clientSource:find("bridge.GetPanelKeyName()", 1, true) ~= nil and
        clientSource:find("return PlayerInput.KeyHit(key)", 1, true) ~= nil and
        clientSource:find('if key == nil then name, key = "F8", Keys.F8 end', 1, true) ~= nil and
@@ -306,6 +283,11 @@ local fashionSlotCalls = 0
 local equipmentRegistrationCalls = 0
 local equipmentRemovalCalls = 0
 local stalePruneCalls = 0
+local equipmentRefreshCalls = 0
+local divingReusable, divingActive = {}, {}
+local transactionDiving = false
+local normalActive = {}
+local targetDropdown, lastListBox
 local reusableCharacters = {}
 local transactionCharacter = nil
 local function characterId(character)
@@ -323,7 +305,8 @@ local visualOverride = {
     GetCharacterDebugStatus = function() return "test" end,
     HasHighPressureAffliction = function(character) return character.InPressure == true end,
     IsDivingSuitItem = function(item) return item ~= nil and item.IsDivingSuit == true end,
-    BeginFashionTransaction = function(character)
+    BeginFashionTransaction = function(character, diving)
+        transactionDiving = diving == true
         transactionCharacter = character
         return true
     end,
@@ -333,13 +316,15 @@ local visualOverride = {
     end,
     CommitFashionTransaction = function()
         local id = characterId(transactionCharacter)
-        if id ~= nil then reusableCharacters[id] = true end
+        if id ~= nil then
+            if transactionDiving then divingReusable[id] = true else reusableCharacters[id] = true end
+        end
         transactionCharacter = nil
         return true
     end,
-    CanReuseCapturedFashion = function(character)
+    CanReuseCapturedFashion = function(character, diving)
         reuseCheckCount = reuseCheckCount + 1
-        return reusableCharacters[characterId(character)] == true
+        return (diving and divingReusable or reusableCharacters)[characterId(character)] == true
     end,
     CaptureFashionPrefab = function(character, identifier, packedColor)
         prefabCaptureCount = prefabCaptureCount + 1
@@ -388,7 +373,18 @@ local visualOverride = {
         equipmentRemovalCalls = equipmentRemovalCalls + 1
         return true
     end,
-    ActivateFashionVisual = function(character)
+    RefreshEquipment = function(character)
+        equipmentRefreshCalls = equipmentRefreshCalls + 1
+        return true
+    end,
+    SetDivingAppearanceActive = function(character, enabled)
+        local id = characterId(character)
+        if enabled and not divingReusable[id] then return false end
+        divingActive[id] = enabled == true
+        activeCharacterIds[id] = enabled or normalActive[id] == true
+        return true
+    end,
+    ActivateFashionVisual = function(character, diving)
         activationAttempts = activationAttempts + 1
         if activationFailuresRemaining > 0 then
             activationFailuresRemaining = activationFailuresRemaining - 1
@@ -398,9 +394,10 @@ local visualOverride = {
         local id = characterId(character)
         activationCharacterIds[#activationCharacterIds + 1] = id
         activeCharacterIds[id] = true
+        if diving then divingActive[id] = true else normalActive[id] = true end
         return true
     end,
-    ClearCharacter = function(character)
+    ClearCharacter = function(character, diving)
         clearAttempts = clearAttempts + 1
         if clearFailuresRemaining > 0 then
             clearFailuresRemaining = clearFailuresRemaining - 1
@@ -408,13 +405,15 @@ local visualOverride = {
         end
         local id = characterId(character)
         if id ~= nil then
-            reusableCharacters[id] = nil
-            activeCharacterIds[id] = nil
+            if diving then divingReusable[id], divingActive[id] = nil, nil
+            else reusableCharacters[id], normalActive[id] = nil, nil end
+            activeCharacterIds[id] = divingActive[id] or normalActive[id]
         end
         return true
     end,
     ClearAll = function()
         reusableCharacters = {}
+        normalActive, divingActive, divingReusable = {}, {}, {}
         activeCharacterIds = {}
         transactionCharacter = nil
         return true
@@ -559,18 +558,44 @@ GUI = {
     end,
     LayoutGroup = function() return widget() end,
     ListBox = function()
-        return { Content = widget() }
+        lastListBox = { Content = widget(), BarScroll = 0 }
+        return lastListBox
+    end,
+    DropDown = function()
+        local dropdown = widget()
+        dropdown.items = {}
+        dropdown.AddItem = function(text, data) dropdown.items[#dropdown.items + 1] = { text = text, data = data } end
+        dropdown.SelectItem = function(data)
+            if dropdown.OnSelected == nil or dropdown.OnSelected(nil, data) ~= false then dropdown.SelectedData = data end
+        end
+        targetDropdown = dropdown
+        return dropdown
     end,
     TextBlock = function(_, text)
-        visibleTexts[#visibleTexts + 1] = tostring(text)
-        return widget()
+        local index = #visibleTexts + 1
+        visibleTexts[index] = tostring(text)
+        return setmetatable(widget(), {
+            __index = function(_, key) if key == "Text" then return visibleTexts[index] end end,
+            __newindex = function(t, key, value)
+                if key == "Text" then visibleTexts[index] = value else rawset(t, key, value) end
+            end
+        })
     end,
     Button = function(_, text)
         local button = widget()
+        local label = tostring(text)
         button.Enabled = true
-        buttons[tostring(text)] = button
-        visibleButtons[tostring(text)] = true
-        return button
+        buttons[label], visibleButtons[label] = button, true
+        return setmetatable(button, {
+            __index = function(_, key) if key == "Text" then return label end end,
+            __newindex = function(t, key, value)
+                if key == "Text" then
+                    buttons[label], visibleButtons[label] = nil, nil
+                    label = tostring(value)
+                    buttons[label], visibleButtons[label] = t, true
+                else rawset(t, key, value) end
+            end
+        })
     end
 }
 
@@ -603,7 +628,7 @@ profiles[profileStorageKey(campaignStorageKey, stableCharacterProfileKey("Twin N
 profiles[profileStorageKey(campaignStorageKey, stableCharacterProfileKey("No Stable ID"))] =
     "captured=true|active=false|auto=true|hidehair=false|Head=unstablehelmet,"
 
-assert(dofile(clientPath) == nil)
+dofile(clientPath)
 assert(loadCalls == 0, "single-player profiles should load only after a campaign character exists")
 
 local function hasVisibleText(expected)
@@ -624,6 +649,8 @@ local function hasLoggedText(expected)
     return false
 end
 
+-- Keep independent scenarios below Lua 5.4's per-function active-local limit.
+do
 local player = makeCharacter(42, 100, "Player Tester", false)
 local npc = makeCharacter(43, 200, "NPC Tester", true)
 local existingNpc = makeCharacter(44, 300, "Existing NPC", true)
@@ -782,16 +809,16 @@ capturedIdentifierByCharacterId = {}
 capturedPrefabKeysByCharacterId = {}
 activeCharacterIds = {}
 reusableCharacters = {}
-local playerTargetButton = buttons["Wardrobe target: Player Tester"]
-assert(playerTargetButton ~= nil and type(playerTargetButton.OnClicked) == "function",
+local playerTargetButton = targetDropdown
+assert(playerTargetButton ~= nil and type(playerTargetButton.OnSelected) == "function",
     "the main page did not expose its single-player crew selector")
 local removesBeforeTargetChange = removedWidgets
-playerTargetButton.OnClicked()
+targetDropdown.SelectItem(selectorNpc)
 assert(removedWidgets == removesBeforeTargetChange,
     "changing the wardrobe target rebuilt the overlay inside its click callback")
 hooks.think()
-assert(removedWidgets == removesBeforeTargetChange + 1 and liveOverlayRoots == 1 and
-       hasVisibleButton("Wardrobe target: A Target NPC"),
+assert(removedWidgets == removesBeforeTargetChange and liveOverlayRoots == 1 and
+       (targetDropdown.SelectedData ~= nil and targetDropdown.SelectedData.Name == "A Target NPC"),
     "the crew selector did not bind the first eligible bot on the next tick")
 buttons["Save Current Outfit"].OnClicked()
 hooks.think()
@@ -856,8 +883,8 @@ fashionMovementButton.OnClicked()
 assert(removedWidgets == removesBeforeEquipmentMovement,
     "changing the movement source rebuilt the overlay inside its click callback")
 hooks.think()
-assert(removedWidgets == removesBeforeEquipmentMovement + 1 and liveOverlayRoots == 1,
-    "changing to equipped movement did not replace exactly one overlay on the next tick")
+assert(removedWidgets == removesBeforeEquipmentMovement and liveOverlayRoots == 1,
+    "changing to equipped movement rebuilt a stable overlay")
 assert(movementAnimationCalls == movementCallsBeforeEquipmentMovement,
     "an inactive saved look tried to update a renderer session")
 assert(saveCalls == savesBeforeEquipmentMovement + 1 and
@@ -871,7 +898,7 @@ equipmentMovementButton.OnClicked()
 assert(removedWidgets == removesBeforeFashionMovement,
     "restoring fashion movement rebuilt the overlay inside its click callback")
 hooks.think()
-assert(removedWidgets == removesBeforeFashionMovement + 1 and liveOverlayRoots == 1,
+assert(removedWidgets == removesBeforeFashionMovement and liveOverlayRoots == 1,
     "restoring fashion movement did not replace exactly one overlay on the next tick")
 assert(movementAnimationCalls == movementCallsBeforeEquipmentMovement,
     "restoring an inactive saved look tried to update a renderer session")
@@ -890,7 +917,7 @@ equipmentFootstepButton.OnClicked()
 assert(removedWidgets == removesBeforeFashionFootsteps,
     "changing the footstep source rebuilt the overlay inside its click callback")
 hooks.think()
-assert(removedWidgets == removesBeforeFashionFootsteps + 1 and liveOverlayRoots == 1,
+assert(removedWidgets == removesBeforeFashionFootsteps and liveOverlayRoots == 1,
     "changing to fashion footsteps did not replace exactly one overlay")
 assert(footstepSoundCalls == footstepCallsBeforeFashionFootsteps,
     "an inactive saved look tried to update footstep rendering")
@@ -918,24 +945,24 @@ assert(removedWidgets == removesBeforePageBack + 1 and liveOverlayRoots == 1 and
        hasVisibleButton("Appearance Layers...") and not hasVisibleButton("Diagnostics"),
     "Back did not return to the main page on the next tick")
 
-buttons["Wardrobe target: A Target NPC"].OnClicked()
+for _, choice in ipairs(targetDropdown.items) do if choice.text == "Existing NPC" then targetDropdown.SelectItem(choice.data); break end end
 hooks.think()
-assert(hasVisibleButton("Wardrobe target: Existing NPC"),
+assert((targetDropdown.SelectedData ~= nil and targetDropdown.SelectedData.Name == "Existing NPC"),
     "the crew selector did not advance to the next eligible bot")
-buttons["Wardrobe target: Existing NPC"].OnClicked()
+for _, choice in ipairs(targetDropdown.items) do if choice.text == "NPC Tester" then targetDropdown.SelectItem(choice.data); break end end
 hooks.think()
-assert(hasVisibleButton("Wardrobe target: NPC Tester"),
+assert((targetDropdown.SelectedData ~= nil and targetDropdown.SelectedData.Name == "NPC Tester"),
     "the crew selector did not advance to the second eligible bot")
-buttons["Wardrobe target: NPC Tester"].OnClicked()
+for _, choice in ipairs(targetDropdown.items) do if choice.text == "Player Tester" then targetDropdown.SelectItem(choice.data); break end end
 hooks.think()
-assert(hasVisibleButton("Wardrobe target: Player Tester") and Character.Controlled == player,
+assert((targetDropdown.SelectedData ~= nil and targetDropdown.SelectedData.Name == "Player Tester") and Character.Controlled == player,
     "the crew selector included a real, enemy, nonhuman, dead, or removed character")
-buttons["Wardrobe target: Player Tester"].OnClicked()
+for _, choice in ipairs(targetDropdown.items) do if choice.text == "A Target NPC" then targetDropdown.SelectItem(choice.data); break end end
 hooks.think()
 selectorNpc.Removed = true
 hooks["character.removed"](selectorNpc)
 hooks.think()
-assert(hasVisibleButton("Wardrobe target: Player Tester"),
+assert((targetDropdown.SelectedData ~= nil and targetDropdown.SelectedData.Name == "Player Tester"),
     "an unavailable selected bot did not safely fall back to the controlled character")
 selectorNpc.Removed = false
 
@@ -1009,42 +1036,30 @@ playerEquipment[InvSlotType.OuterClothes] = sharedProxyB
 local equipmentNetworkBefore = #networkSent
 local equipmentSavesBefore = saveCalls
 local equipmentCapturesBefore = prefabCaptureCount
-local equipmentSlotsBefore = fashionSlotCalls
-local equipmentRegistrationsBefore = equipmentRegistrationCalls
-local equipmentActivationsBefore = activationAttempts
+local refreshBefore = equipmentRefreshCalls
+hooks["item.equip"](sharedProxyA, player)
+hooks["item.unequip"](sharedProxyB, player)
+hooks["item.equip"](sharedProxyB, player)
+assert(equipmentRefreshCalls == refreshBefore, "equipment hook read pre-native state")
 hooks.think()
 assert(#networkSent == equipmentNetworkBefore and saveCalls == equipmentSavesBefore and
-       prefabCaptureCount == equipmentCapturesBefore,
-    "equipment-only refresh sent a command, persisted, or recaptured the saved look")
-assert(fashionSlotCalls == equipmentSlotsBefore + 1 and
-       equipmentRegistrationCalls == equipmentRegistrationsBefore + 1 and
-       activationAttempts == equipmentActivationsBefore + 1,
-    "equipment-only refresh did not batch one item registration and one final activation")
+       prefabCaptureCount == equipmentCapturesBefore and equipmentRefreshCalls == refreshBefore + 1,
+    "equipment events did not coalesce without network, writes or recapture")
 
 local observerEquipment = {}
-npc.Inventory.GetItemInLimbSlot = function(slot)
-    return observerEquipment[slot]
-end
-local observerGear = { ID = 701, Name = "Observer Gear", Prefab = { Identifier = "observergear" } }
-local observerRegistrationsBefore = equipmentRegistrationCalls
+npc.Inventory.GetItemInLimbSlot = function(slot) return observerEquipment[slot] end
+local observerGear = { ID = 701, Prefab = { Identifier = "observergear" } }
+local beforeObserverRefresh = equipmentRefreshCalls
 hooks["item.equip"](observerGear, npc)
-assert(equipmentRegistrationCalls == observerRegistrationsBefore,
-    "observer hook registered an item outside the managed clothing slots")
 observerEquipment[InvSlotType.Head] = observerGear
-hooks["item.equip"](observerGear, npc)
-assert(equipmentRegistrationCalls == observerRegistrationsBefore + 1,
-    "observer managed clothing did not register local suppression")
-local observerRemovalsBefore = equipmentRemovalCalls
-observerEquipment[InvSlotType.Head] = nil
 hooks["item.unequip"](observerGear, npc)
-assert(equipmentRemovalCalls == observerRemovalsBefore + 1,
-    "observer unequip did not release stale suppression references")
+observerEquipment[InvSlotType.Head] = nil
+hooks["item.equip"](observerGear, npc)
+observerEquipment[InvSlotType.Head] = observerGear
+assert(equipmentRefreshCalls == beforeObserverRefresh, "observer events refreshed inside the callback")
+hooks.think()
+assert(equipmentRefreshCalls == beforeObserverRefresh + 1, "observer event burst did not refresh once")
 
--- The fixture's activationCount tracks calls, while the real C# active-session
--- fast path returns without a second activation. Keep the older transition
--- assertions on their original baseline; activationAttempts above owns this case.
-activationCount = activationCount - 1
-table.remove(activationCharacterIds)
 
 local hairLayerButton = buttons["Hair — Hide"]
 assert(hairLayerButton ~= nil and type(hairLayerButton.OnClicked) == "function",
@@ -1113,7 +1128,7 @@ assert(prefabCaptureCount == 2,
 -- explicitly applied.
 Character.Controlled = nil
 hooks.think()
-buttons = {}
+-- Retain references while a stable GUI structure updates in place.
 Character.Controlled = existingNpc
 hooks.think()
 hooks.think()
@@ -1123,18 +1138,18 @@ local existingNpcBackButton = buttons["Back"]
 assert(existingNpcBackButton ~= nil and type(existingNpcBackButton.OnClicked) == "function",
     "the attachment panel did not expose its Back action")
 existingNpcBackButton.OnClicked()
-buttons = {}
+-- Retain references while a stable GUI structure updates in place.
 hooks.think()
 local existingNextPageButton = buttons["Next Page"]
 assert(existingNextPageButton ~= nil and type(existingNextPageButton.OnClicked) == "function",
     "the existing NPC main page did not expose Next Page")
 existingNextPageButton.OnClicked()
-buttons = {}
+-- Retain references while a stable GUI structure updates in place.
 hooks.think()
 assert(buttons["Movement: Equipped Gear"] ~= nil,
     "the single-player panel did not prefer the saved look's movement source")
 buttons["Back"].OnClicked()
-buttons = {}
+-- Retain references while a stable GUI structure updates in place.
 hooks.think()
 applyButton = buttons["Apply Saved Look"]
 local existingProfileKey =
@@ -1264,6 +1279,8 @@ assert(saveCalls == savesBeforeMemoryProfile,
 
 -- A deterministic multiplayer rejection must not make auto-apply enqueue the
 -- same command every think tick. Manual Apply remains available for retries.
+end
+do
 hooks.roundEnd()
 persistence.LoadClientLook = function()
     return "captured=true|active=true|auto=true|hidehair=false|Head=helmet,"
@@ -1804,13 +1821,13 @@ do
 
     openPanel = true
     hooks.think()
-    local multiplayerTargetButton = buttons["Wardrobe target: Late Local Player"]
-    assert(multiplayerTargetButton ~= nil and type(multiplayerTargetButton.OnClicked) == "function" and
+    local multiplayerTargetButton = targetDropdown
+    assert(multiplayerTargetButton ~= nil and type(multiplayerTargetButton.OnSelected) == "function" and
         hasVisibleText("Multiplayer uses one saved look per player; this selects who the actions affect."),
         "crew-target capable multiplayer did not expose its shared-look target selector")
-    multiplayerTargetButton.OnClicked()
+    targetDropdown.SelectItem(multiplayerBot)
     hooks.think()
-    assert(hasVisibleButton("Wardrobe target: Multiplayer Bot"),
+    assert((targetDropdown.SelectedData ~= nil and targetDropdown.SelectedData.Name == "Multiplayer Bot"),
         "multiplayer selector included a player or enemy before the friendly bot")
     buttons["Apply Saved Look"].OnClicked()
     hooks.think()
@@ -1822,7 +1839,7 @@ do
     assert(targetedApply.kind == WardrobeCore.COMMAND.Apply and
         targetedApply.targetCharacterId == multiplayerBot.ID,
         "multiplayer Apply did not freeze the selected bot entity ID")
-    assert(buttons["Wardrobe target: Multiplayer Bot"].Enabled == false,
+    assert(targetDropdown.Enabled == false,
         "multiplayer target selector stayed enabled while a command was pending")
     local rejectedTargetApplyAck = newNetworkBuffer(WardrobeCore.NET.V2_ACK)
     assert(WardrobeCore.writeAck(rejectedTargetApplyAck, {
@@ -1834,9 +1851,9 @@ do
     rejectedTargetApplyAck.FinalizeForTransport()
     networkHandlers[WardrobeCore.NET.V2_ACK](rejectedTargetApplyAck)
     hooks.think()
-    buttons["Wardrobe target: Multiplayer Bot"].OnClicked()
+    for _, choice in ipairs(targetDropdown.items) do if choice.text == "Late Local Player" then targetDropdown.SelectItem(choice.data); break end end
     hooks.think()
-    assert(hasVisibleButton("Wardrobe target: Late Local Player"),
+    assert((targetDropdown.SelectedData ~= nil and targetDropdown.SelectedData.Name == "Late Local Player"),
         "multiplayer selector did not return from the only eligible bot to the player")
 
     -- Capabilities are independent. A relay may expose animation sync without
@@ -1850,6 +1867,9 @@ do
     movementOnlyHello.FinalizeForTransport()
     networkHandlers[WardrobeCore.NET.V2_HELLO](movementOnlyHello)
     openPanel = true
+    hooks.think()
+    if not hasVisibleButton("Next Page") then openPanel = true; hooks.think() end
+    buttons["Next Page"].OnClicked()
     hooks.think()
     local movementOnlyButton = buttons["Movement: Equipped Gear"]
     assert(movementOnlyButton ~= nil and type(movementOnlyButton.OnClicked) == "function",
@@ -1881,12 +1901,13 @@ end
 
 -- Reload an isolated probing client to cover the compatibility bridge. The
 -- deferred v1 frame must be consumed once when the same equipment gate opens.
+end
 persistence.LoadClientLook = function() return "" end
 local v1Character = makeCharacter(903, 903, "Late Legacy Player", false)
 Character.Controlled = v1Character
 Character.CharacterList = { v1Character }
 gameSessionDataPath.SavePath = "p2p-session-a.save"
-assert(dofile(clientPath) == nil)
+dofile(clientPath)
 hooks.roundStart()
 hooks.think()
 local function legacyApplyFrame(characterId)
@@ -2054,6 +2075,231 @@ assert(#messages == 0,
     "routine wardrobe diagnostics leaked into the Lua console")
 assert(#loggedMessages > 0,
     "routine wardrobe diagnostics were not written through the file logger")
+
+do
+    -- Exercise the real facade with isolated native/platform fakes. Helpers are
+    -- returned by the test loader, without a production-only testing API.
+    hooks.stop()
+    Game.IsMultiplayer = false
+    persistence.LoadClientLook = function() return "" end
+    local diver = makeCharacter(950, 950, "QoL Diver", false)
+    local gear = {}
+    diver.Inventory.GetItemInLimbSlot = function(slot) return gear[slot] end
+    Character.Controlled, Character.CharacterList = diver, { diver }
+    gameSessionDataPath.SavePath = "qol-render.save"
+    local H = assert((loadstring or load)(clientSource .. "\nreturn Helpers"))()
+    hooks.roundStart()
+    for _ = 1, 20 do hooks.think() end
+    assert(H.applyNetworkLook(diver, { Head = { identifier = "normal-hat", itemId = 0, color = 123 } }))
+    local profile = { mode = 2, captured = true, look = { Head = { identifier = "潛水-hat", color = 456 } } }
+    H.saveLocalDivingProfile(diver, profile)
+    diver.InPressure = true
+    assert(H.refreshDivingAppearance(diver, false))
+    local captures, writes, packets = prefabCaptureCount, divingSaveCalls, #networkSent
+    for index = 1, 100 do
+        diver.InPressure = index % 2 == 0
+        H.refreshDivingAppearance(diver, false)
+        assert(divingActive[diver.ID] == diver.InPressure, "pressure did not select the cached appearance")
+    end
+    assert(prefabCaptureCount == captures and divingSaveCalls == writes and #networkSent == packets,
+        "warm pressure switches captured assets, wrote profiles or emitted packets")
+    gear.Head = { ID = 951, Prefab = { Identifier = "ordinary" }, SpriteColor = { PackedValue = 99 } }
+    for _ = 1, 10 do hooks["item.equip"](gear.Head, diver) end
+    hooks.think()
+    assert(prefabCaptureCount == captures, "ordinary equipment recaptured the custom diving outfit")
+
+    local suit = { ID = 952, IsDivingSuit = true, Prefab = { Identifier = "suit" }, SpriteColor = { PackedValue = 10 } }
+    gear.OuterClothes = suit
+    H.saveLocalDivingProfile(diver, { mode = 1, captured = false, look = {} })
+    assert(H.refreshDivingAppearance(diver, false))
+    captures = prefabCaptureCount
+    gear.Head.SpriteColor.PackedValue = 100
+    H.refreshDivingAppearance(diver, false)
+    assert(prefabCaptureCount == captures, "unrelated gear color recaptured suit-only assets")
+    suit.SpriteColor.PackedValue = 11
+    H.refreshDivingAppearance(diver, false)
+    assert(prefabCaptureCount == captures + 1, "suit color change did not rebuild the diving appearance")
+
+    H.saveLocalDivingProfile(diver, { mode = 2, captured = false, look = {} })
+    H.refreshDivingAppearance(diver, false)
+    assert(divingActive[diver.ID] == false, "unsaved custom diving outfit hid the normal appearance")
+    H.saveLocalDivingProfile(diver, { mode = 2, captured = true, look = {} })
+    assert(H.refreshDivingAppearance(diver, false) and divingActive[diver.ID], "a saved empty diving outfit was discarded")
+
+    local originalCapture = visualOverride.CaptureFashionPrefab
+    local failedCaptures = 0
+    visualOverride.CaptureFashionPrefab = function() failedCaptures = failedCaptures + 1; return 0 end
+    visualOverride.GetCaptureError = function() return "Could not find fashion prefab by identifier: missing" end
+    H.saveLocalDivingProfile(diver, { mode = 2, captured = true, look = { Head = { identifier = "missing" } } })
+    for _ = 1, 700 do hooks.think() end
+    assert(failedCaptures == 1, "a deterministic missing-prefab failure kept recapturing")
+    visualOverride.CaptureFashionPrefab = originalCapture
+    visualOverride.GetCaptureError = function() return "" end
+    H.resynchronize()
+    assert(divingActive[diver.ID], "manual resynchronization did not retry repaired assets")
+
+    local originalSave = persistence.SaveDivingProfile
+    persistence.SaveDivingProfile = function() return false end
+    H.saveLocalDivingProfile(diver, profile)
+    assert(H.localDivingProfile(diver).sessionOnly, "failed save was reported as persisted")
+    for _ = 1, 61 do hooks.think() end
+    assert(H.localDivingProfile(diver).look.Head.identifier == "潛水-hat", "failed persistence discarded the usable session profile")
+    persistence.SaveDivingProfile = originalSave
+    H.saveLocalDivingProfile(diver, profile)
+    assert(not H.localDivingProfile(diver).sessionOnly, "manual save could not recover from a write failure")
+    local storage = H.divingProfileStorageKey(diver)
+    divingProfiles[storage] = "mode=1|captured=false"
+    for _ = 1, 61 do hooks.think() end
+    assert(H.localDivingProfile(diver).mode == 1, "external profile edits were never reloaded")
+
+    configuredPanelKey = "  f7  "
+    openPanel = true
+    hooks.think()
+    assert(lastPanelKey == "F7", "hotkey did not accept whitespace and case")
+    lastListBox.BarScroll = 0.7
+    local rootRemovals = removedWidgets
+    H.resynchronize()
+    hooks.think()
+    assert(removedWidgets == rootRemovals and lastListBox.BarScroll == 0.7, "ordinary status refresh rebuilt or scrolled the panel")
+    buttons["Next Page"].OnClicked()
+    assert(removedWidgets == rootRemovals, "navigation removed its executing callback control")
+    hooks.think()
+    lastListBox.BarScroll = 0.3
+    buttons["Back"].OnClicked()
+    hooks.think()
+    assert(lastListBox.BarScroll == 0.7, "returning to the main page lost its scroll position")
+
+    hooks.stop()
+    Game.IsMultiplayer = true
+    networkSent = {}
+    gameSessionDataPath.SavePath = "qol-network.save"
+    Character.Controlled, Character.CharacterList = diver, { diver }
+    H = assert((loadstring or load)(clientSource .. "\nreturn Helpers"))()
+    hooks.roundStart()
+    hooks.think()
+    hooks["item.equip"](suit, diver)
+    for _ = 1, 20 do hooks.think() end
+    local hello = newNetworkBuffer(WardrobeCore.NET.V2_HELLO)
+    assert(WardrobeCore.writeServerHello(hello, 0, 31))
+    networkHandlers[WardrobeCore.NET.V2_HELLO](hello.FinalizeForTransport())
+    local epoch, generation = "diving-server", 1
+    local function state(id, revision, mode, look, operationId, overrideGeneration)
+        local packet = newNetworkBuffer(WardrobeCore.NET.V2_DIVING_STATE)
+        assert(WardrobeCore.writeDivingState(packet, { serverSessionId = epoch,
+            generation = overrideGeneration or generation, revision = revision, characterId = id,
+            mode = mode, look = look, operationId = operationId }))
+        networkHandlers[WardrobeCore.NET.V2_DIVING_STATE](packet.FinalizeForTransport())
+    end
+    local function command()
+        for index = #networkSent, 1, -1 do
+            local packet = networkSent[index]
+            if packet.name == WardrobeCore.NET.V2_COMMAND or packet.name == WardrobeCore.NET.V2_TARGET_COMMAND then
+                local read = packet.name == WardrobeCore.NET.V2_TARGET_COMMAND and WardrobeCore.readTargetCommand or WardrobeCore.readCommand
+                packet.decoded = packet.decoded or assert(read(packet))
+                return packet.decoded
+            end
+        end
+        error("no command was sent: sync=" .. tostring(H.supportsDivingSync()) .. ", epoch=" .. tostring(H.divingEpoch) .. ", busy=" .. tostring(H.operationBusy()) .. ", loaded=" .. tostring(H.localDivingProfile(diver).loaded) .. ", packets=" .. tostring(#networkSent))
+    end
+    local function ack(cmd, revision, accepted, reason)
+        local packet = newNetworkBuffer(WardrobeCore.NET.V2_ACK)
+        assert(WardrobeCore.writeAck(packet, { operationId = cmd.operationId, revision = revision,
+            accepted = accepted ~= false, reason = reason or "" }))
+        networkHandlers[WardrobeCore.NET.V2_ACK](packet.FinalizeForTransport())
+    end
+    state(0, 0, 0)
+    hooks.think()
+    local registration = command()
+    assert(registration.kind == WardrobeCore.COMMAND.Diving, "own persistent diving settings were not registered")
+    ack(registration, 1)
+    assert(H.operationBusy(), "ACK without the diving state prematurely completed registration")
+    state(diver.ID, 1, registration.divingMode, registration.look, registration.operationId)
+    assert(not H.operationBusy(), "ACK followed by state left registration busy")
+
+    local custom = assert(WardrobeCore.newLook(true, false, { Head = { identifier = "mp-dive", color = 1234 } }))
+    assert(H.saveCustomDivingLook())
+    local save = command()
+    assert(save.kind == WardrobeCore.COMMAND.DivingSave and save.look == nil, "client supplied gear in the authoritative diving capture command")
+    state(diver.ID, 2, 2, custom, save.operationId)
+    assert(H.operationBusy() and not H.clearCustomDivingLook(), "pending diving save allowed a second mutation")
+    ack(save, 2)
+    assert(not H.operationBusy() and H.localDivingProfile(diver).look.Head.identifier == "mp-dive", "authoritative capture was not persisted after completion")
+    assert(H.saveCustomDivingLook())
+    local failedDiskSave = command()
+    persistence.SaveDivingProfile = function() return false end
+    local alternate = assert(WardrobeCore.newLook(true, false, { Head = "mp-alternate" }))
+    state(diver.ID, 3, 2, alternate, failedDiskSave.operationId)
+    ack(failedDiskSave, 3)
+    assert(not H.operationBusy() and H.localDivingProfile(diver).sessionOnly, "server success hid a local persistence failure")
+    persistence.SaveDivingProfile = originalSave
+    H.saveLocalDivingProfile(diver, H.localDivingProfile(diver))
+    custom = alternate
+    writes, captures, packets = divingSaveCalls, prefabCaptureCount, #networkSent
+    state(diver.ID, 3, 2, custom, failedDiskSave.operationId)
+    state(diver.ID, 1, 0)
+    for _ = 1, 30 do hooks.think() end
+    assert(divingSaveCalls == writes and prefabCaptureCount == captures and #networkSent == packets, "duplicate/stale state caused capture, writes or automatic replay")
+
+    state(960, 3, 2, custom)
+    assert(H.pendingDivingStates[960] ~= nil, "missing observer entity was not deferred")
+    state(960, 4, 0)
+    local observer = makeCharacter(960, 960, "Late observer", false)
+    observer.InPressure = true
+    Character.CharacterList[#Character.CharacterList + 1] = observer
+    for _ = 1, 35 do hooks.think() end
+    assert(H.pendingDivingStates[960] == nil and H.divingProfile(observer).mode == 0, "out-of-order deferred observer state was resurrected")
+    state(960, 5, 2, custom)
+    assert(divingActive[960], "observer did not activate its pressure appearance")
+    observer.Removed = true
+    for _ = 1, 61 do hooks.think() end
+    assert(H.divingTrackedCharacters["960"] == nil and H.networkDivingById[960] == nil, "owned-character sweep retained removed observer settings")
+    local replacement = makeCharacter(960, 961, "Replacement bot", true)
+    H.trackDivingCharacter(replacement)
+    assert(H.divingProfile(replacement).mode == 0, "removed observer settings transferred to a reused entity ID")
+
+    assert(H.saveCustomDivingLook())
+    local unknown = command()
+    for _ = 1, 6 do testTime = testTime + 1; hooks.think() end
+    assert(not H.operationBusy(), "timed-out diving save left controls busy")
+    local afterTimeout = #networkSent
+    H.resynchronize()
+    for _ = 1, 60 do hooks.think() end
+    for index = afterTimeout + 1, #networkSent do
+        assert(networkSent[index].name ~= WardrobeCore.NET.V2_COMMAND, "resynchronization replayed an uncertain Save")
+    end
+    assert(H.clearCustomDivingLook())
+    local rejected = command()
+    ack(rejected, 3, false, "operation_limit_reached")
+    local helloBefore = clientHelloCount()
+    hooks.think()
+    assert(not H.operationBusy() and clientHelloCount() == helloBefore + 1, "operation limit did not rotate an idle transport session")
+    assert(H.clearCustomDivingLook())
+    local rotated = command()
+    assert(rotated.clientSessionId ~= unknown.clientSessionId, "operation-limit recovery reused the exhausted session")
+    ack(rotated, 4)
+    state(diver.ID, 4, 2, nil, rotated.operationId)
+    assert(not H.operationBusy() and H.localDivingProfile(diver).captured == false, "clear custom diving failed after transport rotation")
+
+    Character.Controlled = nil
+    H.startInitialEquipGate()
+    local watched = makeCharacter(970, 970, "Spectated player", false)
+    Character.CharacterList[#Character.CharacterList + 1] = watched
+    state(970, 1, 2, custom)
+    for _ = 1, 7 do hooks.think() end
+    watched.InPressure = true
+    for _ = 1, 7 do hooks.think() end
+    assert(divingActive[970], "an unbound local equipment gate blocked spectator pressure updates")
+    watched.InPressure = false
+    for _ = 1, 7 do hooks.think() end
+    assert(divingActive[970] == false, "spectator did not restore normal appearance after pressure exit")
+
+    generation = 2
+    state(0, 0, 0)
+    state(960, 100, 2, custom, nil, 1)
+    assert(H.networkDivingById[960] == nil, "old-round diving state survived generation replacement")
+    hooks.stop()
+    assert(next(H.divingTrackedCharacters) == nil and next(H.pendingDivingStates) == nil and not H.operationBusy(), "unload retained pending diving commands or characters")
+end
 
 print = originalPrint
 print("Wardrobe client facade tests passed")

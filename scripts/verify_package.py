@@ -14,7 +14,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ERRORS: list[str] = []
-EXPECTED_CANDIDATE_DECLARED_VERSION = "1.12.7.0"
+EXPECTED_CANDIDATE_DECLARED_VERSION = "1.13.4.0"
 
 
 def fail(message: str) -> None:

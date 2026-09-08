@@ -2,5 +2,6 @@
 <Configuration>
   <Settings>
     <Setting Name="PanelKey" Type="string" Value="F8" />
+    <Setting Name="DetailedLogging" Type="bool" Value="false" />
   </Settings>
 </Configuration>

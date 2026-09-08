@@ -47,12 +47,12 @@ $contracts = @(
         Name = "atomic-transaction"
         Source = $renderer
         Required = @(
-            "if (!staged.Validate(out error) || !HasFashionPayload(staged))",
+            "if (!staged.Validate(out string error) || !HasFashionPayload(staged))",
             "staged.MarkCommitted();",
             "current.Dispose();",
             "session.HasPendingCapture",
             "session.HasLiveItemSources",
-            "return session.Validate(out _);"
+            "HasFashionPayload(session) && session.Validate(out _);"
         )
     },
     @{
@@ -60,7 +60,7 @@ $contracts = @(
         Source = $renderer
         Required = @(
             "wearingItems.AddRange(originalOrder);",
-            "ExceptionDispatchInfo.Capture(ex.InnerException).Throw();",
+            "drawWearable(limb, wearable, DrawDepthStep * depthIndex,",
             "return exception ?? cleanupException;"
         )
     },
@@ -91,7 +91,7 @@ $contracts = @(
         Required = @(
             'AccessTools.Method(typeof(Ragdoll), "PlayImpactSound", new[] { typeof(Limb) })',
             'PatchStates["Ragdoll.PlayImpactSound"] = new PatchState(required: false);',
-            'public static bool SetUseFashionFootstepSounds(Character character, bool enabled)',
+            'public static bool SetUseFashionFootstepSounds(Character character, bool enabled, bool diving = false)',
             '!session.UseFashionFootstepSounds',
             'footstepSoundTransactionPool',
             'transaction.Reset(limb);',
@@ -126,7 +126,7 @@ $contracts = @(
         Required = @(
             "tempItem.FreeID();",
             "tempItem.SpriteColor = new Color(packedColor.Value);",
-            "public static bool CanReuseCapturedFashion(Character character)",
+            "public static bool CanReuseCapturedFashion(Character character, bool diving = false)",
             "session.MarkLiveItemSource();",
             "if (item == null || item.Removed) { continue; }"
         )
@@ -200,13 +200,13 @@ $contracts = @(
         Source = $all
         Required = @(
             "public bool UseFashionMovementAnimations { get; set; } = true;",
-            "public static bool SetUseFashionMovementAnimations(Character character, bool enabled)",
+            "public static bool SetUseFashionMovementAnimations(Character character, bool enabled, bool diving = false)",
             "session.UseFashionMovementAnimations = enabled;",
             "if (!session.UseFashionMovementAnimations) { return true; }",
             "if (!session.UseFashionMovementAnimations &&",
             "session.FashionMovementAnimations.Contains(animationInfo)",
             "public HashSet<object> SuppressedEquipmentAnimations { get; }",
-            "RegisterSuppressedEquipmentAnimations(character, item);",
+            "RegisterSuppressedEquipmentAnimations(character, item, session);",
             "session.SuppressedEquipmentAnimations.Contains(animationInfo)",
             "FashionEffectPolicy.ShouldSuppressEquipmentAnimation(item, animationInfo)"
         )
@@ -272,7 +272,7 @@ $fashionInjection = Get-Section $renderer `
     "public void Begin(RenderSession renderSession)" `
     "public void Cleanup()"
 Assert-Order "workshop-left-breast-injection-guard" $fashionInjection @(
-    "EnumerateFashionSpritesForLimb(session, limb.type)",
+    "GetFashionSpritesForLimb(session, limb)",
     "IsFashionSpriteCompatibleWithLimb(session, descriptor.Sprite, limb)",
     "wearingItems.Add(descriptor.Sprite);",
     "SortWearablesForDraw(wearingItems);"
@@ -314,9 +314,9 @@ if ($equipmentRegistration.Contains("ActivateFashionVisual(character)")) {
     throw "Equipment registration must not activate the renderer once per equipped item."
 }
 Assert-Contract "equipment-registration-batch" $equipmentRegistration @(
-    "RegisterSuppressedEquipmentAnimations(character, item);",
-    "RegisterSuppressedEquipmentSounds(character, item);",
-    "RegisterSuppressedEquipmentComponentSounds(character, item);",
+    "RegisterSuppressedEquipmentAnimations(character, item, session);",
+    "RegisterSuppressedEquipmentSounds(character, item, session);",
+    "RegisterSuppressedEquipmentComponentSounds(character, item, session);",
     "return true;"
 )
 
@@ -331,22 +331,24 @@ Assert-Contract "equipment-unregistration" $equipmentUnregistration @(
 )
 
 $activation = Get-Section $renderer `
-    "public static bool ActivateFashionVisual(" `
-    "private static bool EnsureXdsFashionAppendage("
+    "public static bool SetDivingAppearanceActive(" `
+    "private static void SuspendSession("
 Assert-Order "active-renderer-fast-path" $activation @(
-    "RenderSessions.TryGetValue(character, out RenderSession session)",
-    "if (session.IsActive) { return true; }",
-    "session.Validate(out error)"
+    "Sessions(enabled).TryGetValue(character, out RenderSession next)",
+    "ReferenceEquals(previous, next)) { return true; }",
+    "ActiveRenderSessions[character] = next;"
 )
-if ($activation.Contains("RefreshWearables(character)")) {
-    throw "Draw-only activation must not rescan Character wearable stats."
-}
+Assert-Contract "dual-session-ownership" $renderer @(
+    "DivingRenderSessions",
+    "foreach (RenderSession session in DivingRenderSessions.Values) { session.Dispose(); }",
+    "DivingCaptures.Clear();"
+)
 
 $drawBegin = Get-Section $renderer `
     "internal static LimbRenderTransaction BeginLimbDraw(" `
     "internal static bool ShouldSuppressEquipmentAppendage("
 Assert-Order "inactive-render-allocation-guard" $drawBegin @(
-    "RenderSessions.TryGetValue(limb.character, out RenderSession session)",
+    "ActiveRenderSessions.TryGetValue(limb.character, out RenderSession session)",
     "!session.IsActive",
     "!session.IsValid",
     "!HasCapability(""renderer"")",
@@ -357,18 +359,17 @@ if ($drawBegin.Contains("session.Validate(")) {
 }
 
 $equipmentRefresh = Get-Section $client `
-    "function Helpers.refreshActiveLookIfNeeded(" `
-    "function Helpers.autoApplySavedLookIfNeeded("
+    "function Helpers.refreshCharacterEquipment(" `
+    "function Helpers.forgetOwnedCharacter("
 Assert-Order "local-equipment-refresh" $equipmentRefresh @(
+    "Helpers.equipmentRefreshTicks[key] == globalTick",
     "Helpers.equipmentSignature(character)",
-    "Helpers.applyCapturedFashionToCharacterEquipment(",
-    "currentLegacyLook()",
-    "false,",
-    "lastEquipmentSignature = signature"
+    "Helpers.equipmentSignatures[key] == signature",
+    "VisualOverride.RefreshEquipment(character)",
+    "Helpers.equipmentSignatures[key] = signature"
 )
-if ($equipmentRefresh.Contains("applyFashionToCurrentEquipment") -or
-    $equipmentRefresh.Contains("dispatchReducer")) {
-    throw "Equipment-only refresh must not persist or send a wardrobe Apply command."
+if ($equipmentRefresh.Contains("applyCapturedFashion") -or $equipmentRefresh.Contains("dispatchReducer")) {
+    throw "Equipment-only refresh must not capture, persist or send a wardrobe command."
 }
 
 $equipmentBatch = Get-Section $client `
@@ -380,18 +381,20 @@ Assert-Order "multi-slot-equipment-dedupe" $equipmentBatch @(
     "seenEquippedItemIds[equippedId]",
     "seenEquippedItems[equipped] = true",
     "Helpers.applyVisualOverrideToItem(",
-    "Helpers.activateFashionVisual(character)"
+    "Helpers.activateFashionVisual(character, diving)"
 )
 
 $equipmentHooks = Get-Section $client `
     'Hook.Add("item.equip"' `
     'Hook.Add("character.created"'
 Assert-Order "observer-equipment-effect-lifecycle" $equipmentHooks @(
-    "Helpers.isManagedEquippedItem(character, item)",
-    "Helpers.applyVisualOverrideToItem(character, item, false)",
+    "Helpers.markEquipmentDirty(character)",
     'Hook.Add("item.unequip"',
-    "Helpers.removeVisualOverrideFromItem(character, item)"
+    "Helpers.markEquipmentDirty(character)"
 )
+if ($equipmentHooks.Contains("applyVisualOverride") -or $equipmentHooks.Contains("removeVisualOverride")) {
+    throw "Pre-native equipment hooks must only mark characters dirty."
+}
 
 $fallback = Get-Section $renderer `
     "tempItem = new Item(prefab" `
@@ -419,7 +422,7 @@ Assert-Order "movement-toggle-scope" $fashionAnimations @(
     "foreach (object animationInfo in session.FashionAnimations)",
     "if (!session.UseFashionMovementAnimations &&",
     "session.FashionMovementAnimations.Contains(animationInfo)",
-    "TryLoadTemporaryAnimationMethod.Invoke"
+    "loadTemporaryAnimation(animController, (StatusEffect.AnimLoadInfo)animationInfo, false)"
 )
 
 $restoreLifecycle = Get-Section $renderer `
@@ -436,7 +439,7 @@ $slotRefresh = Get-Section $renderer `
     "public static bool SetFashionSlots(" `
     "public static bool SetAttachmentVisibility("
 Assert-Order "equipment-animation-rescan-lifecycle" $slotRefresh @(
-    "RenderSession session = GetCaptureSession(character);",
+    "RenderSession session = GetCaptureSession(character, diving);",
     "HashSet<InvSlotType> savedSlots = ParseSlotCsv(savedSlotsCsv);",
     "session.SuppressedEquipmentAnimations.Clear();",
     "session.SuppressedEquipmentSounds.Clear();",
@@ -479,18 +482,10 @@ Assert-Order "visual-override-bridge-backoff-and-success-cache" $visualOverrideB
     "return VisualOverride"
 )
 
-Assert-Order "equipment-poll-throttle" $equipmentRefresh @(
-    "lastEquipmentSignature ~= nil",
-    "globalTick < nextEquipmentSignatureTick",
-    "nextEquipmentSignatureTick = globalTick + EQUIPMENT_POLL_TICKS",
-    "Helpers.equipmentSignature(character)",
-    "lastEquipmentSignature = signature"
-)
-Assert-Order "equipment-hook-immediate-invalidation" $client @(
-    'Hook.Add("item.equip"',
-    "character == lastCharacter then lastEquipmentSignature = nil",
-    'Hook.Add("item.unequip"',
-    "character == lastCharacter then lastEquipmentSignature = nil"
+Assert-Contract "owned-character-poll-throttle" $client @(
+    "globalTick >= Helpers.nextOwnedPollTick",
+    "Helpers.nextOwnedPollTick = globalTick + 60",
+    "pairs(Helpers.divingTrackedCharacters)"
 )
 
 Assert-Order "fashion-limb-cache-lifecycle" $session @(
@@ -545,8 +540,7 @@ Assert-Contract "pooled-render-transaction-reset" $limbTransaction @(
     "originalMasks?.Clear();",
     "InjectedSprites.Clear();",
     "DrawnSprites.Clear();",
-    "FashionDescriptors = Array.Empty<FashionSpriteDescriptor>();",
-    "Array.Clear(drawArguments, 0, drawArguments.Length);"
+    "FashionDescriptors = Array.Empty<FashionSpriteDescriptor>();"
 )
 
 Assert-Contract "allocation-free-slot-keys" $session @(
@@ -608,7 +602,7 @@ $animationKeepAlive = Get-Section $renderer `
     "private static void KeepFashionAnimationsAlive(" `
     "private static void KeepFashionSoundsAlive("
 Assert-Contract "capture-classified-animation-hot-path" $animationKeepAlive @(
-    "session.FashionAnimationInvokeArguments",
+    "loadTemporaryAnimation(animController, (StatusEffect.AnimLoadInfo)animationInfo, false);",
     "session.FashionMovementAnimations.Contains(animationInfo)"
 )
 if ($animationKeepAlive.Contains("FashionEffectPolicy.IsMovementAnimation(")) {
@@ -624,11 +618,15 @@ Assert-Contract "capture-classified-loop-sound-hot-path" $soundKeepAlive @(
 if ($soundKeepAlive.Contains("HasLoopingSound(") -or $soundKeepAlive.Contains("HasLoopingComponentSound(")) {
     throw "Loop metadata must not be reflected on every animation update."
 }
-Assert-Contract "reused-effect-reflection-arguments" $all @(
-    "FashionAnimationInvokeArguments",
-    "FashionSoundInvokeArguments",
-    "GetFashionSoundInvokeArguments("
+Assert-Contract "typed-hot-path-delegates" $renderer @(
+    "Bind<Action<Limb, WearableSprite, float, SpriteBatch, Color, float, SpriteEffects>>",
+    "Bind<Func<AnimController, StatusEffect.AnimLoadInfo, bool, bool>>",
+    "Bind<Action<StatusEffect, Entity, Hull, Vector2>>",
+    "GetFashionSpritesForLimb(session, limb)"
 )
+foreach ($obsolete in @("DrawWearableMethod.Invoke", "TryLoadTemporaryAnimationMethod.Invoke", "PlaySoundMethod.Invoke", "drawArguments", "FashionAnimationInvokeArguments", "FashionSoundInvokeArguments")) {
+    if ($all.Contains($obsolete)) { throw "Hot-path reflection/boxing returned: $obsolete" }
+}
 
 Assert-Contract "pooled-footstep-transaction" $renderer @(
     "footstepSoundTransactionPool",

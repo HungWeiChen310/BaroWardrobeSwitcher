@@ -20,6 +20,8 @@ namespace BaroWardrobeSwitcher
         private const int MaximumSinglePlayerProfiles = 512;
         private const int MaximumDisplayNameBytes = 512;
 
+        private static ProfileReadCache<SinglePlayerProfilesDocument> singlePlayerProfilesCache;
+
         public static string GetSinglePlayerProfilesPath()
         {
             return Path.Combine(GetStorageDirectory(), SinglePlayerProfilesFileName);
@@ -30,7 +32,7 @@ namespace BaroWardrobeSwitcher
             ClearLastError();
             try
             {
-                return ReadSinglePlayerProfiles().TransferToUnconfiguredCharacter;
+                return ReadSinglePlayerProfiles(cached: true).TransferToUnconfiguredCharacter;
             }
             catch (Exception ex)
             {
@@ -63,7 +65,7 @@ namespace BaroWardrobeSwitcher
             {
                 string campaignHash = HashRequiredKey(campaignKey, nameof(campaignKey));
                 string characterHash = HashRequiredKey(characterKey, nameof(characterKey));
-                SinglePlayerProfile profile = ReadSinglePlayerProfiles().Profiles.FirstOrDefault(
+                SinglePlayerProfile profile = ReadSinglePlayerProfiles(cached: true).Profiles.FirstOrDefault(
                     candidate =>
                         string.Equals(candidate.CampaignHash, campaignHash, StringComparison.Ordinal) &&
                         string.Equals(candidate.CharacterHash, characterHash, StringComparison.Ordinal));
@@ -260,10 +262,11 @@ namespace BaroWardrobeSwitcher
 
         // Only canonical documents enter memory. Older supported schemas migrate
         // once; malformed or unexpected shapes are quarantined and fail closed.
-        private static SinglePlayerProfilesDocument ReadSinglePlayerProfiles()
+        private static SinglePlayerProfilesDocument ReadSinglePlayerProfiles(bool cached = false)
         {
             string path = GetSinglePlayerProfilesPath();
-            if (!File.Exists(path)) { return CreateEmptySinglePlayerProfiles(); }
+            if (cached) { return ReadCachedProfiles(path, ref singlePlayerProfilesCache, () => ReadSinglePlayerProfiles()); }
+            if (ProfileFileStamp(path).Length < 0) { return CreateEmptySinglePlayerProfiles(); }
             try
             {
                 string json = File.ReadAllText(path, Encoding.UTF8);
@@ -315,6 +318,7 @@ namespace BaroWardrobeSwitcher
         // from producing noisy rewrites.
         private static void WriteSinglePlayerProfiles(SinglePlayerProfilesDocument document)
         {
+            singlePlayerProfilesCache = null;
             ValidateSinglePlayerProfiles(document);
             document.ImportedLegacyCampaigns = document.ImportedLegacyCampaigns
                 .OrderBy(value => value, StringComparer.Ordinal)
