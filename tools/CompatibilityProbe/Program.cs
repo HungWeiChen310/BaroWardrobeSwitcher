@@ -1,12 +1,14 @@
 using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.Loader;
+using System.Text.Json;
+using System.Linq.Expressions;
 
 const BindingFlags AllMembers = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static;
 
 if (args.Length < 2)
 {
-    Console.Error.WriteLine("Usage: CompatibilityProbe <BarotraumaInstallDir> <LuaCsPublicizedDir> [--require-optional]");
+    Console.Error.WriteLine("Usage: CompatibilityProbe <BarotraumaInstallDir> <LuaCsPublicizedDir> [--require-optional] [--version-file version.json]");
     return 64;
 }
 
@@ -15,6 +17,27 @@ string publicizedDir = Path.GetFullPath(args[1]);
 bool requireOptional = args.Contains("--require-optional", StringComparer.Ordinal);
 var failures = new List<string>();
 var optionalFailures = new List<string>();
+
+string requiredGameVersion;
+string requiredLuaCsCommit;
+try
+{
+    int versionArgument = Array.IndexOf(args, "--version-file");
+    string versionPath = versionArgument >= 0 ? args[versionArgument + 1] : Path.Combine(Environment.CurrentDirectory, "version.json");
+    using JsonDocument manifest = JsonDocument.Parse(File.ReadAllText(versionPath));
+    requiredGameVersion = manifest.RootElement.GetProperty("barotraumaGameVersion").GetString()!;
+    requiredLuaCsCommit = manifest.RootElement.GetProperty("luaCsCommit").GetString()!;
+    if (!Version.TryParse(requiredGameVersion, out _) || requiredLuaCsCommit?.Length != 40 ||
+        !requiredLuaCsCommit.All(Uri.IsHexDigit))
+    {
+        throw new InvalidDataException("version.json must contain a game version and a full LuaCs commit hash.");
+    }
+}
+catch (Exception exception)
+{
+    Console.Error.WriteLine("FAIL compatibility version data: " + exception.Message);
+    return 65;
+}
 
 AssemblyLoadContext.Default.Resolving += (_, assemblyName) =>
 {
@@ -112,6 +135,21 @@ void RequireMethod(string label, Type declaringType, string name, Type[] paramet
         return;
     }
     Console.WriteLine($"PASS {label}");
+}
+
+void RequireOpenDelegate(Type declaringType, string name, Type[] parameters, Type returnType, bool optional = false)
+{
+    try
+    {
+        MethodInfo method = FindExact(declaringType, name, parameters) ?? throw new MissingMethodException(name);
+        Type signature = Expression.GetDelegateType(new[] { declaringType }.Concat(parameters).Append(returnType).ToArray());
+        _ = method.CreateDelegate(signature);
+        Console.WriteLine($"PASS open delegate {declaringType.Name}.{name}");
+    }
+    catch (Exception exception)
+    {
+        (optional ? optionalFailures : failures).Add($"delegate binding {declaringType.Name}.{name}: {exception.Message}");
+    }
 }
 
 void RequireProperty(string label, Type declaringType, string name)
@@ -240,6 +278,9 @@ Type identifier = RequireGameOrCoreType("Barotrauma.Identifier");
 Type contentXElement = RequireType("Barotrauma.ContentXElement");
 Type networkClient = RequireType("Barotrauma.Networking.Client");
 Type guiComponent = RequireType("Barotrauma.GUIComponent");
+Type guiDropDown = RequireType("Barotrauma.GUIDropDown");
+Type guiListBox = RequireType("Barotrauma.GUIListBox");
+Type localizedString = RequireGameOrCoreType("Barotrauma.LocalizedString");
 Type configService = RequireType("Barotrauma.LuaCs.ConfigService");
 Type settingBase = RequireType("Barotrauma.LuaCs.Data.ISettingBase");
 string monoGameFile = new[]
@@ -274,6 +315,11 @@ RequirePublicProperty("Entity.Removed", entity, "Removed", typeof(bool));
 RequireMethod("Entity.FreeID()", entity, "FreeID", Array.Empty<Type>(), typeof(void));
 RequireMethod("GUIComponent.RemoveFromGUIUpdateList(bool)", guiComponent, "RemoveFromGUIUpdateList",
     new[] { typeof(bool) }, typeof(void));
+RequireMethod("GUIDropDown.AddItem", guiDropDown, "AddItem",
+    new[] { localizedString, typeof(object), localizedString, typeof(Nullable<>).MakeGenericType(color), typeof(Nullable<>).MakeGenericType(color) }, guiComponent);
+RequireMethod("GUIDropDown.SelectItem(object)", guiDropDown, "SelectItem", new[] { typeof(object) }, typeof(void));
+RequireField("GUIDropDown.OnSelected", guiDropDown, "OnSelected");
+RequireReadWriteProperty("GUIListBox.BarScroll", guiListBox, "BarScroll");
 MethodInfo? saveConfigValue = FindExact(configService, "SaveConfigValue", settingBase);
 if (saveConfigValue?.ReturnType.GetProperty("IsFailed", AllMembers) is null)
 {
@@ -423,6 +469,11 @@ RequireField("StatusEffect.TargetIdentifiers", statusEffect, "TargetIdentifiers"
 RequireField("StatusEffect.TargetItemComponent", statusEffect, "TargetItemComponent", optional: true);
 RequireMethod("ItemComponent.PlaySound(ActionType,Character)", itemComponent, "PlaySound",
     new[] { actionType, character }, typeof(void), optional: true);
+RequireMethod("ItemComponent.StopSounds(ActionType)", itemComponent, "StopSounds",
+    new[] { actionType }, typeof(void), optional: true);
+RequireOpenDelegate(limb, "DrawWearable", new[] { wearableSprite, typeof(float), spriteBatch, color, typeof(float), spriteEffects }, typeof(void));
+RequireOpenDelegate(animController, "TryLoadTemporaryAnimation", new[] { animLoadInfo, typeof(bool) }, typeof(bool), optional: true);
+RequireOpenDelegate(statusEffect, "PlaySound", new[] { entity, hull, vector2 }, typeof(void), optional: true);
 
 MemberInfo? accountIdMember = networkClient.GetProperty("AccountId", AllMembers) ??
     (MemberInfo?)networkClient.GetField("AccountId", AllMembers);
@@ -452,9 +503,9 @@ else
 if (File.Exists(installedAssemblyPath))
 {
     string? version = FileVersionInfo.GetVersionInfo(installedAssemblyPath).FileVersion;
-    if (version is null || !version.StartsWith("1.13.4.0", StringComparison.Ordinal))
+    if (!string.Equals(version, requiredGameVersion, StringComparison.Ordinal))
     {
-        failures.Add($"expected Barotrauma 1.13.4.0, found {version ?? "unknown"}");
+        failures.Add($"expected Barotrauma {requiredGameVersion}, found {version ?? "unknown"}");
     }
     else
     {
@@ -466,16 +517,15 @@ else
     failures.Add($"game assembly missing: {installedAssemblyPath}");
 }
 
-const string RequiredLuaCsCommit = "0d380afcd1feeb842c0c86290d46bcaf198cd5e4";
 string? publicizedProductVersion = FileVersionInfo.GetVersionInfo(barotraumaPath).ProductVersion;
 if (publicizedProductVersion is null ||
-    !publicizedProductVersion.Contains(RequiredLuaCsCommit, StringComparison.OrdinalIgnoreCase))
+    !publicizedProductVersion.Contains(requiredLuaCsCommit, StringComparison.OrdinalIgnoreCase))
 {
-    failures.Add($"expected LuaCs publicized commit {RequiredLuaCsCommit}, found {publicizedProductVersion ?? "unknown"}");
+    failures.Add($"expected LuaCs publicized commit {requiredLuaCsCommit}, found {publicizedProductVersion ?? "unknown"}");
 }
 else
 {
-    Console.WriteLine($"PASS LuaCs publicized commit {RequiredLuaCsCommit}");
+    Console.WriteLine($"PASS LuaCs publicized commit {requiredLuaCsCommit}");
 }
 
 foreach (string warning in optionalFailures)

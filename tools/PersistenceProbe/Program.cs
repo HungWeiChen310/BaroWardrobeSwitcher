@@ -1,4 +1,6 @@
 using System.Reflection;
+using System.Collections;
+using System.Runtime.CompilerServices;
 using System.Runtime.Loader;
 using System.Security.Cryptography;
 using System.Text;
@@ -127,6 +129,9 @@ try
     Run("single-player-legacy-import-once", TestSinglePlayerLegacyImport, failures);
     Run("single-player-corrupt-quarantine", TestSinglePlayerCorruptQuarantine, failures);
     Run("single-player-atomic-failure-preserves-old", TestSinglePlayerAtomicFailure, failures);
+    Run("profile-cache-invalidation-and-read-recovery", TestProfileCaches, failures);
+    Run("bounded-client-log", TestBoundedLog, failures);
+    Run("dual-render-session-lifecycle", TestDualRenderSessions, failures);
 }
 finally
 {
@@ -204,7 +209,7 @@ void TestPrivateFileLog()
 void TestDiagnosticContract()
 {
     _ = NewCaseDirectory("diagnostic-contract");
-    Assert(string.Equals((string?)Invoke(getVersion), "0.5.10", StringComparison.Ordinal),
+    Assert(string.Equals((string?)Invoke(getVersion), modAssembly.GetName().Version!.ToString(3), StringComparison.Ordinal),
         "WardrobePersistence did not report the current plugin version.");
 
     AppContext.SetData(FailurePointKey, "BeforeReplace");
@@ -990,6 +995,106 @@ void TestDivingProfileIsolation()
     Assert(string.IsNullOrEmpty(LoadDiving(profileA)) &&
            LoadDiving(profileB).Contains("mode=1", StringComparison.Ordinal),
         "Clearing one diving appearance profile changed another profile.");
+}
+
+void TestProfileCaches()
+{
+    foreach (bool diving in new[] { false, true })
+    {
+        _ = NewCaseDirectory(diving ? "diving-cache" : "normal-cache");
+        bool Write(string identifier) => diving
+            ? SaveDiving("cache", 2, "captured=true|Head=" + identifier + ",")
+            : SaveProfile("campaign", "cache", "Cache", "captured=true|Head=" + identifier + ",");
+        string Read() => diving ? LoadDiving("cache") : LoadProfile("campaign", "cache");
+        string path = diving ? (string)Invoke(getDivingProfilesPath)! : CurrentSinglePlayerProfilesPath();
+        FieldInfo cache = persistence.GetField(diving ? "divingProfilesCache" : "singlePlayerProfilesCache", BindingFlags.Static | BindingFlags.NonPublic)!;
+        Assert(Write("original") && Read().Contains("Head=original,"), "Could not warm profile cache.");
+        object cached = cache.GetValue(null)!;
+        for (int index = 0; index < 50; index++) { _ = Read(); }
+        Assert(cached != null && ReferenceEquals(cached, cache.GetValue(null)), "Unchanged profile reads reparsed the document.");
+
+        string original = File.ReadAllText(path);
+        File.WriteAllText(path, original.Replace("original", "external-change", StringComparison.Ordinal));
+        Assert(Read().Contains("Head=external-change,"), "External profile edit was hidden by the cache.");
+        AppContext.SetData(FailurePointKey, "BeforeReplace");
+        try { Assert(!Write("failed-write"), "Injected save unexpectedly succeeded."); }
+        finally { AppContext.SetData(FailurePointKey, null); }
+        Assert(Read().Contains("Head=external-change,"), "Failed save mutated the cached profile.");
+
+        // Change the stamp before denying the read, so a warm cache cannot mask the failure.
+        File.WriteAllText(path, original.Replace("original", "recovered-profile", StringComparison.Ordinal));
+        using (FileStream locked = new(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            Assert(Read() == "" && !string.IsNullOrEmpty((string?)Invoke(getLastError)), "Read failure was reported as a successful empty profile.");
+        }
+        Assert(Read().Contains("Head=recovered-profile,"), "Transient read failure was cached permanently.");
+        File.Delete(path);
+        Assert(Read() == "" && string.IsNullOrEmpty((string?)Invoke(getLastError)), "Deleted profile was not reloaded as empty.");
+        File.WriteAllText(path, original);
+        Assert(Read().Contains("Head=original,"), "A recreated profile stayed cached as absent.");
+    }
+}
+
+void TestBoundedLog()
+{
+    _ = NewCaseDirectory("bounded-log");
+    Invoke(RequireMethod(fileLogger, "Log", typeof(string)), "default debug must be quiet");
+    string path = (string)Invoke(getLogPath)!;
+    Assert(!File.Exists(path), "Detailed logging is enabled by default.");
+    for (int index = 0; index < 200; index++)
+    {
+        Assert((bool)Invoke(writeLog, "ERROR", new string('衣', 500))!, "Bounded log write failed.");
+    }
+    foreach (string file in new[] { path, path + ".previous" })
+    {
+        Assert(File.Exists(file) && new FileInfo(file).Length <= 65536, "Client log exceeded its byte limit.");
+        _ = new UTF8Encoding(false, true).GetString(File.ReadAllBytes(file));
+    }
+}
+
+void TestDualRenderSessions()
+{
+    _ = NewCaseDirectory("dual-render");
+    Type visual = modAssembly.GetType("BaroWardrobeSwitcher.VisualOverride", true)!;
+    Type sessionType = modAssembly.GetType("BaroWardrobeSwitcher.RenderSession", true)!;
+    MethodInfo getSession = visual.GetMethod("GetOrCreateSession", BindingFlags.Static | BindingFlags.NonPublic)!;
+    Type characterType = getSession.GetParameters()[0].ParameterType;
+    object character = RuntimeHelpers.GetUninitializedObject(characterType);
+    IDictionary Sessions(string name) => (IDictionary)visual.GetField(name, BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+    MethodInfo switchAppearance = RequireMethod(visual, "SetDivingAppearanceActive", characterType, typeof(bool));
+    MethodInfo clear = RequireMethod(visual, "ClearCharacter", characterType, typeof(bool));
+    MethodInfo clearAll = RequireMethod(visual, "ClearAll");
+    object MakeSession(bool diving)
+    {
+        object session = Invoke(getSession, character, diving)!;
+        sessionType.GetProperty("IsActive")!.SetValue(session, true);
+        sessionType.GetProperty("EmptyLook")!.SetValue(session, true);
+        sessionType.GetMethod("MarkCommitted")!.Invoke(session, null);
+        return session;
+    }
+    try
+    {
+        object normal = MakeSession(false), diving = MakeSession(true);
+        for (int index = 0; index < 100; index++)
+        {
+            bool underwater = index % 2 == 0;
+            Assert((bool)Invoke(switchAppearance, character, underwater)!, "Pressure switch failed.");
+            Assert(ReferenceEquals(Sessions("ActiveRenderSessions")[character], underwater ? diving : normal), "Pressure switch selected the wrong cached session.");
+        }
+        Assert(Sessions("RenderSessions").Count == 1 && Sessions("DivingRenderSessions").Count == 1, "Pressure switches retained more than two sessions.");
+        _ = Invoke(switchAppearance, character, true);
+        _ = Invoke(clear, character, false);
+        Assert(ReferenceEquals(Sessions("ActiveRenderSessions")[character], diving), "Normal Clear discarded the active diving appearance.");
+        object latestNormal = MakeSession(false);
+        _ = Invoke(switchAppearance, character, false);
+        Assert(ReferenceEquals(Sessions("ActiveRenderSessions")[character], latestNormal), "Pressure exit restored the old normal appearance.");
+        _ = Invoke(switchAppearance, character, true);
+        _ = Invoke(clear, character, true);
+        Assert(ReferenceEquals(Sessions("ActiveRenderSessions")[character], latestNormal), "Clearing diving did not restore the latest normal appearance.");
+    }
+    finally { _ = Invoke(clearAll); }
+    Assert(Sessions("RenderSessions").Count == 0 && Sessions("DivingRenderSessions").Count == 0 && Sessions("ActiveRenderSessions").Count == 0,
+        "Renderer cleanup retained character references.");
 }
 
 string NewCaseDirectory(string name)

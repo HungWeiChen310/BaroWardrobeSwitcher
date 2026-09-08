@@ -329,7 +329,6 @@ namespace BaroWardrobeSwitcher
 
         public HashSet<object> FashionMovementAnimations { get; } = new HashSet<object>();
 
-        public object[] FashionAnimationInvokeArguments { get; } = new object[] { null, false };
 
         public bool UseFashionMovementAnimations { get; set; } = true;
 
@@ -341,7 +340,6 @@ namespace BaroWardrobeSwitcher
 
         public List<StatusEffect> LoopingFashionSounds { get; } = new List<StatusEffect>();
 
-        public object[] FashionSoundInvokeArguments { get; } = new object[3];
 
         public List<(ItemComponent Component, ActionType ActionType)> FashionComponentSounds { get; } =
             new List<(ItemComponent Component, ActionType ActionType)>();
@@ -551,12 +549,9 @@ namespace BaroWardrobeSwitcher
             FashionSpritesByLimb.Clear();
             FashionAnimations.Clear();
             FashionMovementAnimations.Clear();
-            Array.Clear(FashionAnimationInvokeArguments, 0, FashionAnimationInvokeArguments.Length);
-            FashionAnimationInvokeArguments[1] = false;
             SuppressedEquipmentAnimations.Clear();
             FashionSounds.Clear();
             LoopingFashionSounds.Clear();
-            Array.Clear(FashionSoundInvokeArguments, 0, FashionSoundInvokeArguments.Length);
             FashionComponentSounds.Clear();
             LoopingFashionComponentSounds.Clear();
             SuppressedEquipmentSounds.Clear();

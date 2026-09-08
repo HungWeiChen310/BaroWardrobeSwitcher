@@ -1,57 +1,37 @@
 # Compatibility contract
 
-## Compatibility target (verified)
+## 0.5.22 release candidate
 
-- Barotrauma stable: `1.13.4.0`
-- Official source reference: [`a589d2cee3ff2214c99a7ea30c46f16a5406a01d`](https://github.com/FakeFishGames/Barotrauma/tree/a589d2cee3ff2214c99a7ea30c46f16a5406a01d)
-- LuaCsForBarotrauma upstream reference: [`0d380afcd1feeb842c0c86290d46bcaf198cd5e4`](https://github.com/evilfactory/LuaCsForBarotrauma/tree/0d380afcd1feeb842c0c86290d46bcaf198cd5e4)
-- C# target framework used by LuaCs: `.NET 8`
+| Input | Pinned value |
+| --- | --- |
+| Barotrauma target and declared version | `1.13.4.0` |
+| Official game source | [`a589d2cee3ff2214c99a7ea30c46f16a5406a01d`](https://github.com/FakeFishGames/Barotrauma/tree/a589d2cee3ff2214c99a7ea30c46f16a5406a01d) |
+| LuaCs publicized assemblies | [`85ded59c4efed4d139159c4cb056cc9705a5096e`](https://github.com/evilfactory/LuaCsForBarotrauma/tree/85ded59c4efed4d139159c4cb056cc9705a5096e) |
+| Client C# runtime | .NET 8 |
+| Protocol / wire look / normal persistence | 5 / 4 / 5 |
 
-LuaCs is an upstream dependency, not an official Barotrauma API. Barotrauma's public modding guide does not document the private renderer seams needed by this mod, so the pinned official source and a runtime reflection probe are both release inputs.
+The probe reads the expected game version and LuaCs commit from `version.json`. The previous LuaCs pin differs only in macOS platform constant names; see the [upstream comparison](https://github.com/evilfactory/LuaCsForBarotrauma/compare/0d380afcd1feeb842c0c86290d46bcaf198cd5e4...85ded59c4efed4d139159c4cb056cc9705a5096e). Passing signatures does not establish in-game compatibility. The release remains a candidate until [TESTING.md](TESTING.md) is completed.
 
-The executable/API checks and in-game matrix target 1.13.4.0. After every applicable item in [TESTING.md](TESTING.md) was recorded as passing, `version.json` was promoted to `verified` and `filelist.xml` was updated to declare 1.13.4.0. Content-package metadata records that result; it is not a substitute for the underlying tests.
+LuaCs is an upstream dependency, not an official Barotrauma API. Private renderer seams are checked against pinned official source and installed publicized assemblies.
 
-Pinned contracts used by the adapter:
+## Source evidence and implementation
 
-- [Official 1.13.4.0 changelog](https://github.com/FakeFishGames/Barotrauma/blob/a589d2cee3ff2214c99a7ea30c46f16a5406a01d/Barotrauma/BarotraumaShared/changelog.txt#L1-L13)
-- [Official `WearableSprite` construction and `Init(Character)` lifecycle](https://github.com/FakeFishGames/Barotrauma/blob/a589d2cee3ff2214c99a7ea30c46f16a5406a01d/Barotrauma/BarotraumaShared/SharedSource/Items/Components/Wearable.cs#L152-L210)
-- [Official exact `Limb.Draw` signature](https://github.com/FakeFishGames/Barotrauma/blob/a589d2cee3ff2214c99a7ea30c46f16a5406a01d/Barotrauma/BarotraumaClient/ClientSource/Characters/Limb.cs#L729-L730)
-- [Official `CharacterInfo` identity lifecycle](https://github.com/FakeFishGames/Barotrauma/blob/a589d2cee3ff2214c99a7ea30c46f16a5406a01d/Barotrauma/BarotraumaShared/SharedSource/Characters/CharacterInfo.cs)
-- [Official content-package metadata guide](https://regalis11.github.io/BaroModDoc/Intro/ContentPackages.html)
-- [LuaCs in-memory C# source loading](https://evilfactory.github.io/LuaCsForBarotrauma/cs-docs/html/md_manual_inmemorymod.html) and [LuaCs networking](https://evilfactory.github.io/LuaCsForBarotrauma/lua-docs/manual/networking/) (upstream LuaCs contracts, not official game APIs)
+| Contract | Application in Wardrobe |
+| --- | --- |
+| [Official Identifier](https://github.com/FakeFishGames/Barotrauma/blob/a589d2cee3ff2214c99a7ea30c46f16a5406a01d/Libraries/BarotraumaLibs/BarotraumaCore/Utils/Identifier.cs) compares without case sensitivity and retains punctuation | Capture dedupe keeps the complete identifier plus color; `hat-a`, `hat_a`, and Unicode names remain distinct. |
+| [LuaCs DefaultHook](https://github.com/evilfactory/LuaCsForBarotrauma/blob/85ded59c4efed4d139159c4cb056cc9705a5096e/Barotrauma/BarotraumaShared/LocalMods/LuaCsForBarotrauma/Lua/DefaultHook.lua) invokes equip/unequip before the native operation | Callbacks only mark a character dirty. One subsequent update reads final equipment. The pinned hooks do not establish a reliable character-removal callback; an owned-character sweep fills that gap. |
+| [Official Character.InPressure](https://github.com/FakeFishGames/Barotrauma/blob/a589d2cee3ff2214c99a7ea30c46f16a5406a01d/Barotrauma/BarotraumaShared/SharedSource/Characters/Character.cs#L973-L979) tests the environment | Clients choose the active diving session locally; there are no pressure packets or injury thresholds. |
+| [Official WearableSprite lifecycle](https://github.com/FakeFishGames/Barotrauma/blob/a589d2cee3ff2214c99a7ea30c46f16a5406a01d/Barotrauma/BarotraumaShared/SharedSource/Items/Components/Wearable.cs) and [Limb rendering](https://github.com/FakeFishGames/Barotrauma/blob/a589d2cee3ff2214c99a7ea30c46f16a5406a01d/Barotrauma/BarotraumaClient/ClientSource/Characters/Limb.cs) | Initialize owned sprites for the character, preserve native tint and physical-limb guards, restore masks, collections, and derived hide caches in finalizers. |
+| [Official GUIDropDown](https://github.com/FakeFishGames/Barotrauma/blob/a589d2cee3ff2214c99a7ea30c46f16a5406a01d/Barotrauma/BarotraumaClient/ClientSource/GUI/GUIDropDown.cs) | Use the native dropdown and the callback's target argument; callbacks precede the final selected-data update. |
+| [Official performance guide](https://regalis11.github.io/BaroModDoc/Misc/Performance.html) | Reduce repeated high-frequency work: pooled drawing transactions, cached limb candidates, initialized typed delegates, coalesced equipment refresh, cached appearances, and event-driven network state. No FPS percentage is inferred. |
 
-## Exact C# capability targets
+## C# capability checks
 
-Required renderer capabilities:
+Required draw contracts include exact `Limb.Draw(SpriteBatch, Camera, Color?, bool)` and `Limb.DrawWearable(WearableSprite, float, SpriteBatch, Color, float, SpriteEffects)` overloads, `Limb.UpdateWearableTypesToHide()`, initialized `WearableSprite` resources, native `Item.SpriteColor` / `Color.PackedValue`, and `Color(uint)`.
 
-- Public read/write `Item.SpriteColor`, public read/write `Color.PackedValue`, and `Color(uint)`
-- `Limb.Draw(SpriteBatch, Camera, Color?, bool)`
-- `Limb.DrawWearable(WearableSprite, float, SpriteBatch, Color, float, SpriteEffects)`
-- `Limb.UpdateWearableTypesToHide()` for transactional refresh of the native hide-type cache
-- `WearableSprite.Init(Character)` and readable initialization/resource properties
+Identity and UI checks include `Character.Info`, `IsBot`, `IsHuman`, `IsOnPlayerTeam`, `InPressure`, `Entity.Removed`, stable `CharacterInfo` fields, `GUIComponent.RemoveFromGUIUpdateList(bool)`, dropdown selection, and list-box scroll position. Network readers require byte access and a bit/byte remaining-length contract for complete optional tails.
 
-Required single-player identity capabilities:
-
-- `Character.Info` and static `Character.CharacterList`
-- `Character.IsBot`, `Character.IsHuman`, and `Character.IsOnPlayerTeam`
-- `CharacterInfo.ID`, `OriginalName`, `SpeciesName`, and `HumanPrefabIds`
-
-Required networking codec capabilities:
-
-- `IReadMessage.ReadByte()` and `IWriteMessage.WriteByte(byte)`
-- Either `LengthBits` + `BitPosition` or `LengthBytes` + `BytePosition`, used to accept only absent or complete optional protocol tails
-
-Optional capabilities:
-
-- `AnimController.UpdateAnimations(float)`
-- `AnimController.TryLoadTemporaryAnimation(StatusEffect.AnimLoadInfo, bool)`
-- `StatusEffect.PlaySound(Entity, Hull, Vector2)`
-- `StatusEffect.propertyConditionals`, `requiredItems`, `playSoundOnRequiredItemFailure`, `OnlyInside`, `OnlyOutside`, `TargetIdentifiers`, and `TargetItemComponent` for fail-open state-dependent effect classification
-- `ItemComponent.PlaySound(ActionType, Character)`
-
-Missing required targets disable the visual override without mutating character render state. Missing optional targets disable only their advertised capability and are visible through the readiness report.
-
-Run the contract probe on a machine with the game installed:
+Optional capabilities include animation updates/loading, status sound playback and condition metadata, item-component playback/stop, and native footstep impact sounds. The probe also binds the actual open delegates used for drawing, animation, and status sound. Missing required draw hooks disable rendering; missing optional hooks disable their capability. Conditional/required-item alarms are never captured or suppressed as cosmetic sounds.
 
 ```powershell
 ./scripts/Test-Compatibility.ps1 `
@@ -60,22 +40,25 @@ Run the contract probe on a machine with the game installed:
   -RequireOptional
 ```
 
+The standalone probe accepts `--version-file <path>`; without it, it reads `version.json` in the working directory.
+
 ## Network compatibility
 
-Protocol 3 is used when both peers complete the existing hello handshake. The six original v1 message names remain available in v0.5.3:
+| Peers | Behavior |
+| --- | --- |
+| 0.5.22 client and server | Protocol 5, look schema 4, normal and diving appearance synchronization. |
+| 0.5.22 client and older protocol-5 server | Existing normal synchronization; capability `0x10` servers retain bot diving profiles, while player diving stays local without `0x40`. |
+| Older protocol-5 client and 0.5.22 server | Existing normal appearance and legacy crew-diving profiles; no new diving-appearance messages are sent to this client. |
+| Different protocol versions or v1-only peer | Existing six-message v1 bridge; hello timeout is five seconds. Custom colors and newer preferences cannot synchronize over v1. |
 
-- Older client with v0.5.3 server: v1.
-- v0.5.3 client with an older server: v1 after the five-second hello timeout.
-- v0.5.3 client with v0.5.3 server: v3.
+Capability bits are attachment visibility `0x01`, movement source `0x02`, crew targeting `0x04`, footstep source `0x08`, crew diving profiles `0x10`, save-without-unequip `0x20`, and acknowledged diving appearance `0x40`. The merged candidate reserves the existing `0x10` value for the remote main branch's older format. Client hello optionally appends `0x57, 1, capabilities`; absent tails remain valid. Existing normal command/state layouts are unchanged.
 
-Protocol and wire look schema 3 add `hasColor` plus an optional `UInt32` after each identifier. Server hello messages may append `0x57, 1, capabilities`; capability bit `0x01` enables the `visibility` command and full four-layer synchronization. Look payloads may append `0x57, 1, forceHideMask, forceShowMask`. Readers reject truncated colors, partial or unknown extensions, unknown bits, and overlapping masks.
+The new `diving` and `diving-save` commands use the current operation queue, base revision, ACK, dedupe, and limits. Their mode byte precedes `hasLook` and follows the target ID on the targeted channel. `diving-save` adds an `includeHealthInterface` boolean after the mode, capturing that optional slot only when requested. Save carries no client look: the server captures actual equipment/colors without moving items. Settings validate captured state, identifiers, colors, and wearable-slot relationships, with the six-slot / 4 KiB limits.
 
-An updated client connected through the v1 bridge cannot synchronize custom colors. It retains full local visibility and projects `hideHair=true` only when Hair, Beard, and Moustache are all explicitly hidden.
+`barowardrobeswitcher.v2.diving-appearance` carries protocol, server epoch, round generation, per-character revision, character ID, operation ID, mode, and optional look. Character ID zero marks a snapshot generation. Clients bound entity waits, reject older generations/revisions, and complete commands only after both state and ACK arrive. Snapshots follow hello and round changes; pressure changes generate no Wardrobe messages. Normal Clear/Forget are independent from diving settings.
 
-The v1 bridge is scheduled for removal in v0.6.0. V2 state is revisioned; v1 remains best-effort compatibility and does not gain new positional fields.
+The legacy `barowardrobeswitcher.v2.diving-command` / `diving-state` messages keep their original crew-profile layout. New clients negotiate `0x40` and ignore legacy state while using the acknowledged channel; the server sends each client the matching format. Both paths update the same independent host crew profile. Player diving settings remain client-persisted, while crew settings restore from the host by campaign and crew identity.
 
 ## Release gates
 
-Complete every applicable automated and in-game check in [TESTING.md](TESTING.md). For a new game target, retain the previously verified metadata until that matrix passes; then update `declaredGameVersion` and `filelist.xml` `gameversion`, set `compatibilityStatus` to `verified`, and run `python scripts/verify_package.py --release`.
-
-The `filelist.xml` `gameversion` value records the version actually verified; it is metadata, not proof of runtime compatibility.
+Keep `compatibilityStatus=release-candidate` and the existing declared game version until the complete game matrix is recorded as passing. Only then promote to `verified` and run `python scripts/verify_package.py --release`. Metadata is a release record, not proof of compatibility. Source packages exclude binaries, game assemblies, runtime data, and `artifacts`.

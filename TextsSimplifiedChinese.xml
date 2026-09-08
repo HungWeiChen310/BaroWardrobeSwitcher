@@ -100,4 +100,35 @@
   <barowardrobeswitcher.status.profile_collision>角色身份重复；已停用自动恢复</barowardrobeswitcher.status.profile_collision>
   <barowardrobeswitcher.status.saved_cleared>已清除保存的外观。</barowardrobeswitcher.status.saved_cleared>
   <barowardrobeswitcher.status.none>无</barowardrobeswitcher.status.none>
+  <barowardrobeswitcher.button.clear_diving_outfit>清除自定义潜水穿搭</barowardrobeswitcher.button.clear_diving_outfit>
+  <barowardrobeswitcher.button.resynchronize>重新同步／重试</barowardrobeswitcher.button.resynchronize>
+  <barowardrobeswitcher.status.waiting_server>等待服务器回复…</barowardrobeswitcher.status.waiting_server>
+  <barowardrobeswitcher.status.missing_assets>外观素材不可用。请确认已启用的模组，再重试。</barowardrobeswitcher.status.missing_assets>
+  <barowardrobeswitcher.status.diving_unset>尚未保存自定义潜水穿搭，保持当前外观。</barowardrobeswitcher.status.diving_unset>
+  <barowardrobeswitcher.status.diving_local_only>潜水外观仅本机可见。</barowardrobeswitcher.status.diving_local_only>
+  <barowardrobeswitcher.status.diving_session_only>潜水设置仅本次连接／回合保存。</barowardrobeswitcher.status.diving_session_only>
+  <barowardrobeswitcher.status.diving_saved>已保存潜水外观设置，装备保持原位。</barowardrobeswitcher.status.diving_saved>
+  <barowardrobeswitcher.status.resync_requested>已请求重新同步与外观重试。</barowardrobeswitcher.status.resync_requested>
+  <barowardrobeswitcher.status.operation_timeout>服务器回复超时。请先重新同步确认结果，再决定是否重试。</barowardrobeswitcher.status.operation_timeout>
+  <barowardrobeswitcher.status.server_rejected>服务器拒绝操作：</barowardrobeswitcher.status.server_rejected>
+  <barowardrobeswitcher.status.action_failed>衣柜操作失败，请查看 WardrobeClient.log。</barowardrobeswitcher.status.action_failed>
+  <barowardrobeswitcher.error.unsupported_capability>服务器不支持此功能</barowardrobeswitcher.error.unsupported_capability>
+  <barowardrobeswitcher.error.invalid_diving_mode>无效的潜水模式</barowardrobeswitcher.error.invalid_diving_mode>
+  <barowardrobeswitcher.error.invalid_diving_save>无效的潜水保存请求</barowardrobeswitcher.error.invalid_diving_save>
+  <barowardrobeswitcher.error.invalid_target>目标不可用或无操作权限</barowardrobeswitcher.error.invalid_target>
+  <barowardrobeswitcher.error.target_in_use>其他玩家正在管理此目标的衣柜</barowardrobeswitcher.error.target_in_use>
+  <barowardrobeswitcher.error.target_not_permitted>目标不是可操作的友方人类 bot</barowardrobeswitcher.error.target_not_permitted>
+  <barowardrobeswitcher.error.target_unavailable>目标不可用</barowardrobeswitcher.error.target_unavailable>
+  <barowardrobeswitcher.error.character_unavailable>角色尚未就绪或已死亡</barowardrobeswitcher.error.character_unavailable>
+  <barowardrobeswitcher.error.stale_revision>状态已改变，请重新同步后再试</barowardrobeswitcher.error.stale_revision>
+  <barowardrobeswitcher.error.operation_limit_reached>传输会话已更新，请同步后重试</barowardrobeswitcher.error.operation_limit_reached>
+  <barowardrobeswitcher.error.revision_exhausted>已达版本计数上限</barowardrobeswitcher.error.revision_exhausted>
+  <Wardrobe_x0028_衣櫃_x0029__x0028_衣柜_x0029_.DetailedLogging.DisplayName>详细诊断日志</Wardrobe_x0028_衣櫃_x0029__x0028_衣柜_x0029_.DetailedLogging.DisplayName>
+  <Wardrobe_x0028_衣櫃_x0029__x0028_衣柜_x0029_.DetailedLogging.DisplayCategory>衣柜</Wardrobe_x0028_衣櫃_x0029__x0028_衣柜_x0029_.DetailedLogging.DisplayCategory>
+  <Wardrobe_x0028_衣櫃_x0029__x0028_衣柜_x0029_.DetailedLogging.Tooltip>记录例行诊断。错误与手动诊断输出会持续保留。</Wardrobe_x0028_衣櫃_x0029__x0028_衣柜_x0029_.DetailedLogging.Tooltip>
+  <barowardrobeswitcher.error.invalid_request>衣柜请求无效，请打开诊断查看详细信息</barowardrobeswitcher.error.invalid_request>
+  <barowardrobeswitcher.error.unknown_item>服务器未安装此外观物品</barowardrobeswitcher.error.unknown_item>
+  <barowardrobeswitcher.error.item_not_wearable_in_slot>物品无法穿戴在指定栏位</barowardrobeswitcher.error.item_not_wearable_in_slot>
+  <barowardrobeswitcher.error.look_unavailable>没有可用的已保存外观</barowardrobeswitcher.error.look_unavailable>
+  <barowardrobeswitcher.error.persistence_failed>服务器无法保存衣柜数据</barowardrobeswitcher.error.persistence_failed>
 </infotexts>

@@ -4,7 +4,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -26,6 +25,9 @@ namespace BaroWardrobeSwitcher
     public static class WardrobeFileLogger
     {
         private const string LogFileName = "WardrobeClient.log";
+        private const long MaximumLogBytes = 65536;
+        internal static ISettingBase<bool> DetailedLoggingSetting;
+        public static bool IsDetailedLogging() => DetailedLoggingSetting?.Value == true;
         private static readonly object SyncRoot = new object();
 
         public static string GetPath()
@@ -45,7 +47,19 @@ namespace BaroWardrobeSwitcher
                     (message ?? string.Empty) + Environment.NewLine;
                 lock (SyncRoot)
                 {
-                    File.AppendAllText(path, line, Encoding.UTF8);
+                    byte[] entry = Encoding.UTF8.GetBytes(line);
+                    if (entry.Length > MaximumLogBytes)
+                    {
+                        line = "[ERROR] Oversized diagnostic entry omitted." + Environment.NewLine;
+                        entry = Encoding.UTF8.GetBytes(line);
+                    }
+                    if (File.Exists(path) && new FileInfo(path).Length + entry.Length > MaximumLogBytes)
+                    {
+                        // Rotate only when full. Steady writes never reread the log.
+                        File.Move(path, path + ".previous", overwrite: true);
+                    }
+                    using var stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read);
+                    stream.Write(entry);
                 }
                 return true;
             }
@@ -56,7 +70,11 @@ namespace BaroWardrobeSwitcher
             }
         }
 
-        public static void Log(string message) => Write("INFO", message);
+        public static void Log(string message)
+        {
+            if (IsDetailedLogging()) { Write("DEBUG", message); }
+        }
+        public static void Error(string message) => Write("ERROR", message);
 
     }
 
@@ -84,7 +102,13 @@ namespace BaroWardrobeSwitcher
             }
             else
             {
-                LuaCsLogger.Log("[Baro Wardrobe Switcher] PanelKey setting unavailable; using F8.");
+                LuaCsLogger.Error("[Baro Wardrobe Switcher] PanelKey setting unavailable; using F8.");
+            }
+            if (ConfigService != null && PluginService != null &&
+                PluginService.TryGetPackageForPlugin<WardrobeVisualOverridePlugin>(out ContentPackage logPackage) &&
+                ConfigService.TryGetConfig(logPackage, "DetailedLogging", out ISettingBase<bool> logSetting))
+            {
+                WardrobeFileLogger.DetailedLoggingSetting = logSetting;
             }
             if (hasPackage &&
                 ConfigService.TryGetConfig(package, "HideHuskVisuals", out ISettingBase<bool> hideHuskVisuals))
@@ -126,6 +150,7 @@ namespace BaroWardrobeSwitcher
         public void Dispose()
         {
             VisualOverride.SetPanelKeySetting(null);
+            WardrobeFileLogger.DetailedLoggingSetting = null;
             VisualOverride.SetHideHuskVisualsSetting(null, null);
             VisualOverride.SetUnequipOnSaveSetting(null, null);
             VisualOverride.SetOverrideGeneSplicerAppearanceSetting(null, null);
@@ -137,7 +162,7 @@ namespace BaroWardrobeSwitcher
 
     public static partial class WardrobePersistence
     {
-        public const string Version = "0.5.10";
+        public const string Version = "0.5.22";
         private const int PersistenceVersion = 5;
         private const string ModFolderName = "BaroWardrobeSwitcher";
         private const string ClientLookFileName = "ClientLook.json";
@@ -163,6 +188,40 @@ namespace BaroWardrobeSwitcher
             PropertyNameCaseInsensitive = false,
             UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
         };
+        private sealed class ProfileReadCache<T>
+        {
+            internal string Path;
+            internal (long Length, long WriteTicks) Stamp;
+            internal T Document;
+        }
+
+        private static (long Length, long WriteTicks) ProfileFileStamp(string path)
+        {
+            try
+            {
+                File.GetAttributes(path); // Unlike File.Exists, permission/IO failures must propagate.
+                var info = new FileInfo(path);
+                return (info.Length, info.LastWriteTimeUtc.Ticks);
+            }
+            catch (FileNotFoundException) { return (-1, 0); }
+            catch (DirectoryNotFoundException) { return (-1, 0); }
+        }
+
+        private static T ReadCachedProfiles<T>(string path, ref ProfileReadCache<T> cache, Func<T> read)
+        {
+            var stamp = ProfileFileStamp(path);
+            if (cache != null && cache.Path == path && cache.Stamp == stamp) { return cache.Document; }
+            cache = null;
+            T document = read();
+            // A failed load/quarantine or a file changed while reading is never
+            // memoized as an empty, successful document.
+            if (string.IsNullOrEmpty(lastError) && stamp == ProfileFileStamp(path))
+            {
+                cache = new ProfileReadCache<T> { Path = path, Stamp = stamp, Document = document };
+            }
+            return document;
+        }
+
         private static string lastError = string.Empty;
 
         public static string GetVersion()
@@ -1005,7 +1064,7 @@ namespace BaroWardrobeSwitcher
         private static void LogPersistenceError(string message, Exception ex)
         {
             lastError = message + ": " + ex.GetType().Name + ": " + ex.Message;
-            LogPersistenceInfo(lastError);
+            LuaCsLogger.Error("[Baro Wardrobe Switcher] " + lastError);
         }
 
         private static void ClearLastError()
@@ -1123,7 +1182,7 @@ namespace BaroWardrobeSwitcher
     public static class VisualOverride
     {
 
-        public const string Version = "0.5.10";
+        public const string Version = "0.5.22";
         private const string DefaultPanelKeyName = "F8";
         private static ISettingBase<string> panelKeySetting;
         private static ISettingBase<bool> hideHuskVisualsSetting;
@@ -1143,6 +1202,15 @@ namespace BaroWardrobeSwitcher
         // effect. Keeping one aggregate avoids partial cleanup across side tables.
         private static readonly Dictionary<Character, RenderSession> RenderSessions =
             new Dictionary<Character, RenderSession>();
+        // These maps own at most two captures per character. The active map only
+        // borrows one of them, so normal updates can commit while diving is shown.
+        private static readonly Dictionary<Character, RenderSession> DivingRenderSessions = new();
+        private static readonly Dictionary<Character, RenderSession> ActiveRenderSessions = new();
+        private static readonly HashSet<Character> DivingCharacters = new();
+        private static readonly HashSet<Character> DivingCaptures = new();
+        private static Action<Limb, WearableSprite, float, SpriteBatch, Color, float, SpriteEffects> drawWearable;
+        private static Func<AnimController, StatusEffect.AnimLoadInfo, bool, bool> loadTemporaryAnimation;
+        private static Action<StatusEffect, Entity, Hull, Vector2> playStatusSound;
         private static readonly Dictionary<string, PatchState> PatchStates =
             new Dictionary<string, PatchState>();
         [ThreadStatic]
@@ -1341,6 +1409,20 @@ namespace BaroWardrobeSwitcher
                 GetFaceTintMethod,
                 postfix: AccessTools.Method(typeof(AfflictionFaceTintPatch), "Postfix"),
                 required: false);
+            drawWearable = Bind<Action<Limb, WearableSprite, float, SpriteBatch, Color, float, SpriteEffects>>(DrawWearableMethod, "Limb.DrawWearable");
+            loadTemporaryAnimation = Bind<Func<AnimController, StatusEffect.AnimLoadInfo, bool, bool>>(TryLoadTemporaryAnimationMethod, "AnimController.TryLoadTemporaryAnimation");
+            playStatusSound = Bind<Action<StatusEffect, Entity, Hull, Vector2>>(PlaySoundMethod, "StatusEffect.PlaySound");
+        }
+
+        private static T Bind<T>(MethodInfo method, string patch) where T : Delegate
+        {
+            if (method == null || !PatchApplied(patch)) { return null; }
+            try { return method.CreateDelegate<T>(); }
+            catch (Exception ex)
+            {
+                PatchStates[patch].Fail("delegate: " + ex.Message);
+                return null;
+            }
         }
 
         public static bool IsReady()
@@ -1476,7 +1558,7 @@ namespace BaroWardrobeSwitcher
             catch (Exception ex)
             {
                 state.Fail(ex.GetType().Name + ": " + ex.Message);
-                LuaCsLogger.Log($"[Baro Wardrobe Switcher] Failed to patch {name}: {ex.GetType().Name}: {ex.Message}");
+                LuaCsLogger.Error($"[Baro Wardrobe Switcher] Failed to patch {name}: {ex.GetType().Name}: {ex.Message}");
             }
         }
 
@@ -1528,11 +1610,14 @@ namespace BaroWardrobeSwitcher
 
         public static void ClearAll()
         {
-            foreach (RenderSession session in RenderSessions.Values.ToList())
-            {
-                session.Dispose();
-            }
+            foreach (RenderSession session in ActiveRenderSessions.Values) { SuspendSession(session); }
+            foreach (RenderSession session in RenderSessions.Values) { session.Dispose(); }
+            foreach (RenderSession session in DivingRenderSessions.Values) { session.Dispose(); }
             RenderSessions.Clear();
+            DivingRenderSessions.Clear();
+            ActiveRenderSessions.Clear();
+            DivingCharacters.Clear();
+            DivingCaptures.Clear();
         }
 
         public static void RestoreItemVisuals()
@@ -1556,6 +1641,8 @@ namespace BaroWardrobeSwitcher
             {
                 session.SuppressedEquipmentAnimations.Clear();
                 session.SuppressedEquipmentSounds.Clear();
+                session.LoopingEquipmentSounds.Clear();
+                session.LoopingEquipmentComponentSounds.Clear();
                 session.SuppressedEquipmentComponentSounds.Clear();
                 session.IsActive = false;
                 session.RemoveOwnedAppendages();
@@ -1594,7 +1681,9 @@ namespace BaroWardrobeSwitcher
         public static string GetPanelKeyName()
         {
             string value = panelKeySetting?.Value;
-            return string.IsNullOrWhiteSpace(value) ? DefaultPanelKeyName : value.Trim();
+            return !string.IsNullOrWhiteSpace(value) &&
+                Enum.TryParse(value.Trim(), ignoreCase: true, out Microsoft.Xna.Framework.Input.Keys key) && Enum.IsDefined(key)
+                ? key.ToString() : DefaultPanelKeyName;
         }
 
         public static bool GetHideHuskVisuals()
@@ -1712,110 +1801,156 @@ namespace BaroWardrobeSwitcher
             }
         }
 
-        public static void ClearCharacter(Character character)
+        public static void ClearCharacter(Character character, bool diving = false)
         {
             if (character == null) { return; }
-            if (RenderSessions.TryGetValue(character, out RenderSession session))
+            Dictionary<Character, RenderSession> sessions = Sessions(diving);
+            if (sessions.Remove(character, out RenderSession session))
             {
+                if (ActiveRenderSessions.TryGetValue(character, out RenderSession active) && ReferenceEquals(active, session))
+                {
+                    SuspendSession(session);
+                    ActiveRenderSessions.Remove(character);
+                }
                 session.Dispose();
-                RenderSessions.Remove(character);
             }
+            if (diving && DivingCharacters.Contains(character)) { SetDivingAppearanceActive(character, false); }
             RefreshWearables(character);
+        }
+
+        public static void ClearCharacterAppearances(Character character)
+        {
+            ClearCharacter(character, true);
+            ClearCharacter(character);
+            DivingCharacters.Remove(character);
+            DivingCaptures.Remove(character);
         }
 
         public static void PruneStaleCharacters()
         {
-            List<Character> characters = RenderSessions.Keys.Where(IsCharacterStale).ToList();
-
-            foreach (Character character in characters)
+            foreach (Character character in RenderSessions.Keys.Concat(DivingRenderSessions.Keys).Where(IsCharacterStale).Distinct().ToArray())
             {
-                if (RenderSessions.TryGetValue(character, out RenderSession session))
-                {
-                    session.Dispose();
-                    RenderSessions.Remove(character);
-                }
+                ClearCharacterAppearances(character);
             }
         }
 
-        private static RenderSession GetOrCreateSession(Character character)
+        private static Dictionary<Character, RenderSession> Sessions(bool diving) => diving ? DivingRenderSessions : RenderSessions;
+
+        private static RenderSession GetOrCreateSession(Character character, bool diving = false)
         {
             if (character == null) { return null; }
-            if (!RenderSessions.TryGetValue(character, out RenderSession session))
+            Dictionary<Character, RenderSession> sessions = Sessions(diving);
+            if (!sessions.TryGetValue(character, out RenderSession session))
             {
                 session = new RenderSession(character);
-                RenderSessions[character] = session;
+                sessions[character] = session;
             }
             return session;
         }
 
-        private static RenderSession GetCaptureSession(Character character)
+        private static RenderSession GetCaptureSession(Character character, bool diving = false)
         {
-            return GetOrCreateSession(character)?.CaptureTarget;
+            return GetOrCreateSession(character, diving || DivingCaptures.Contains(character))?.CaptureTarget;
         }
 
-        public static bool BeginFashionTransaction(Character character)
+        public static string GetCaptureError(Character character)
+        {
+            return character != null && Sessions(DivingCaptures.Contains(character)).TryGetValue(character, out RenderSession session)
+                ? session.CaptureTarget.Error ?? string.Empty : string.Empty;
+        }
+
+        public static bool BeginFashionTransaction(Character character, bool diving = false)
         {
             if (character == null || !HasCapability("renderer")) { return false; }
+            AbortFashionTransaction(character);
+            if (diving) { DivingCaptures.Add(character); }
+            else { DivingCaptures.Remove(character); }
             try
             {
-                GetOrCreateSession(character).BeginPendingCapture();
+                GetOrCreateSession(character, diving).BeginPendingCapture();
                 return true;
             }
             catch (Exception ex)
             {
-                LuaCsLogger.Log(
-                    "[Baro Wardrobe Switcher] Failed to begin fashion capture transaction: " +
-                    ex.GetType().Name + ": " + ex.Message);
+                DivingCaptures.Remove(character);
+                LuaCsLogger.Error("[Baro Wardrobe Switcher] Failed to begin fashion capture: " + ex.Message);
                 return false;
             }
         }
 
         public static bool CommitFashionTransaction(Character character)
         {
-            if (character == null || !RenderSessions.TryGetValue(character, out RenderSession current)) { return false; }
+            if (character == null) { return false; }
+            bool diving = DivingCaptures.Remove(character);
+            Dictionary<Character, RenderSession> sessions = Sessions(diving);
+            if (!sessions.TryGetValue(character, out RenderSession current)) { return false; }
             RenderSession staged = current.DetachPendingCapture();
             if (staged == null) { return false; }
-
-            string error = null;
-            if (!staged.Validate(out error) || !HasFashionPayload(staged))
+            if (!staged.Validate(out string error) || !HasFashionPayload(staged))
             {
                 staged.Dispose();
-                LuaCsLogger.Log(
-                    "[Baro Wardrobe Switcher] Fashion capture transaction rejected; previous session preserved: " +
-                    (error ?? "staged session contains no fashion payload") + ".");
+                LuaCsLogger.Error("[Baro Wardrobe Switcher] Fashion capture rejected; previous session preserved: " + error);
                 return false;
             }
-
             staged.MarkCommitted();
-            RenderSessions[character] = staged;
+            sessions[character] = staged;
+            if (ActiveRenderSessions.TryGetValue(character, out RenderSession active) && ReferenceEquals(active, current))
+            {
+                SuspendSession(current);
+                ActiveRenderSessions.Remove(character);
+            }
             current.Dispose();
-            LuaCsLogger.Log("[Baro Wardrobe Switcher] Fashion capture transaction committed atomically.");
             return true;
         }
 
-        public static bool CanReuseCapturedFashion(Character character)
+        public static bool CanReuseCapturedFashion(Character character, bool diving = false)
         {
-            if (character == null || !HasCapability("renderer")) { return false; }
-            if (!RenderSessions.TryGetValue(character, out RenderSession session) ||
-                !session.IsCommitted ||
-                session.HasPendingCapture ||
-                session.HasLiveItemSources ||
-                !HasFashionPayload(session))
-            {
-                return false;
-            }
-            return session.Validate(out _);
+            return character != null && HasCapability("renderer") &&
+                Sessions(diving).TryGetValue(character, out RenderSession session) &&
+                session.IsCommitted && !session.HasPendingCapture && !session.HasLiveItemSources &&
+                HasFashionPayload(session) && session.Validate(out _);
         }
 
         public static bool AbortFashionTransaction(Character character)
         {
-            if (character == null || !RenderSessions.TryGetValue(character, out RenderSession current)) { return false; }
-            bool aborted = current.AbortPendingCapture();
-            if (aborted)
+            if (character == null) { return false; }
+            bool diving = DivingCaptures.Remove(character);
+            return Sessions(diving).TryGetValue(character, out RenderSession current) && current.AbortPendingCapture();
+        }
+
+        public static bool SetDivingAppearanceActive(Character character, bool enabled)
+        {
+            if (character == null) { return false; }
+            if (enabled && (!DivingRenderSessions.TryGetValue(character, out RenderSession dive) || !dive.IsActive || !dive.IsValid)) { return false; }
+            if (Sessions(enabled).TryGetValue(character, out RenderSession next) && next.IsActive && next.IsValid)
             {
-                LuaCsLogger.Log("[Baro Wardrobe Switcher] Fashion capture transaction aborted; previous session preserved.");
+                if (ActiveRenderSessions.TryGetValue(character, out RenderSession previous) && ReferenceEquals(previous, next)) { return true; }
+                if (previous != null) { SuspendSession(previous); }
+                if (!EnsureXdsFashionAppendage(character, next))
+                {
+                    next.MarkInvalid("appendage activation failed");
+                    if (previous != null) { EnsureXdsFashionAppendage(character, previous); }
+                    return false;
+                }
+                ActiveRenderSessions[character] = next;
             }
-            return aborted;
+            else if (ActiveRenderSessions.Remove(character, out RenderSession previous)) { SuspendSession(previous); }
+            if (enabled) { DivingCharacters.Add(character); }
+            else { DivingCharacters.Remove(character); }
+            RefreshWearables(character);
+            return true;
+        }
+
+        private static void SuspendSession(RenderSession session)
+        {
+            session.RemoveOwnedAppendages();
+            // Native status effects expire their looping channel after 0.1s
+            // without a refresh. ItemComponent loops need an explicit stop.
+            foreach (var sound in session.LoopingFashionComponentSounds)
+            {
+                try { sound.Component?.StopSounds(sound.ActionType); }
+                catch (Exception ex) { LuaCsLogger.Error("[Baro Wardrobe Switcher] Could not stop cosmetic loop: " + ex.Message); }
+            }
         }
 
         public static int CaptureFashionItem(Character character, Item item)
@@ -1841,7 +1976,7 @@ namespace BaroWardrobeSwitcher
                 string failure = "Fashion item has no Wearable component: " +
                                  (item.Prefab?.Identifier.ToString() ?? item.Name.ToString());
                 session.MarkInvalid(failure);
-                LuaCsLogger.Log("[Baro Wardrobe Switcher] " + failure + ". Activation refused.");
+                LuaCsLogger.Error("[Baro Wardrobe Switcher] " + failure + ". Activation refused.");
                 return 0;
             }
             List<FashionSpriteDescriptor> stagedDescriptors = new List<FashionSpriteDescriptor>();
@@ -1862,7 +1997,7 @@ namespace BaroWardrobeSwitcher
                         string failure = "Failed to create initialized fashion sprite for " +
                                          (item.Prefab?.Identifier.ToString() ?? item.Name.ToString()) + ": " + error;
                         session.MarkInvalid(failure);
-                        LuaCsLogger.Log("[Baro Wardrobe Switcher] " + failure + ". Activation refused.");
+                        LuaCsLogger.Error("[Baro Wardrobe Switcher] " + failure + ". Activation refused.");
                         return 0;
                     }
                     stagedDescriptors.Add(descriptor);
@@ -1902,7 +2037,7 @@ namespace BaroWardrobeSwitcher
                 foreach (FashionSpriteDescriptor staged in stagedDescriptors) { staged.Dispose(); }
                 string failure = "Fashion capture transaction failed: " + ex.GetType().Name + ": " + ex.Message;
                 session.MarkInvalid(failure);
-                LuaCsLogger.Log("[Baro Wardrobe Switcher] " + failure + ". Activation refused.");
+                LuaCsLogger.Error("[Baro Wardrobe Switcher] " + failure + ". Activation refused.");
                 return 0;
             }
             int count = stagedDescriptors.Count;
@@ -1935,7 +2070,7 @@ namespace BaroWardrobeSwitcher
                 {
                     string failure = "Could not find fashion prefab by identifier: " + identifier;
                     GetCaptureSession(character).MarkInvalid(failure);
-                    LuaCsLogger.Log("[Baro Wardrobe Switcher] " + failure + ". Activation refused.");
+                    LuaCsLogger.Error("[Baro Wardrobe Switcher] " + failure + ". Activation refused.");
                     return 0;
                 }
 
@@ -1967,7 +2102,7 @@ namespace BaroWardrobeSwitcher
                     }
                     catch (Exception ex)
                     {
-                        LuaCsLogger.Log($"[Baro Wardrobe Switcher] Failed to remove temporary fashion prefab item {identifier}: {ex.GetType().Name}: {ex.Message}");
+                        LuaCsLogger.Error($"[Baro Wardrobe Switcher] Failed to remove temporary fashion prefab item {identifier}: {ex.GetType().Name}: {ex.Message}");
                     }
                 }
             }
@@ -1975,7 +2110,7 @@ namespace BaroWardrobeSwitcher
             {
                 string failure = $"Fashion prefab fallback failed for {identifier}: {ex.GetType().Name}: {ex.Message}";
                 GetCaptureSession(character).MarkInvalid(failure);
-                LuaCsLogger.Log("[Baro Wardrobe Switcher] " + failure + ". Activation refused.");
+                LuaCsLogger.Error("[Baro Wardrobe Switcher] " + failure + ". Activation refused.");
                 return 0;
             }
         }
@@ -1990,10 +2125,10 @@ namespace BaroWardrobeSwitcher
             return true;
         }
 
-        public static bool SetFashionSlots(Character character, string savedSlotsCsv, string emptySlotsCsv)
+        public static bool SetFashionSlots(Character character, string savedSlotsCsv, string emptySlotsCsv, bool diving = false)
         {
             if (character == null) { return false; }
-            RenderSession session = GetCaptureSession(character);
+            RenderSession session = GetCaptureSession(character, diving);
             HashSet<InvSlotType> savedSlots = ParseSlotCsv(savedSlotsCsv);
             HashSet<InvSlotType> emptySlots = ParseSlotCsv(emptySlotsCsv);
             bool changed =
@@ -2001,6 +2136,8 @@ namespace BaroWardrobeSwitcher
                 !session.EmptySlots.SetEquals(emptySlots);
             session.SuppressedEquipmentAnimations.Clear();
             session.SuppressedEquipmentSounds.Clear();
+            session.LoopingEquipmentSounds.Clear();
+            session.LoopingEquipmentComponentSounds.Clear();
             session.SuppressedEquipmentComponentSounds.Clear();
             session.SavedSlots = savedSlots;
             session.EmptySlots = emptySlots;
@@ -2029,14 +2166,15 @@ namespace BaroWardrobeSwitcher
         public static bool SetAttachmentVisibility(
             Character character,
             int forceHideMask,
-            int forceShowMask)
+            int forceShowMask,
+            bool diving = false)
         {
             if (character == null) { return false; }
             if ((forceHideMask & ~AttachmentVisibilityMask) != 0 ||
                 (forceShowMask & ~AttachmentVisibilityMask) != 0 ||
                 (forceHideMask & forceShowMask) != 0)
             {
-                LuaCsLogger.Log(
+                LuaCsLogger.Error(
                     "[Baro Wardrobe Switcher] Rejected invalid attachment visibility masks: hide=0x" +
                     forceHideMask.ToString("X2") +
                     ", show=0x" +
@@ -2045,7 +2183,7 @@ namespace BaroWardrobeSwitcher
                 return false;
             }
 
-            RenderSession session = GetCaptureSession(character);
+            RenderSession session = GetCaptureSession(character, diving);
             bool changed =
                 session.ForceHideAttachmentMask != forceHideMask ||
                 session.ForceShowAttachmentMask != forceShowMask;
@@ -2063,10 +2201,10 @@ namespace BaroWardrobeSwitcher
             return true;
         }
 
-        public static bool SetUseFashionMovementAnimations(Character character, bool enabled)
+        public static bool SetUseFashionMovementAnimations(Character character, bool enabled, bool diving = false)
         {
             if (character == null ||
-                !RenderSessions.TryGetValue(character, out RenderSession session))
+                !Sessions(diving).TryGetValue(character, out RenderSession session))
             {
                 return false;
             }
@@ -2075,10 +2213,10 @@ namespace BaroWardrobeSwitcher
             return true;
         }
 
-        public static bool SetUseFashionFootstepSounds(Character character, bool enabled)
+        public static bool SetUseFashionFootstepSounds(Character character, bool enabled, bool diving = false)
         {
             if (character == null ||
-                !RenderSessions.TryGetValue(character, out RenderSession session) ||
+                !Sessions(diving).TryGetValue(character, out RenderSession session) ||
                 (enabled && !HasCapability("footstepSound")))
             {
                 return false;
@@ -2099,18 +2237,18 @@ namespace BaroWardrobeSwitcher
                 0);
         }
 
-        public static bool ApplyFashionItemVisual(Character character, Item item, bool carrier)
+        public static bool ApplyFashionItemVisual(Character character, Item item, bool carrier, bool diving = false)
         {
             if (character == null || item == null || !HasCapability("renderer")) { return false; }
-            if (!RenderSessions.TryGetValue(character, out RenderSession session) ||
+            if (!Sessions(diving).TryGetValue(character, out RenderSession session) ||
                 !HasFashionPayload(session))
             {
                 return false;
             }
 
-            if (HasCapability("animation")) { RegisterSuppressedEquipmentAnimations(character, item); }
-            if (HasCapability("statusSound")) { RegisterSuppressedEquipmentSounds(character, item); }
-            if (HasCapability("itemSound")) { RegisterSuppressedEquipmentComponentSounds(character, item); }
+            if (HasCapability("animation")) { RegisterSuppressedEquipmentAnimations(character, item, session); }
+            if (HasCapability("statusSound")) { RegisterSuppressedEquipmentSounds(character, item, session); }
+            if (HasCapability("itemSound")) { RegisterSuppressedEquipmentComponentSounds(character, item, session); }
 
             if (carrier && !session.IsActive)
             {
@@ -2157,27 +2295,53 @@ namespace BaroWardrobeSwitcher
             return true;
         }
 
-        public static bool ActivateFashionVisual(Character character)
+        public static bool RefreshEquipment(Character character)
         {
-            if (character == null || !HasCapability("renderer") || !HasFashionPayload(character)) { return false; }
-            string error = "render session missing";
-            if (!RenderSessions.TryGetValue(character, out RenderSession session))
+            if (character?.Inventory == null) { return false; }
+            Refresh(RenderSessions);
+            Refresh(DivingRenderSessions);
+            return true;
+
+            void Refresh(Dictionary<Character, RenderSession> sessions)
             {
-                LuaCsLogger.Log("[Baro Wardrobe Switcher] Fashion activation refused: " + error + ".");
+                if (!sessions.TryGetValue(character, out RenderSession session)) { return; }
+                session.SuppressedEquipmentAnimations.Clear();
+                session.SuppressedEquipmentSounds.Clear();
+                session.LoopingEquipmentSounds.Clear();
+                session.SuppressedEquipmentComponentSounds.Clear();
+                session.LoopingEquipmentComponentSounds.Clear();
+                var seen = new HashSet<Item>();
+                foreach (InvSlotType slot in session.SavedSlots.Concat(session.EmptySlots))
+                {
+                    Item item = character.Inventory.GetItemInLimbSlot(slot);
+                    if (item == null || !seen.Add(item)) { continue; }
+                    if (HasCapability("animation")) { RegisterSuppressedEquipmentAnimations(character, item, session); }
+                    if (HasCapability("statusSound")) { RegisterSuppressedEquipmentSounds(character, item, session); }
+                    if (HasCapability("itemSound")) { RegisterSuppressedEquipmentComponentSounds(character, item, session); }
+                }
+            }
+        }
+
+        public static bool ActivateFashionVisual(Character character, bool diving = false)
+        {
+            if (character == null || !HasCapability("renderer")) { return false; }
+            string error = "render session missing";
+            if (!Sessions(diving).TryGetValue(character, out RenderSession session))
+            {
+                LuaCsLogger.Error("[Baro Wardrobe Switcher] Fashion activation refused: " + error + ".");
                 return false;
             }
-            if (session.IsActive) { return true; }
+            if (!HasFashionPayload(session)) { return false; }
             if (!session.Validate(out error))
             {
-                LuaCsLogger.Log("[Baro Wardrobe Switcher] Fashion activation refused: " + (error ?? "render session missing") + ".");
-                return false;
-            }
-            if (!EnsureXdsFashionAppendage(character, session))
-            {
-                session.IsActive = false;
+                LuaCsLogger.Error("[Baro Wardrobe Switcher] Fashion activation refused: " + (error ?? "render session missing") + ".");
                 return false;
             }
             session.IsActive = true;
+            if (diving || !DivingCharacters.Contains(character))
+            {
+                if (!SetDivingAppearanceActive(character, diving)) { return false; }
+            }
             virtualDrawErrorLogCount = 0;
             animationOverrideErrorLogCount = 0;
             soundOverrideErrorLogCount = 0;
@@ -2258,7 +2422,7 @@ namespace BaroWardrobeSwitcher
                 {
                     try { character.AnimController.RemoveLimb(addedLimb); } catch { }
                 }
-                LuaCsLogger.Log(
+                LuaCsLogger.Error(
                     "[Baro Wardrobe Switcher] XDS-01 appendage creation failed: " +
                     ex.GetType().Name +
                     ": " +
@@ -2273,7 +2437,7 @@ namespace BaroWardrobeSwitcher
             skipOriginal = false;
             if (limb == null || original == null) { return false; }
             if (limb.character == null ||
-                !RenderSessions.TryGetValue(limb.character, out RenderSession session) ||
+                !ActiveRenderSessions.TryGetValue(limb.character, out RenderSession session) ||
                 !session.IsActive ||
                 !HasCapability("renderer") ||
                 !session.TryGetDrawContext(limb, out object context) ||
@@ -2363,7 +2527,7 @@ namespace BaroWardrobeSwitcher
         internal static LimbRenderTransaction BeginLimbDraw(Limb limb)
         {
             if (limb?.character == null ||
-                !RenderSessions.TryGetValue(limb.character, out RenderSession session) ||
+                !ActiveRenderSessions.TryGetValue(limb.character, out RenderSession session) ||
                 !session.IsActive ||
                 !session.IsValid ||
                 !HasCapability("renderer"))
@@ -2395,7 +2559,7 @@ namespace BaroWardrobeSwitcher
                         cleanupException.GetType().Name + ": " + cleanupException.Message);
                 }
                 if (limb?.character != null &&
-                    RenderSessions.TryGetValue(limb.character, out RenderSession failedSession))
+                    ActiveRenderSessions.TryGetValue(limb.character, out RenderSession failedSession))
                 {
                     failedSession.MarkInvalid("render transaction failed: " + ex.GetType().Name + ": " + ex.Message);
                 }
@@ -2432,7 +2596,7 @@ namespace BaroWardrobeSwitcher
             if (limb?.character == null ||
                 limb.type != LimbType.None ||
                 limb.Params == null ||
-                !RenderSessions.TryGetValue(limb.character, out RenderSession session) ||
+                !ActiveRenderSessions.TryGetValue(limb.character, out RenderSession session) ||
                 !session.IsActive ||
                 (!session.SavedSlots.Contains(InvSlotType.Bag) &&
                  !session.EmptySlots.Contains(InvSlotType.Bag)))
@@ -2490,7 +2654,7 @@ namespace BaroWardrobeSwitcher
             }
             bool hideHuskAppearance = GetHideHuskVisuals();
             bool hideTouhouWings =
-                RenderSessions.TryGetValue(limb.character, out RenderSession session) &&
+                ActiveRenderSessions.TryGetValue(limb.character, out RenderSession session) &&
                 session.IsActive &&
                 session.IsValid;
             if (!hideHuskAppearance && !hideTouhouWings) { return false; }
@@ -2601,7 +2765,7 @@ namespace BaroWardrobeSwitcher
         internal static FootstepSoundTransaction BeginFootstepSound(Limb limb)
         {
             if (limb?.character == null ||
-                !RenderSessions.TryGetValue(limb.character, out RenderSession session) ||
+                !ActiveRenderSessions.TryGetValue(limb.character, out RenderSession session) ||
                 !session.IsActive ||
                 !session.IsValid ||
                 !session.UseFashionFootstepSounds ||
@@ -2674,7 +2838,7 @@ namespace BaroWardrobeSwitcher
             if (limb?.character == null || spriteBatch == null || transaction == null || !transaction.IsOwner) { return; }
             try
             {
-                if (!RenderSessions.TryGetValue(limb.character, out RenderSession session) ||
+                if (!ActiveRenderSessions.TryGetValue(limb.character, out RenderSession session) ||
                     !session.IsActive ||
                     session.SpritesBySlot.Count == 0)
                 {
@@ -2738,23 +2902,8 @@ namespace BaroWardrobeSwitcher
             transaction.EnterStoredFashionDraw();
             try
             {
-                try
-                {
-                    DrawWearableMethod.Invoke(
-                        limb,
-                        transaction.GetDrawArguments(
-                            wearable,
-                            DrawDepthStep * depthIndex,
-                            spriteBatch,
-                            color,
-                            color.A / 255.0f,
-                            spriteEffect));
-                }
-                catch (TargetInvocationException ex) when (ex.InnerException != null)
-                {
-                    ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
-                    throw;
-                }
+                drawWearable(limb, wearable, DrawDepthStep * depthIndex,
+                    spriteBatch, color, color.A / 255.0f, spriteEffect);
             }
             finally
             {
@@ -2772,7 +2921,7 @@ namespace BaroWardrobeSwitcher
         {
             Character character = animController?.Character;
             if (character == null ||
-                !RenderSessions.TryGetValue(character, out RenderSession session) ||
+                !ActiveRenderSessions.TryGetValue(character, out RenderSession session) ||
                 !session.IsActive ||
                 !session.IsValid ||
                 !HasCapability("animation"))
@@ -2790,7 +2939,7 @@ namespace BaroWardrobeSwitcher
         {
             Character character = animController?.Character;
             if (character == null ||
-                !RenderSessions.TryGetValue(character, out RenderSession session) ||
+                !ActiveRenderSessions.TryGetValue(character, out RenderSession session) ||
                 !session.IsActive ||
                 !session.IsValid ||
                 !HasCapability("animation") ||
@@ -2804,7 +2953,6 @@ namespace BaroWardrobeSwitcher
                 return;
             }
 
-            object[] invokeArguments = session.FashionAnimationInvokeArguments;
             foreach (object animationInfo in session.FashionAnimations)
             {
                 if (!session.UseFashionMovementAnimations &&
@@ -2814,8 +2962,7 @@ namespace BaroWardrobeSwitcher
                 }
                 try
                 {
-                    invokeArguments[0] = animationInfo;
-                    TryLoadTemporaryAnimationMethod.Invoke(animController, invokeArguments);
+                    loadTemporaryAnimation(animController, (StatusEffect.AnimLoadInfo)animationInfo, false);
                 }
                 catch (Exception ex)
                 {
@@ -2828,7 +2975,7 @@ namespace BaroWardrobeSwitcher
         {
             Character character = animController?.Character;
             if (character == null ||
-                !RenderSessions.TryGetValue(character, out RenderSession session) ||
+                !ActiveRenderSessions.TryGetValue(character, out RenderSession session) ||
                 !session.IsActive ||
                 !session.IsValid)
             {
@@ -2856,7 +3003,7 @@ namespace BaroWardrobeSwitcher
         private static bool HasFashionPayload(Character character)
         {
             return character != null &&
-                   RenderSessions.TryGetValue(character, out RenderSession session) &&
+                   ActiveRenderSessions.TryGetValue(character, out RenderSession session) &&
                    HasFashionPayload(session);
         }
 
@@ -2970,10 +3117,9 @@ namespace BaroWardrobeSwitcher
             return count;
         }
 
-        private static void RegisterSuppressedEquipmentAnimations(Character character, Item item)
+        private static void RegisterSuppressedEquipmentAnimations(Character character, Item item, RenderSession session)
         {
             if (character == null || item?.Components == null || AnimationsToTriggerField == null) { return; }
-            if (!RenderSessions.TryGetValue(character, out RenderSession session)) { return; }
 
             foreach (ItemComponent component in item.Components)
             {
@@ -2994,16 +3140,15 @@ namespace BaroWardrobeSwitcher
             }
         }
 
-        private static void RegisterSuppressedEquipmentSounds(Character character, Item item)
+        private static void RegisterSuppressedEquipmentSounds(Character character, Item item, RenderSession session)
         {
             if (character == null || item?.Components == null || SoundsField == null) { return; }
-            if (!RenderSessions.TryGetValue(character, out RenderSession session)) { return; }
             // When the saved look carries its own sounds we suppress every matching real
             // equipment sound and replace it. When the look is silent we still have to
             // silence looping real-equipment sounds (diving suits, exosuits, beeping
             // headsets); otherwise they keep beeping while the look hides the gear, which
             // mirrors how ShouldLoadTemporaryAnimation suppresses their movement animation.
-            bool hasFashionSound = HasAnyFashionSound(character);
+            bool hasFashionSound = (session.FashionSounds.Count > 0 || session.FashionComponentSounds.Count > 0);
 
             foreach (ItemComponent component in item.Components)
             {
@@ -3012,7 +3157,7 @@ namespace BaroWardrobeSwitcher
                 foreach (StatusEffect statusEffect in statusEffects)
                 {
                     if (!HasSounds(statusEffect)) { continue; }
-                    if (IsFashionStatusSound(character, statusEffect)) { continue; }
+                    if (session.FashionSounds.Contains(statusEffect)) { continue; }
                     // Conditional/required-item sounds are gameplay feedback, not
                     // ambience. Keep them on the real item so Barotrauma starts and
                     // stops oxygen alarms with the actual suit/tank lifecycle.
@@ -3030,18 +3175,17 @@ namespace BaroWardrobeSwitcher
             }
         }
 
-        private static void RegisterSuppressedEquipmentComponentSounds(Character character, Item item)
+        private static void RegisterSuppressedEquipmentComponentSounds(Character character, Item item, RenderSession session)
         {
             if (character == null || item?.Components == null || ComponentSoundsField == null) { return; }
-            if (!RenderSessions.TryGetValue(character, out RenderSession session)) { return; }
             // Same rule as the status-effect sounds above: a silent saved look still has to
             // silence looping real-equipment item sounds so cosmetic gear stops beeping.
-            bool hasFashionSound = HasAnyFashionSound(character);
+            bool hasFashionSound = (session.FashionSounds.Count > 0 || session.FashionComponentSounds.Count > 0);
 
             foreach (ItemComponent component in item.Components)
             {
                 if (component == null || !HasComponentSounds(component)) { continue; }
-                if (IsFashionComponentSound(character, component)) { continue; }
+                if (session.FashionComponentSounds.Any(sound => ReferenceEquals(sound.Component, component))) { continue; }
                 bool hasLoopingSound = false;
                 foreach (ActionType actionType in GetComponentSoundTypes(component))
                 {
@@ -3058,7 +3202,7 @@ namespace BaroWardrobeSwitcher
         {
             if (statusEffect == null) { return true; }
             RenderSession session = null;
-            foreach (RenderSession candidate in RenderSessions.Values)
+            foreach (RenderSession candidate in ActiveRenderSessions.Values)
             {
                 if (!candidate.SuppressedEquipmentSounds.Contains(statusEffect)) { continue; }
                 session = candidate;
@@ -3073,7 +3217,7 @@ namespace BaroWardrobeSwitcher
                 session.LoopingEquipmentSounds.Remove(statusEffect);
                 return true;
             }
-            if (!HasAnyFashionSound(character))
+            if (!(session.FashionSounds.Count > 0 || session.FashionComponentSounds.Count > 0))
             {
                 return false;
             }
@@ -3105,7 +3249,7 @@ namespace BaroWardrobeSwitcher
         {
             if (component == null) { return true; }
             RenderSession session = null;
-            foreach (RenderSession candidate in RenderSessions.Values)
+            foreach (RenderSession candidate in ActiveRenderSessions.Values)
             {
                 if (!candidate.SuppressedEquipmentComponentSounds.Contains(component)) { continue; }
                 session = candidate;
@@ -3115,7 +3259,7 @@ namespace BaroWardrobeSwitcher
             if (character == null) { return true; }
             if (!session.IsActive || !session.IsValid || !HasCapability("itemSound")) { return true; }
             if (user != null && character != user) { return true; }
-            if (!HasAnyFashionSound(character))
+            if (!(session.FashionSounds.Count > 0 || session.FashionComponentSounds.Count > 0))
             {
                 return false;
             }
@@ -3150,7 +3294,7 @@ namespace BaroWardrobeSwitcher
         private static bool HasAnyFashionSound(Character character)
         {
             return character != null &&
-                   RenderSessions.TryGetValue(character, out RenderSession session) &&
+                   ActiveRenderSessions.TryGetValue(character, out RenderSession session) &&
                    (session.FashionSounds.Count > 0 || session.FashionComponentSounds.Count > 0);
         }
 
@@ -3158,7 +3302,7 @@ namespace BaroWardrobeSwitcher
         {
             return character != null &&
                    statusEffect != null &&
-                   RenderSessions.TryGetValue(character, out RenderSession session) &&
+                   ActiveRenderSessions.TryGetValue(character, out RenderSession session) &&
                    session.FashionSounds.Any(sound => ReferenceEquals(sound, statusEffect));
         }
 
@@ -3166,7 +3310,7 @@ namespace BaroWardrobeSwitcher
         {
             return character != null &&
                    component != null &&
-                   RenderSessions.TryGetValue(character, out RenderSession session) &&
+                   ActiveRenderSessions.TryGetValue(character, out RenderSession session) &&
                    session.FashionComponentSounds.Any(sound => ReferenceEquals(sound.Component, component));
         }
 
@@ -3226,13 +3370,8 @@ namespace BaroWardrobeSwitcher
                     forcePlayChanged = true;
                 }
 
-                PlaySoundMethod.Invoke(
-                    statusEffect,
-                    GetFashionSoundInvokeArguments(
-                        session,
-                        entity ?? character,
-                        hull ?? character.CurrentHull,
-                        worldPosition));
+                playStatusSound(statusEffect, entity ?? character,
+                    hull ?? character.CurrentHull, worldPosition);
                 return true;
             }
             catch (Exception ex)
@@ -3395,6 +3534,17 @@ namespace BaroWardrobeSwitcher
             }
         }
 
+        private static List<FashionSpriteDescriptor> GetFashionSpritesForLimb(RenderSession session, Limb limb)
+        {
+            if (session.FashionSpritesByLimb.TryGetValue(limb.type, out List<FashionSpriteDescriptor> cached))
+            {
+                return cached;
+            }
+            List<FashionSpriteDescriptor> descriptors = EnumerateFashionSpritesForLimb(session, limb.type).ToList();
+            session.FashionSpritesByLimb[limb.type] = descriptors;
+            return descriptors;
+        }
+
         private static IEnumerable<FashionSpriteDescriptor> EnumerateFashionSpritesForLimb(
             RenderSession session,
             LimbType limbType)
@@ -3427,18 +3577,6 @@ namespace BaroWardrobeSwitcher
             }
         }
 
-        private static object[] GetFashionSoundInvokeArguments(
-            RenderSession session,
-            Entity entity,
-            Hull hull,
-            Vector2 worldPosition)
-        {
-            object[] arguments = session.FashionSoundInvokeArguments;
-            arguments[0] = entity;
-            arguments[1] = hull;
-            arguments[2] = worldPosition;
-            return arguments;
-        }
 
         private static int CompareWearablesForDraw(WearableSprite left, WearableSprite right)
         {
@@ -3633,7 +3771,7 @@ namespace BaroWardrobeSwitcher
         private static bool ShouldHideOriginalForEmptySavedSlot(Character character, WearableSprite original)
         {
             if (character == null || original?.WearableComponent?.AllowedSlots == null) { return false; }
-            if (!RenderSessions.TryGetValue(character, out RenderSession session) || session.EmptySlots.Count == 0)
+            if (!ActiveRenderSessions.TryGetValue(character, out RenderSession session) || session.EmptySlots.Count == 0)
             {
                 return false;
             }
@@ -3658,7 +3796,7 @@ namespace BaroWardrobeSwitcher
         private static bool ShouldHideAttachmentForFashion(Character character, WearableSprite original)
         {
             if (character == null || original == null) { return false; }
-            if (!RenderSessions.TryGetValue(character, out RenderSession session) ||
+            if (!ActiveRenderSessions.TryGetValue(character, out RenderSession session) ||
                 !AttachmentBits.TryGetValue(original.Type, out int attachmentBit))
             {
                 return false;
@@ -3677,7 +3815,7 @@ namespace BaroWardrobeSwitcher
         private static string DescribeFashionHiddenTypes(Character character)
         {
             if (character == null ||
-                !RenderSessions.TryGetValue(character, out RenderSession session) ||
+                !ActiveRenderSessions.TryGetValue(character, out RenderSession session) ||
                 session.HiddenWearableTypes.Count == 0)
             {
                 return "none";
@@ -3688,7 +3826,7 @@ namespace BaroWardrobeSwitcher
         private static bool ShouldHideOriginalForSavedSlot(Character character, WearableSprite original)
         {
             if (character == null || original?.WearableComponent?.AllowedSlots == null) { return false; }
-            if (!RenderSessions.TryGetValue(character, out RenderSession session) || session.SavedSlots.Count == 0)
+            if (!ActiveRenderSessions.TryGetValue(character, out RenderSession session) || session.SavedSlots.Count == 0)
             {
                 return false;
             }
@@ -3702,14 +3840,14 @@ namespace BaroWardrobeSwitcher
 
         private static string DescribeSavedSlots(Character character)
         {
-            return RenderSessions.TryGetValue(character, out RenderSession session)
+            return ActiveRenderSessions.TryGetValue(character, out RenderSession session)
                 ? DescribeSlotSet(session.SavedSlots)
                 : "none";
         }
 
         private static string DescribeEmptySlots(Character character)
         {
-            return RenderSessions.TryGetValue(character, out RenderSession session)
+            return ActiveRenderSessions.TryGetValue(character, out RenderSession session)
                 ? DescribeSlotSet(session.EmptySlots)
                 : "none";
         }
@@ -3772,7 +3910,7 @@ namespace BaroWardrobeSwitcher
             }
             catch (Exception ex)
             {
-                LuaCsLogger.Log($"[Baro Wardrobe Switcher] Failed to refresh wearables: {ex.GetType().Name}: {ex.Message}");
+                LuaCsLogger.Error($"[Baro Wardrobe Switcher] Failed to refresh wearables: {ex.GetType().Name}: {ex.Message}");
             }
         }
 
@@ -3787,7 +3925,7 @@ namespace BaroWardrobeSwitcher
             sprite = null;
             alreadyDrawn = false;
             if (character == null) { return false; }
-            if (!RenderSessions.TryGetValue(character, out RenderSession session))
+            if (!ActiveRenderSessions.TryGetValue(character, out RenderSession session))
             {
                 return false;
             }
@@ -3843,7 +3981,7 @@ namespace BaroWardrobeSwitcher
         private static string DescribeFashionSprites(Character character)
         {
             if (character == null) { return "character=nil"; }
-            if (!RenderSessions.TryGetValue(character, out RenderSession session) ||
+            if (!ActiveRenderSessions.TryGetValue(character, out RenderSession session) ||
                 session.SpritesBySlot.Count == 0)
             {
                 return "none";
@@ -3858,7 +3996,7 @@ namespace BaroWardrobeSwitcher
         private static string DescribeFashionSpriteLayers(Character character)
         {
             if (character == null) { return "character=nil"; }
-            if (!RenderSessions.TryGetValue(character, out RenderSession session) ||
+            if (!ActiveRenderSessions.TryGetValue(character, out RenderSession session) ||
                 session.SpritesBySlot.Count == 0)
             {
                 return "none";
@@ -3875,7 +4013,7 @@ namespace BaroWardrobeSwitcher
         private static string DescribeFashionSpriteSources(Character character)
         {
             if (character == null ||
-                !RenderSessions.TryGetValue(character, out RenderSession session) ||
+                !ActiveRenderSessions.TryGetValue(character, out RenderSession session) ||
                 session.SpriteCount == 0)
             {
                 return "none";
@@ -3930,7 +4068,7 @@ namespace BaroWardrobeSwitcher
                     }
                 }
 
-                foreach (FashionSpriteDescriptor descriptor in session.Descriptors)
+                foreach (FashionSpriteDescriptor descriptor in GetFashionSpritesForLimb(session, limb))
                 {
                     if (descriptor == null)
                     {
@@ -3966,7 +4104,6 @@ namespace BaroWardrobeSwitcher
             private List<WearableSprite> originalOrder;
             private readonly List<WearableType> emptyHideWearablesOfType = new List<WearableType>();
             private RenderSession session;
-            private object[] drawArguments;
             private bool cleaned;
             private bool wearingItemsChanged;
             private bool wearableTypesCacheChanged;
@@ -3988,23 +4125,6 @@ namespace BaroWardrobeSwitcher
             public IReadOnlyList<FashionSpriteDescriptor> FashionDescriptors { get; private set; } =
                 Array.Empty<FashionSpriteDescriptor>();
 
-            public object[] GetDrawArguments(
-                WearableSprite wearable,
-                float depth,
-                SpriteBatch spriteBatch,
-                Color color,
-                float alpha,
-                SpriteEffects spriteEffect)
-            {
-                drawArguments ??= new object[6];
-                drawArguments[0] = wearable;
-                drawArguments[1] = depth;
-                drawArguments[2] = spriteBatch;
-                drawArguments[3] = color;
-                drawArguments[4] = alpha;
-                drawArguments[5] = spriteEffect;
-                return drawArguments;
-            }
 
             public void Reset(Limb nextLimb)
             {
@@ -4021,7 +4141,6 @@ namespace BaroWardrobeSwitcher
                 InjectedSprites.Clear();
                 DrawnSprites.Clear();
                 FashionDescriptors = Array.Empty<FashionSpriteDescriptor>();
-                if (drawArguments != null) { Array.Clear(drawArguments, 0, drawArguments.Length); }
             }
 
             public void ResetForPool()
@@ -4039,7 +4158,6 @@ namespace BaroWardrobeSwitcher
                 InjectedSprites.Clear();
                 DrawnSprites.Clear();
                 FashionDescriptors = Array.Empty<FashionSpriteDescriptor>();
-                if (drawArguments != null) { Array.Clear(drawArguments, 0, drawArguments.Length); }
             }
 
             public void EnterStoredFashionDraw()
@@ -4092,16 +4210,6 @@ namespace BaroWardrobeSwitcher
                     limb.UpdateWearableTypesToHide();
                 }
 
-                static List<FashionSpriteDescriptor> GetFashionSpritesForLimb(RenderSession session, Limb limb)
-                {
-                    if (session.FashionSpritesByLimb.TryGetValue(limb.type, out List<FashionSpriteDescriptor> cached))
-                    {
-                        return cached;
-                    }
-                    List<FashionSpriteDescriptor> descriptors = EnumerateFashionSpritesForLimb(session, limb.type).ToList();
-                    session.FashionSpritesByLimb[limb.type] = descriptors;
-                    return descriptors;
-                }
 
                 List<FashionSpriteDescriptor> descriptors = GetFashionSpritesForLimb(session, limb);
                 FashionDescriptors = descriptors;

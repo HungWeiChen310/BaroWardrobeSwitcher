@@ -1454,6 +1454,76 @@ v1Forget.dispatch({ type = "CommandRequested", operationId = "v1:forget", kind =
 assertEqual(v1Forget.getState().phase, Core.PHASE.Idle)
 assertEqual(v1Forget.getViewModel().hasSavedLook, false)
 
+do
+    assert(Core.CAPABILITY.DivingAppearance ~= Core.CAPABILITY.CrewDivingProfiles)
+    assert(Core.NET.V2_DIVING_STATE ~= Core.NET.V2_DIVING_PROFILE_STATE)
+    local keys = {}
+    for _, id in ipairs({ "hat-a", "hat_a", "帽子", "帽_子", "帽-子" }) do
+        local key = Core.appearanceKey(id, 123)
+        assert(not keys[key], "identifier punctuation or Unicode collided")
+        keys[key] = true
+    end
+    assertEqual(Core.appearanceKey("HAT-A", 123), Core.appearanceKey("hat-a", 123))
+    assert(Core.appearanceKey("hat-a", 123) ~= Core.appearanceKey("hat-a", 124))
+    local retry = {}
+    assert(Core.retryReady(retry, "look-a", 0))
+    for attempt = 1, 6 do
+        local tick = retry.nextTick or 0
+        Core.retryFailed(retry, tick, false)
+        assert(not Core.retryReady(retry, "look-a", tick + 1))
+    end
+    assert(not Core.retryReady(retry, "look-a", 1000000), "retry count is unbounded")
+    assert(Core.retryReady(retry, "look-b", 2), "changed data did not reset retries")
+    Core.retryFailed(retry, 2, true)
+    assert(not Core.retryReady(retry, "look-b", 1000000))
+    assert(Core.retryReady(retry, "look-b", 3, true), "manual retry was ignored")
+
+    for _, capabilities in ipairs({ 0, 15, 31, 255 }) do
+        local hello = newBuffer()
+        assert(Core.writeClientHello(hello, "optional-client", capabilities))
+        hello.FinalizeForTransport()
+        assertEqual(assert(Core.readClientHello(hello)).capabilities, capabilities)
+    end
+    local oldHello = newBuffer()
+    assert(Core.writeClientHello(oldHello, "old-client"))
+    oldHello.FinalizeForTransport()
+    assertEqual(assert(Core.readClientHello(oldHello)).capabilities, 0)
+
+    for mode = 0, 2 do
+        for _, look in ipairs({ false, emptyLook, coloredLook }) do
+            local state = newBuffer()
+            assert(Core.writeDivingState(state, { serverSessionId = "epoch", generation = 4,
+                revision = 12, characterId = 52, mode = mode, look = look or nil, operationId = "op" }))
+            state.FinalizeForTransport()
+            local decoded = assert(Core.tryReadDivingState(state))
+            assertEqual(decoded.generation, 4)
+            assertEqual(decoded.revision, 12)
+            assertEqual(decoded.mode, mode)
+            assertEqual(decoded.operationId, "op")
+            assert((look == false and decoded.look == nil) or Core.lookEquals(decoded.look, look))
+        end
+    end
+    for _, kind in ipairs({ Core.COMMAND.Diving, Core.COMMAND.DivingSave }) do
+        for _, targeted in ipairs({ false, true }) do
+            local command = { clientSessionId = "client", operationId = "diving", baseRevision = 2,
+                kind = kind, divingMode = 2, includeHealthInterface = kind == Core.COMMAND.DivingSave, targetCharacterId = targeted and 14 or nil,
+                look = kind == Core.COMMAND.Diving and emptyLook or nil }
+            local buffer = newBuffer()
+            assert((targeted and Core.writeTargetCommand or Core.writeCommand)(buffer, command))
+            buffer.FinalizeForTransport()
+            local decoded = assert((targeted and Core.readTargetCommand or Core.readCommand)(buffer))
+            assertEqual(decoded.divingMode, 2)
+            assertEqual(decoded.includeHealthInterface, kind == Core.COMMAND.DivingSave)
+            assertEqual(decoded.kind, kind)
+            assertEqual(decoded.targetCharacterId, command.targetCharacterId)
+        end
+    end
+    assert(Core.validateCommand({ clientSessionId = "a", operationId = "b", kind = Core.COMMAND.Diving, divingMode = 3 }) == nil)
+    assert(Core.writeDivingState(newBuffer(), { serverSessionId = "a", generation = 0, revision = 0, characterId = 0, mode = 2 }) == false)
+    local oversized = newBuffer(); oversized.LengthBytes = Core.LIMITS.MAX_PAYLOAD_BYTES + 1
+    assert(Core.tryReadDivingState(oversized) == nil)
+end
+do
 local divingBuffer = newBuffer()
 assert(Core.writeDivingProfile(divingBuffer, {
     characterId = 42,
@@ -1467,5 +1537,6 @@ assertEqual(divingProfile.mode, 2)
 assertEqual(divingProfile.captured, true)
 assert(Core.lookEquals(divingProfile.look, look))
 assert(Core.validateDivingProfile({ characterId = 42, mode = 3, captured = false }) == nil)
+end
 
 print("WardrobeCore tests passed")

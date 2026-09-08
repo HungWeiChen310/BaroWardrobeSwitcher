@@ -100,4 +100,35 @@
   <barowardrobeswitcher.status.profile_collision>ambiguous identity; automatic restore disabled</barowardrobeswitcher.status.profile_collision>
   <barowardrobeswitcher.status.saved_cleared>Saved look cleared.</barowardrobeswitcher.status.saved_cleared>
   <barowardrobeswitcher.status.none>none</barowardrobeswitcher.status.none>
+  <barowardrobeswitcher.button.clear_diving_outfit>Clear Custom Diving Outfit</barowardrobeswitcher.button.clear_diving_outfit>
+  <barowardrobeswitcher.button.resynchronize>Resynchronize / Retry</barowardrobeswitcher.button.resynchronize>
+  <barowardrobeswitcher.status.waiting_server>Waiting for server…</barowardrobeswitcher.status.waiting_server>
+  <barowardrobeswitcher.status.missing_assets>Appearance assets unavailable. Check enabled mods, then retry.</barowardrobeswitcher.status.missing_assets>
+  <barowardrobeswitcher.status.diving_unset>No custom diving outfit saved. Current appearance is kept.</barowardrobeswitcher.status.diving_unset>
+  <barowardrobeswitcher.status.diving_local_only>Diving appearance is visible only on this client.</barowardrobeswitcher.status.diving_local_only>
+  <barowardrobeswitcher.status.diving_session_only>Diving settings are saved for this session / round only.</barowardrobeswitcher.status.diving_session_only>
+  <barowardrobeswitcher.status.diving_saved>Diving appearance settings saved. Equipment is unchanged.</barowardrobeswitcher.status.diving_saved>
+  <barowardrobeswitcher.status.resync_requested>Resynchronization and appearance retry requested.</barowardrobeswitcher.status.resync_requested>
+  <barowardrobeswitcher.status.operation_timeout>Server response timed out. Resynchronize to check the result before retrying.</barowardrobeswitcher.status.operation_timeout>
+  <barowardrobeswitcher.status.server_rejected>Server rejected the operation: </barowardrobeswitcher.status.server_rejected>
+  <barowardrobeswitcher.status.action_failed>Wardrobe action failed; see WardrobeClient.log.</barowardrobeswitcher.status.action_failed>
+  <barowardrobeswitcher.error.unsupported_capability>server does not support this feature</barowardrobeswitcher.error.unsupported_capability>
+  <barowardrobeswitcher.error.invalid_diving_mode>invalid diving mode</barowardrobeswitcher.error.invalid_diving_mode>
+  <barowardrobeswitcher.error.invalid_diving_save>invalid diving save request</barowardrobeswitcher.error.invalid_diving_save>
+  <barowardrobeswitcher.error.invalid_target>target is unavailable or not permitted</barowardrobeswitcher.error.invalid_target>
+  <barowardrobeswitcher.error.target_in_use>another player controls this target’s wardrobe</barowardrobeswitcher.error.target_in_use>
+  <barowardrobeswitcher.error.target_not_permitted>target is not a friendly unowned human bot</barowardrobeswitcher.error.target_not_permitted>
+  <barowardrobeswitcher.error.target_unavailable>target is unavailable</barowardrobeswitcher.error.target_unavailable>
+  <barowardrobeswitcher.error.character_unavailable>character is not ready or is no longer alive</barowardrobeswitcher.error.character_unavailable>
+  <barowardrobeswitcher.error.stale_revision>state changed; resynchronize before retrying</barowardrobeswitcher.error.stale_revision>
+  <barowardrobeswitcher.error.operation_limit_reached>transport session renewed; retry after synchronization</barowardrobeswitcher.error.operation_limit_reached>
+  <barowardrobeswitcher.error.revision_exhausted>revision limit reached</barowardrobeswitcher.error.revision_exhausted>
+  <Wardrobe_x0028_衣櫃_x0029__x0028_衣柜_x0029_.DetailedLogging.DisplayName>Detailed diagnostic logging</Wardrobe_x0028_衣櫃_x0029__x0028_衣柜_x0029_.DetailedLogging.DisplayName>
+  <Wardrobe_x0028_衣櫃_x0029__x0028_衣柜_x0029_.DetailedLogging.DisplayCategory>Wardrobe</Wardrobe_x0028_衣櫃_x0029__x0028_衣柜_x0029_.DetailedLogging.DisplayCategory>
+  <Wardrobe_x0028_衣櫃_x0029__x0028_衣柜_x0029_.DetailedLogging.Tooltip>Record routine diagnostics. Errors and manual diagnostic dumps are always retained.</Wardrobe_x0028_衣櫃_x0029__x0028_衣柜_x0029_.DetailedLogging.Tooltip>
+  <barowardrobeswitcher.error.invalid_request>invalid wardrobe request; open diagnostics for details</barowardrobeswitcher.error.invalid_request>
+  <barowardrobeswitcher.error.unknown_item>appearance item is not installed on this server</barowardrobeswitcher.error.unknown_item>
+  <barowardrobeswitcher.error.item_not_wearable_in_slot>item is not wearable in the requested slot</barowardrobeswitcher.error.item_not_wearable_in_slot>
+  <barowardrobeswitcher.error.look_unavailable>the saved look is unavailable</barowardrobeswitcher.error.look_unavailable>
+  <barowardrobeswitcher.error.persistence_failed>the server could not save the wardrobe data</barowardrobeswitcher.error.persistence_failed>
 </infotexts>
