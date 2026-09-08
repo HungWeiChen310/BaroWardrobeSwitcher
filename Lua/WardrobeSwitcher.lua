@@ -20,7 +20,10 @@ local NET_V2_COMMAND = NET.V2_COMMAND
 local NET_V2_TARGET_COMMAND = NET.V2_TARGET_COMMAND
 local NET_V2_STATE = NET.V2_STATE
 local NET_V2_ACK = NET.V2_ACK
+local NET_V2_DIVING_COMMAND = NET.V2_DIVING_COMMAND
+local NET_V2_DIVING_STATE = NET.V2_DIVING_PROFILE_STATE
 local COMMAND_SAVE = Core.COMMAND.Save
+local COMMAND_SAVE_KEEP = Core.COMMAND.SaveKeep
 local COMMAND_APPLY = Core.COMMAND.Apply
 local COMMAND_CLEAR = Core.COMMAND.Clear
 local COMMAND_FORGET = Core.COMMAND.Forget
@@ -33,6 +36,8 @@ local CAPABILITY_ATTACHMENT_VISIBILITY = Core.CAPABILITY.AttachmentVisibility
 local CAPABILITY_MOVEMENT_ANIMATION_SOURCE = Core.CAPABILITY.MovementAnimationSource
 local CAPABILITY_CREW_TARGETING = Core.CAPABILITY.CrewTargeting
 local CAPABILITY_FOOTSTEP_SOUND_SOURCE = Core.CAPABILITY.FootstepSoundSource
+local CAPABILITY_CREW_DIVING_PROFILES = Core.CAPABILITY.CrewDivingProfiles
+local CAPABILITY_SAVE_WITHOUT_UNEQUIP = Core.CAPABILITY.SaveWithoutUnequip
 
 if SERVER then return end
 
@@ -94,7 +99,9 @@ local statusKeys = {
     ["Empty"] = "status.empty",
     ["Already handled"] = "status.already_handled",
     ["Saved; server removal requested"] = "status.server_removal_requested",
+    ["Saved; server keep requested"] = "status.server_keep_requested",
     ["Saved and removed"] = "status.saved_removed",
+    ["Saved; kept equipped"] = "status.saved_kept_equipped",
     ["Synced from server"] = "status.synced_server",
     ["Saved look applied from multiplayer sync."] = "status.saved_applied_sync",
     ["Saved look auto-applied."] = "status.auto_applied",
@@ -130,7 +137,7 @@ local slots = {
     { key = "InnerClothes", label = "Inner", labelKey = "slot.inner", slot = InvSlotType.InnerClothes },
     { key = "OuterClothes", label = "Outer", labelKey = "slot.outer", slot = InvSlotType.OuterClothes },
     { key = "Bag", label = "Bag", labelKey = "slot.bag", slot = InvSlotType.Bag },
-    { key = "HealthInterface", label = "Health", labelKey = "slot.health", slot = InvSlotType.HealthInterface }
+    { key = "HealthInterface", label = "Health", labelKey = "slot.health", slot = InvSlotType.HealthInterface, optional = true }
 }
 
 local visualCarrierPriority = {
@@ -166,7 +173,8 @@ local attachmentPanelOpen = false
 local advancedPanelOpen = false
 local tutorialExpanded = true
 local selectedSinglePlayerCharacterKey = nil
-local sessionActiveCharacterId = nil
+local sessionActiveCharacterIds = {}
+local authoritativeServerRevision = 0
 local multiplayerOwnerCharacterId = nil
 local useFashionMovementAnimations = true
 local useFashionFootstepSounds = false
@@ -182,6 +190,7 @@ Helpers.DIVING_MODE_CUSTOM = 2
 Helpers.divingProfilesByKey = {}
 Helpers.divingRuntimeByCharacterKey = {}
 Helpers.divingTrackedCharacters = {}
+Helpers.pendingDivingProfilesByCharacterId = {}
 Helpers.nextDivingPollTick = 0
 Helpers.equipmentDirty = {}
 Helpers.equipmentSignatures = {}
@@ -202,6 +211,19 @@ Helpers.panelControlIndex = 0
 Helpers.panelScroll = {}
 Helpers.panelStructure = nil
 Helpers.nextPanelPollTick = 0
+
+function Helpers.overrideGeneSplicerAppearanceEnabled()
+    local bridge = Helpers.ensureVisualOverride and Helpers.ensureVisualOverride() or nil
+    if bridge == nil then return false end
+    local ok, enabled = pcall(function() return bridge.GetOverrideGeneSplicerAppearance() end)
+    return ok and enabled == true
+end
+
+function Helpers.shouldCaptureWardrobeSlot(entry)
+    return entry ~= nil and
+        (entry.optional ~= true or Helpers.overrideGeneSplicerAppearanceEnabled())
+end
+
 local cachedPanelKeyName = "F8"
 local cachedPanelKey = Keys.F8
 local panelKeyNextRefreshTick = 0
@@ -390,6 +412,11 @@ local function serverSupportsFootstepSoundSource()
         math.floor((tonumber(serverCapabilities) or 0) / CAPABILITY_FOOTSTEP_SOUND_SOURCE) % 2 == 1
 end
 
+local function serverSupportsSaveWithoutUnequip()
+    return protocolMode == "v3" and
+        math.floor((tonumber(serverCapabilities) or 0) / CAPABILITY_SAVE_WITHOUT_UNEQUIP) % 2 == 1
+end
+
 local function lookDataHasSavedLook(lookData, captured)
     if captured == true then return true end
     lookData = lookData or {}
@@ -544,6 +571,9 @@ local function applyCharacterState(state)
         active = state ~= nil and state.active == true,
         autoApply = state ~= nil and state.autoApply == true
     })
+    if protocolMode == "v3" then
+        dispatchReducer({ type = "RevisionObserved", revision = authoritativeServerRevision })
+    end
 end
 
 local function saveCharacterState(character)
@@ -828,9 +858,18 @@ local function serverSupportsCrewTargeting()
         math.floor((tonumber(serverCapabilities) or 0) / CAPABILITY_CREW_TARGETING) % 2 == 1
 end
 
+local function serverSupportsCrewDivingProfiles()
+    return protocolMode == "v3" and
+        math.floor((tonumber(serverCapabilities) or 0) /
+            CAPABILITY_CREW_DIVING_PROFILES) % 2 == 1
+end
+
 function Helpers.shouldPreserveSinglePlayerCrewRender(character)
-    return Helpers.singlePlayerCharacterEligible(character) and
-        Helpers.userDataMember(character, "Removed") ~= true
+    if Helpers.userDataMember(character, "Removed") == true then return false end
+    if isSinglePlayerClient() then return Helpers.singlePlayerCharacterEligible(character) end
+    return Helpers.isMultiplayerClient() and serverSupportsCrewTargeting() and
+        Helpers.userDataMember(character, "IsHuman") == true and
+        Helpers.userDataMember(character, "IsOnPlayerTeam") == true
 end
 
 function Helpers.profileIdentifierPart(value)
@@ -1076,9 +1115,11 @@ function Helpers.restorePersistentClientLookLine(line, source)
     local restoredColors = {}
     local seen = {}
     local validSlots = {}
+    local managedSlots = {}
     local colorFields = {}
     for _, entry in ipairs(slots) do
         validSlots[entry.key] = true
+        managedSlots[entry.key] = true
         colorFields[entry.key .. "Color"] = entry.key
     end
 
@@ -1133,7 +1174,7 @@ function Helpers.restorePersistentClientLookLine(line, source)
                 Helpers.debugLog("Rejected persistent client look with invalid " .. tostring(name) .. ".")
                 return false
             end
-            restoredColors[colorFields[name]] = color
+            if managedSlots[colorFields[name]] then restoredColors[colorFields[name]] = color end
         elseif validSlots[name] then
             local identifier, displayName = tostring(value):match("^([^,]+),(.*)$")
             identifier = identifier ~= nil and Helpers.unescapePersistentValue(identifier) or nil
@@ -1141,12 +1182,14 @@ function Helpers.restorePersistentClientLookLine(line, source)
                 Helpers.debugLog("Rejected persistent client look with malformed slot " .. tostring(name) .. ".")
                 return false
             end
-            restoredLook[name] = {
-                identifier = identifier,
-                itemId = 0,
-                name = Helpers.unescapePersistentValue(displayName or ""),
-                slot = name
-            }
+            if managedSlots[name] then
+                restoredLook[name] = {
+                    identifier = identifier,
+                    itemId = 0,
+                    name = Helpers.unescapePersistentValue(displayName or ""),
+                    slot = name
+                }
+            end
         else
             Helpers.debugLog("Rejected persistent client look with unknown field " .. tostring(name) .. ".")
             return false
@@ -1259,11 +1302,11 @@ persistClientLook = function(domainLook, viewModel)
         return false, "no saved client look is available to persist"
     end
 
+    local profileCharacter = controlled()
+    if viewModel ~= nil and viewModel.characterKey == nil and lastCharacter ~= nil then
+        profileCharacter = lastCharacter
+    end
     if isSinglePlayerClient() then
-        local profileCharacter = controlled()
-        if viewModel ~= nil and viewModel.characterKey == nil and lastCharacter ~= nil then
-            profileCharacter = lastCharacter
-        end
         return Helpers.saveSinglePlayerProfile(
             profileCharacter,
             lookData,
@@ -1274,6 +1317,11 @@ persistClientLook = function(domainLook, viewModel)
             movementAnimationSource,
             footstepSoundSource
         )
+    end
+
+    if Helpers.isMultiplayerClient() and
+        profileCharacter ~= Helpers.actualControlledCharacter() then
+        return true
     end
 
     local encoded = Helpers.encodePersistentClientLook(
@@ -1308,6 +1356,10 @@ end
 clearPersistentClientLook = function()
     if isSinglePlayerClient() then
         return Helpers.deleteSinglePlayerProfile(controlled())
+    end
+    if Helpers.isMultiplayerClient() and
+        controlled() ~= Helpers.actualControlledCharacter() then
+        return true
     end
     local persistence = ensureWardrobePersistence()
     if persistence == nil then
@@ -1679,6 +1731,37 @@ function Helpers.divingProfile(character)
 end
 
 function Helpers.persistDivingProfile(character, profile)
+    local targetId = Helpers.multiplayerCrewTargetId(character)
+    if targetId ~= nil then
+        if not serverSupportsCrewDivingProfiles() or Networking == nil then
+            return false, "server does not support persistent crew diving profiles"
+        end
+        local look = nil
+        if profile.captured == true then
+            local reason
+            look, reason = Core.fromLegacyLook(
+                profile.look,
+                true,
+                false,
+                Core.attachmentVisibilityFromLegacy(false),
+                false,
+                false
+            )
+            if look == nil then return false, reason end
+        end
+        local ok, reason = pcall(function()
+            local message = Networking.Start(NET_V2_DIVING_COMMAND)
+            local written, writeReason = Core.writeDivingProfile(message, {
+                characterId = targetId,
+                mode = tonumber(profile.mode) or Helpers.DIVING_MODE_NONE,
+                captured = profile.captured == true,
+                look = look
+            })
+            if not written then error(writeReason) end
+            Networking.Send(message)
+        end)
+        return ok == true, ok and nil or tostring(reason)
+    end
     local key, persistable = Helpers.divingProfileStorageKey(character)
     if not persistable then return true end
     local persistence = ensureWardrobePersistence()
@@ -1695,6 +1778,45 @@ function Helpers.persistDivingProfile(character, profile)
     if ok and saved == true then return true end
     return false, ok and
         persistenceFailureReason("C# SaveDivingProfile returned false") or tostring(saved)
+end
+
+function Helpers.applyServerDivingProfile(profile)
+    if type(profile) ~= "table" then return false end
+    local characterId = tonumber(profile.characterId) or 0
+    local character = Helpers.findEntityById(characterId)
+    if character == nil then
+        local pending = Helpers.pendingDivingProfilesByCharacterId[characterId]
+        if pending == nil then
+            local count = 0
+            for _ in pairs(Helpers.pendingDivingProfilesByCharacterId) do count = count + 1 end
+            if count >= 256 then return false end
+        end
+        profile.receivedTick = pending ~= nil and pending.receivedTick or globalTick
+        Helpers.pendingDivingProfilesByCharacterId[characterId] = profile
+        return false
+    end
+    local look = {}
+    if profile.captured == true then
+        local reason
+        look, reason = Core.toLegacyLook(profile.look)
+        if look == nil then
+            Helpers.debugLog("Ignored invalid crew diving look: " .. tostring(reason))
+            return false
+        end
+    end
+    local key = Helpers.divingProfileStorageKey(character)
+    if key == nil then return false end
+    Helpers.trackDivingCharacter(character)
+    Helpers.divingProfilesByKey[key] = {
+        mode = tonumber(profile.mode) or Helpers.DIVING_MODE_NONE,
+        captured = profile.captured == true,
+        look = look,
+        loaded = true
+    }
+    Helpers.pendingDivingProfilesByCharacterId[characterId] = nil
+    Helpers.refreshDivingAppearance(character, true)
+    windowNeedsRefresh = true
+    return true
 end
 
 function Helpers.visualOverrideState()
@@ -1852,9 +1974,18 @@ function Helpers.itemIdentifier(item)
     return tostring(item.Prefab.Identifier)
 end
 
-function Helpers.isIgnoredWardrobeItem(item)
-    local identifier = Helpers.itemIdentifier(item)
-    return identifier == "genesplicer" or identifier == "advancedgenesplicer"
+function Helpers.sameRuntimeItem(left, right)
+    if left == nil or right == nil then return false end
+    if left == right then return true end
+    local leftId = tonumber(Helpers.itemEntityId(left)) or 0
+    local rightId = tonumber(Helpers.itemEntityId(right)) or 0
+    return leftId > 0 and leftId == rightId
+end
+
+function Helpers.isIgnoredWardrobeItem(character, item)
+    if character == nil or item == nil then return false end
+    return not Helpers.overrideGeneSplicerAppearanceEnabled() and
+        Helpers.sameRuntimeItem(item, getSlotItem(character, InvSlotType.HealthInterface))
 end
 
 function Helpers.hasHighPressureAffliction(character)
@@ -1959,21 +2090,11 @@ function Helpers.stateHasSavedLook(state)
 end
 
 function Helpers.deactivateCachedCharacterStates(character, preserveAutoApply)
-    if isSinglePlayerClient() then
-        local key = characterStateKey(character)
-        local state = key ~= nil and characterStates[key] or nil
-        if state ~= nil then
-            state.active = false
-            if preserveAutoApply ~= true then state.autoApply = false end
-            state.lastEquipmentSignature = nil
-        end
-        return
-    end
-    for _, state in pairs(characterStates) do
+    local key = characterStateKey(character)
+    local state = key ~= nil and characterStates[key] or nil
+    if state ~= nil then
         state.active = false
-        if preserveAutoApply ~= true then
-            state.autoApply = false
-        end
+        if preserveAutoApply ~= true then state.autoApply = false end
         state.lastEquipmentSignature = nil
     end
 end
@@ -2157,8 +2278,8 @@ end
 function Helpers.managedWearableSlotsAreEmpty(character)
     if character == nil then return false end
     for _, entry in ipairs(slots) do
-        local item = getSlotItem(character, entry.slot)
-        if item ~= nil and not Helpers.isIgnoredWardrobeItem(item) then
+        local item = Helpers.shouldCaptureWardrobeSlot(entry) and getSlotItem(character, entry.slot) or nil
+        if item ~= nil and not Helpers.isIgnoredWardrobeItem(character, item) then
             return false
         end
     end
@@ -2297,7 +2418,11 @@ function Helpers.snapshot(character)
     local data = {}
     for _, entry in ipairs(slots) do
         local item = getSlotItem(character, entry.slot)
-        data[entry.key] = Helpers.isIgnoredWardrobeItem(item) and nil or item
+        if not Helpers.shouldCaptureWardrobeSlot(entry) or Helpers.isIgnoredWardrobeItem(character, item) then
+            data[entry.key] = nil
+        else
+            data[entry.key] = item
+        end
     end
     return data
 end
@@ -2410,7 +2535,9 @@ function Helpers.setFashionSlotMask(character, lookData, diving)
     local emptySlots = {}
     lookData = lookData or currentLegacyLook()
     for _, entry in ipairs(slots) do
-        if lookData[entry.key] ~= nil then
+        if entry.optional == true and lookData[entry.key] == nil then
+            -- An omitted optional slot is outside this saved look.
+        elseif lookData[entry.key] ~= nil then
             savedSlots[#savedSlots + 1] = entry.key
         else
             emptySlots[#emptySlots + 1] = entry.key
@@ -2507,6 +2634,62 @@ function Helpers.setFashionFootstepSoundsVisual(character, enabled, diving)
     return result == true
 end
 
+function Helpers.huskVisualsHidden()
+    local bridge = Helpers.ensureVisualOverride()
+    if bridge == nil then return false end
+    local ok, hidden = pcall(function() return bridge.GetHideHuskVisuals() end)
+    return ok and hidden == true
+end
+
+function Helpers.setHuskVisualsHidden(hidden)
+    local bridge = Helpers.ensureVisualOverride()
+    if bridge == nil then return false end
+    local ok, result = pcall(function()
+        return bridge.SetHideHuskVisuals(hidden == true)
+    end)
+    if not ok then
+        Helpers.log("Husk-appearance update failed: " .. tostring(result) ..
+            ". Reload the mod so LuaCs recompiles the C# plugin.")
+        return false
+    end
+    return result == true
+end
+
+function Helpers.unequipOnSaveEnabled()
+    local bridge = Helpers.ensureVisualOverride()
+    if bridge == nil then return true end
+    local ok, enabled = pcall(function() return bridge.GetUnequipOnSave() end)
+    return not ok or enabled == true
+end
+
+function Helpers.setUnequipOnSaveEnabled(enabled)
+    local bridge = Helpers.ensureVisualOverride()
+    if bridge == nil then return false end
+    local ok, result = pcall(function()
+        return bridge.SetUnequipOnSave(enabled == true)
+    end)
+    if not ok then
+        Helpers.log("Unequip-on-save update failed: " .. tostring(result) ..
+            ". Reload the mod so LuaCs recompiles the C# plugin.")
+        return false
+    end
+    return result == true
+end
+
+function Helpers.setOverrideGeneSplicerAppearanceEnabled(enabled)
+    local bridge = Helpers.ensureVisualOverride()
+    if bridge == nil then return false end
+    local ok, result = pcall(function()
+        return bridge.SetOverrideGeneSplicerAppearance(enabled == true)
+    end)
+    if not ok then
+        Helpers.log("Gene-splicer appearance update failed: " .. tostring(result) ..
+            ". Reload the mod so LuaCs recompiles the C# plugin.")
+        return false
+    end
+    return result == true
+end
+
 function Helpers.applyVisualOverrideToItem(character, item, carrier, diving)
     if Helpers.ensureVisualOverride() == nil or character == nil or item == nil then return false end
     local ok, result = pcall(function()
@@ -2533,9 +2716,10 @@ end
 
 function Helpers.visualSnapshot(character)
     local data = {}
+    local current = Helpers.snapshot(character)
     for _, entry in ipairs(slots) do
-        local item = getSlotItem(character, entry.slot)
-        if item ~= nil and not Helpers.isIgnoredWardrobeItem(item) then
+        local item = current[entry.key]
+        if item ~= nil then
             data[entry.key] = {
                 identifier = Helpers.itemIdentifier(item),
                 itemId = Helpers.itemEntityId(item),
@@ -2674,7 +2858,8 @@ function Helpers.writeAndSendV2Command(command, baseRevision)
                 kind = command.kind,
                 look = command.look,
                 targetCharacterId = command.targetCharacterId,
-                divingMode = command.divingMode
+                divingMode = command.divingMode,
+                includeHealthInterface = command.includeHealthInterface
             })
             if not written then error(writeReason) end
         else
@@ -2744,7 +2929,19 @@ function Helpers.sendNextProtocolCommand()
 
     if protocolMode ~= "v3" or inFlightV2Command ~= nil then return false end
     local command = protocolCommandQueue[1]
-    local baseRevision = reducerState ~= nil and tonumber(reducerState.revision) or 0
+    if command.kind == COMMAND_SAVE_KEEP and not serverSupportsSaveWithoutUnequip() then
+        table.remove(protocolCommandQueue, 1)
+        if command.reducerOwned == true then
+            dispatchReducer({
+                type = "CommandSendFailed",
+                operationId = command.operationId,
+                reason = "server does not support saving without unequipping"
+            })
+        end
+        Helpers.sendNextProtocolCommand()
+        return false
+    end
+    local baseRevision = authoritativeServerRevision
     if not Helpers.writeAndSendV2Command(command, baseRevision) then return false end
 
     command.baseRevision = baseRevision
@@ -2787,7 +2984,7 @@ function Helpers.sendV2Hello(forceSnapshot)
     if not probing and not requestingSnapshot then return false end
     local ok, reason = pcall(function()
         local message = Networking.Start(NET_V2_HELLO)
-        local written, writeReason = Core.writeClientHello(message, clientSessionId, 0x1F)
+        local written, writeReason = Core.writeClientHello(message, clientSessionId, 0x7F)
         if not written then error(writeReason) end
         Networking.Send(message)
     end)
@@ -2807,7 +3004,8 @@ function Helpers.selectV1Protocol(reason)
     protocolMode = "v1"
     serverCapabilities = 0
     selectedSinglePlayerCharacterKey = nil
-    sessionActiveCharacterId = nil
+    sessionActiveCharacterIds = {}
+    authoritativeServerRevision = 0
     visibilitySyncPendingNegotiation = false
     movementAnimationSyncPendingNegotiation = false
     footstepSoundSyncPendingNegotiation = false
@@ -2821,6 +3019,7 @@ function Helpers.selectV2Protocol(revision, capabilities)
     serverCapabilities = tonumber(capabilities) or 0
     if not serverSupportsCrewTargeting() then selectedSinglePlayerCharacterKey = nil end
     local serverRevision = tonumber(revision) or 0
+    authoritativeServerRevision = math.max(authoritativeServerRevision, serverRevision)
     dispatchReducer({ type = "RevisionObserved", revision = serverRevision })
     Helpers.debugLog("Negotiated wardrobe protocol " .. tostring(Core.PROTOCOL_VERSION) ..
         " at revision " .. tostring(serverRevision) ..
@@ -2888,6 +3087,11 @@ end
 -- introduced into the state machine twice.
 function Helpers.queueProtocolCommand(kind, lookData, captured, operationId, reducerOwned, domainLookOverride, targetCharacterId)
     if not Helpers.isMultiplayerClient() or Networking == nil then return false end
+    if kind == COMMAND_SAVE_KEEP and protocolMode ~= "probing" and
+        not serverSupportsSaveWithoutUnequip() then
+        Helpers.debugLog("The server does not support saving without unequipping.")
+        return false
+    end
     local domainLook = nil
     if kind == COMMAND_VISIBILITY or kind == COMMAND_ANIMATION or kind == COMMAND_FOOTSTEP then
         local supported = kind == COMMAND_VISIBILITY and serverSupportsAttachmentVisibility() or
@@ -2902,7 +3106,7 @@ function Helpers.queueProtocolCommand(kind, lookData, captured, operationId, red
             Helpers.debugLog("Refused to queue an invalid visual preference.")
             return false
         end
-    elseif kind == COMMAND_SAVE or kind == COMMAND_APPLY then
+    elseif kind == COMMAND_SAVE or kind == COMMAND_SAVE_KEEP or kind == COMMAND_APPLY then
         local visibility = currentAttachmentVisibility()
         domainLook = domainLookOverride ~= nil and Core.copyLook(domainLookOverride) or
             domainLookFromLegacy(
@@ -3308,7 +3512,7 @@ function Helpers.currentDivingSuitLook(character)
     local look = {}
     local found = false
     for _, entry in ipairs(slots) do
-        local item = getSlotItem(character, entry.slot)
+        local item = entry.optional ~= true and getSlotItem(character, entry.slot) or nil
         if Helpers.isDivingSuitItem(item) then
             found = true
             look[entry.key] = {
@@ -3405,6 +3609,7 @@ function Helpers.forgetOwnedCharacter(key, character)
     pcall(function() VisualOverride.ClearCharacterAppearances(character) end)
     local id = Helpers.characterEntityId(character)
     Helpers.networkDivingById[id], Helpers.pendingDivingStates[id] = nil, nil
+    Helpers.pendingDivingProfilesByCharacterId[id], sessionActiveCharacterIds[id] = nil, nil
     pendingNetworkAppliesByCharacterId[id], pendingNetworkClearsByCharacterId[id] = nil, nil
     Helpers.divingTrackedCharacters[key], Helpers.divingRuntimeByCharacterKey[key] = nil, nil
     Helpers.equipmentDirty[key], Helpers.equipmentSignatures[key], Helpers.equipmentRefreshTicks[key] = nil, nil, nil
@@ -3459,6 +3664,7 @@ function Helpers.queueDivingCommand(character, kind, profile)
     local targetId = character ~= Helpers.actualControlledCharacter() and Helpers.characterEntityId(character) or nil
     protocolCommandQueue[#protocolCommandQueue + 1] = {
         kind = kind, look = look, divingMode = profile.mode, targetCharacterId = targetId,
+        includeHealthInterface = Helpers.overrideGeneSplicerAppearanceEnabled(),
         divingCharacterId = Helpers.characterEntityId(character), operationId = nextOperationId(),
         queuedAt = protocolClock(), unsentAttempts = 0, lastUnsentAttemptAt = 0
     }
@@ -3613,6 +3819,11 @@ function Helpers.resynchronize()
 end
 
 function Helpers.processDivingTransport()
+    for id, profile in pairs(Helpers.pendingDivingProfilesByCharacterId) do
+        if globalTick - profile.receivedTick > PendingNetworkMessageMaxTicks then
+            Helpers.pendingDivingProfilesByCharacterId[id] = nil
+        end
+    end
     if Helpers.transportNeedsRotation and not Helpers.operationBusy() then Helpers.rotateTransportSession() end
     for characterId, state in pairs(Helpers.pendingDivingStates) do
         if globalTick - state.receivedTick > PendingNetworkMessageMaxTicks then Helpers.pendingDivingStates[characterId] = nil
@@ -3777,6 +3988,7 @@ clientEffectAdapters.Unequip = function()
     local results = {}
     local failedItems = {}
     local removedItems = 0
+    local shouldUnequip = Helpers.unequipOnSaveEnabled()
     local processedItems = {}
     local function restoreStartingEquipment()
         local restoredItems = {}
@@ -3802,6 +4014,9 @@ clientEffectAdapters.Unequip = function()
             results[entry.key] = "Empty"
         elseif processedItems[item] then
             results[entry.key] = "Already handled"
+        elseif not shouldUnequip then
+            processedItems[item] = true
+            results[entry.key] = "Saved; kept equipped"
         else
             processedItems[item] = true
             local removed = unequipItem(context.character, item)
@@ -3849,6 +4064,9 @@ clientEffectAdapters.Unequip = function()
     local message
     if context.startingItemCount == 0 then
         message = "Saved current outfit: empty outfit captured."
+    elseif not shouldUnequip then
+        message = "Saved current outfit: " .. tostring(context.capturedSprites) ..
+            " wearable sprites captured; equipment kept."
     else
         message = "Saved current outfit: " .. tostring(context.capturedSprites) ..
             " wearable sprites captured, " .. tostring(removedItems) ..
@@ -3865,8 +4083,10 @@ clientEffectAdapters.SendCommand = function(currentEffect)
     local targetCharacter = currentEffect.kind == COMMAND_SAVE and pendingSaveContext ~= nil and
         pendingSaveContext.character or controlled()
     local targetCharacterId = Helpers.multiplayerCrewTargetId(targetCharacter)
+    local commandKind = currentEffect.kind == COMMAND_SAVE and
+        not Helpers.unequipOnSaveEnabled() and COMMAND_SAVE_KEEP or currentEffect.kind
     local queued, awaitAck = Helpers.queueProtocolCommand(
-        currentEffect.kind,
+        commandKind,
         lookData,
         captured,
         currentEffect.operationId,
@@ -3882,13 +4102,17 @@ clientEffectAdapters.SendCommand = function(currentEffect)
         local context = pendingSaveContext
         local results = {}
         for _, entry in ipairs(slots) do
-            results[entry.key] = context.lookData[entry.key] ~= nil and "Saved; server removal requested" or "Empty"
+            results[entry.key] = context.lookData[entry.key] ~= nil and
+                (commandKind == COMMAND_SAVE_KEEP and "Saved; server keep requested" or
+                    "Saved; server removal requested") or "Empty"
         end
         slotResults = results
         lastCharacter = context.character
         lastEquipmentSignature = nil
         lastServerAutoApplySignature = nil
-        Helpers.log("Saved current outfit; server-side removal requested for multiplayer.")
+        Helpers.log(commandKind == COMMAND_SAVE_KEEP and
+            "Saved current outfit; server was asked to keep equipment worn." or
+            "Saved current outfit; server-side removal requested for multiplayer.")
         pendingSaveContext = nil
     end
     return {
@@ -3999,12 +4223,8 @@ clientEffectAdapters.ClearRender = function(currentEffect)
     pendingRoundStartHideHair = false
     pendingRoundStartProtocolLook = nil
     if currentEffect.forget == true then
-        if isSinglePlayerClient() then
-            local key = characterStateKey(character)
-            if key ~= nil then characterStates[key] = nil end
-        else
-            characterStates = {}
-        end
+        local key = characterStateKey(character)
+        if key ~= nil then characterStates[key] = nil end
         slotResults = {}
     end
     return {
@@ -4254,16 +4474,6 @@ end
 function Helpers.handleControlledCharacterChange(character)
     if character == nil then return end
     local nextCharacterKey = characterStateKey(character)
-    local actualCharacterKey = characterStateKey(Helpers.actualControlledCharacter())
-    if Helpers.isMultiplayerClient() and reducerCharacterKey ~= nil and
-        reducerCharacterKey == actualCharacterKey then
-        if character == lastCharacter then return end
-        lastCharacter = character
-        lastEquipmentSignature = nil
-        lastServerAutoApplySignature = nil
-        Helpers.pruneVisualOverrides()
-        return
-    end
     if character == lastCharacter and reducerCharacterKey == nextCharacterKey then return end
     local bootstrapState = nil
     if lastCharacter == nil and reducerHasUnboundLook and Core.hasLook(reducerState.look) then
@@ -4469,10 +4679,10 @@ end
 function Helpers.belongsToLocalWardrobeState(characterId)
     characterId = tonumber(characterId) or 0
     if characterId <= 0 then return false end
-    if characterId == Helpers.characterEntityId(Helpers.actualControlledCharacter()) then return true end
+    if characterId == Helpers.characterEntityId(controlled()) then return true end
     if inFlightV2Command ~= nil and
         tonumber(inFlightV2Command.targetCharacterId) == characterId then return true end
-    return tonumber(sessionActiveCharacterId) == characterId
+    return false
 end
 
 function Helpers.singlePlayerSelectableCharacters()
@@ -4963,14 +5173,14 @@ function Helpers.handleNetworkLookApply(
                 not applyDirectly() then
                 return retryAfterFailure()
             end
-            sessionActiveCharacterId = characterId
+            sessionActiveCharacterIds[characterId] = true
             Helpers.completeAcknowledgedApplyState(protocolRevision, characterId)
             return true
         end
         local acceptedState = reducerState
         if acceptedState ~= nil and acceptedState.phase == Core.PHASE.Active then
             Helpers.rememberNetworkLookApplied(character, networkLook, protocolLook)
-            sessionActiveCharacterId = characterId
+            sessionActiveCharacterIds[characterId] = true
             Helpers.completeAcknowledgedApplyState(protocolRevision, characterId)
             return true
         end
@@ -5073,6 +5283,7 @@ function Helpers.handleNetworkLookClear(characterId, protocolRevision, protocolL
     local function finishClear()
         local key = characterStateKey(character)
         if key ~= nil then lastAppliedNetworkLookSignatureByCharacterKey[key] = nil end
+        sessionActiveCharacterIds[tonumber(characterId)] = nil
         lastOperation = "Look cleared from multiplayer sync."
         return true
     end
@@ -5093,14 +5304,14 @@ function Helpers.handleNetworkLookClear(characterId, protocolRevision, protocolL
         if effectsContain(effects, "IgnoredDuplicateState") then
             local cleared = Helpers.tryClearVisualOverride(character)
             if not cleared then return retryAfterFailure() end
-            if tonumber(sessionActiveCharacterId) == tonumber(characterId) then sessionActiveCharacterId = nil end
+            sessionActiveCharacterIds[tonumber(characterId)] = nil
             return finishClear()
         end
         local acceptedState = reducerState
         if acceptedState ~= nil and acceptedState.phase == Core.PHASE.Faulted then
             return retryAfterFailure()
         end
-        if tonumber(sessionActiveCharacterId) == tonumber(characterId) then sessionActiveCharacterId = nil end
+        sessionActiveCharacterIds[tonumber(characterId)] = nil
         return finishClear()
     end
     if protocolRevision == nil and character == controlled() then
@@ -5196,6 +5407,10 @@ if Networking ~= nil then
                 return
             end
             if protocolMode ~= "v3" then Helpers.selectV2Protocol(0) end
+            authoritativeServerRevision = math.max(
+                authoritativeServerRevision,
+                tonumber(ack.revision) or 0
+            )
 
             local matchingCommand = inFlightV2Command ~= nil and
                 inFlightV2Command.operationId == ack.operationId and inFlightV2Command or nil
@@ -5270,6 +5485,12 @@ if Networking ~= nil then
             local character = Helpers.findEntityById(characterId)
             local belongsToControlledCharacter =
                 character ~= nil and Helpers.belongsToLocalWardrobeState(characterId)
+            if belongsToControlledCharacter then
+                authoritativeServerRevision = math.max(
+                    authoritativeServerRevision,
+                    tonumber(state.revision) or 0
+                )
+            end
 
             -- A v2 server without the capability only understands the legacy
             -- boolean projection. Preserve this client's full four-layer policy
@@ -5333,6 +5554,17 @@ if Networking ~= nil then
             else
                 Helpers.handleNetworkLookClear(characterId, state.revision, state.look)
             end
+        end)
+
+        Networking.Receive(NET_V2_DIVING_STATE, function(message)
+            if Helpers.supportsDivingSync() then return end
+            local profile, reason = Core.tryReadDivingProfile(message)
+            if profile == nil then
+                Helpers.debugLog("Ignored malformed crew diving profile: " .. tostring(reason))
+                return
+            end
+            if protocolMode ~= "v3" then Helpers.selectV2Protocol(0) end
+            Helpers.applyServerDivingProfile(profile)
         end)
 end
 
@@ -5604,11 +5836,16 @@ function Helpers.clientViewModelSnapshot(character, overrideState)
         transferEnabled = transferToUnconfiguredCharacter == true,
         useFashionMovementAnimations = currentMovementAnimationSource(),
         useFashionFootstepSounds = currentFootstepSoundSource(),
+        hideHuskVisuals = Helpers.huskVisualsHidden(),
+        unequipOnSave = Helpers.unequipOnSaveEnabled(),
+        overrideGeneSplicerAppearance = Helpers.overrideGeneSplicerAppearanceEnabled(),
         divingMode = divingProfile.mode,
         divingOutfitCaptured = divingProfile.captured == true,
         divingSessionOnly = divingProfile.sessionOnly == true or
-            (Helpers.isMultiplayerClient() and character ~= Helpers.actualControlledCharacter()),
-        divingLocalOnly = Helpers.isMultiplayerClient() and not Helpers.supportsDivingSync(),
+            (Helpers.isMultiplayerClient() and character ~= Helpers.actualControlledCharacter() and
+                not serverSupportsCrewDivingProfiles()),
+        divingLocalOnly = Helpers.isMultiplayerClient() and not Helpers.supportsDivingSync() and
+            not (character ~= Helpers.actualControlledCharacter() and serverSupportsCrewDivingProfiles()),
         overrideLabel = tostring(overrideState.label),
         overrideDetails = overrideState.details
     }
@@ -5851,6 +6088,46 @@ buildWindow = function()
             true,
             overrideState.ready
         )
+        Helpers.addButton(
+            list,
+            view.hideHuskVisuals and
+                tr("button.hide_husk_yes") or
+                tr("button.hide_husk_no"),
+            function()
+                if not Helpers.setHuskVisualsHidden(not view.hideHuskVisuals) then
+                    Helpers.log("Husk appearance could not be updated.")
+                end
+            end,
+            true,
+            overrideState.ready
+        )
+        Helpers.addButton(
+            list,
+            view.unequipOnSave and
+                tr("button.unequip_on_save_yes") or
+                tr("button.unequip_on_save_no"),
+            function()
+                if not Helpers.setUnequipOnSaveEnabled(not view.unequipOnSave) then
+                    Helpers.log("Unequip-on-save setting could not be saved.")
+                end
+            end,
+            true,
+            overrideState.ready and not view.busy
+        )
+        Helpers.addButton(
+            list,
+            view.overrideGeneSplicerAppearance and
+                tr("button.override_gene_splicer_yes") or
+                tr("button.override_gene_splicer_no"),
+            function()
+                if not Helpers.setOverrideGeneSplicerAppearanceEnabled(
+                    not view.overrideGeneSplicerAppearance) then
+                    Helpers.log("Gene-splicer appearance setting could not be saved.")
+                end
+            end,
+            true,
+            overrideState.ready and not view.busy
+        )
         Helpers.addButton(list, view.diagnosticsVisible and tr("button.hide_diagnostics") or tr("button.diagnostics"), function()
             diagnosticsVisible = not diagnosticsVisible
         end)
@@ -5981,6 +6258,7 @@ end
 
 function Helpers.resetAppearanceRuntime()
     Helpers.lifecycleGeneration = Helpers.lifecycleGeneration + 1
+    Helpers.pendingDivingProfilesByCharacterId = {}
     Helpers.equipmentDirty, Helpers.equipmentSignatures, Helpers.equipmentRefreshTicks = {}, {}, {}
     Helpers.normalRetry = {}
     Helpers.networkDivingById, Helpers.pendingDivingStates, Helpers.divingRevisions = {}, {}, {}
@@ -6015,7 +6293,8 @@ function Helpers.resetSessionTransportState()
     remoteRevisionByCharacterId = {}
     protocolMode = "probing"
     serverCapabilities = 0
-    sessionActiveCharacterId = nil
+    sessionActiveCharacterIds = {}
+    authoritativeServerRevision = 0
     multiplayerOwnerCharacterId = nil
     visibilitySyncPendingNegotiation = false
     movementAnimationSyncPendingNegotiation = false
@@ -6036,6 +6315,7 @@ function Helpers.resetSavedLookForNewSession()
     Helpers.divingProfilesByKey = {}
     Helpers.divingRuntimeByCharacterKey = {}
     Helpers.divingTrackedCharacters = {}
+    Helpers.pendingDivingProfilesByCharacterId = {}
     Helpers.nextDivingPollTick = 0
     selectedSinglePlayerCharacterKey = nil
     lastCharacter = nil
@@ -6067,6 +6347,7 @@ function Helpers.rebindCurrentLookForReplacedSession()
     Helpers.clearAllVisualOverrides()
     Helpers.divingRuntimeByCharacterKey = {}
     Helpers.divingTrackedCharacters = {}
+    Helpers.pendingDivingProfilesByCharacterId = {}
     Helpers.nextDivingPollTick = 0
     lastCharacter = nil
     lastEquipmentSignature = nil
@@ -6267,6 +6548,7 @@ Hook.Add("character.created", "barowardrobeswitcher.profile-character-created", 
             pendingClear
         )
     end
+
     local pendingApply = pendingNetworkAppliesByCharacterId[characterId]
     if pendingApply ~= nil then
         Helpers.handleNetworkLookApply(
@@ -6278,6 +6560,8 @@ Hook.Add("character.created", "barowardrobeswitcher.profile-character-created", 
             pendingApply
         )
     end
+    local pendingDiving = Helpers.pendingDivingProfilesByCharacterId[characterId]
+    if pendingDiving ~= nil then Helpers.applyServerDivingProfile(pendingDiving) end
     if not isSinglePlayerClient() then return end
     local attempts = 0
     local generation = Helpers.lifecycleGeneration
@@ -6306,9 +6590,10 @@ Hook.Add("roundEnd", "barowardrobeswitcher.cleanup", function()
     local actualId = Helpers.characterEntityId(Helpers.actualControlledCharacter())
     local ownerId = actualId > 0 and actualId or
         tonumber(multiplayerOwnerCharacterId) or tonumber(reducerCharacterKey)
+    local selectedId = Helpers.characterEntityId(controlled())
     local crewTargetWasActive = Helpers.isMultiplayerClient() and
-        tonumber(sessionActiveCharacterId) ~= nil and tonumber(ownerId) ~= nil and
-        tonumber(sessionActiveCharacterId) ~= tonumber(ownerId)
+        selectedId > 0 and tonumber(ownerId) ~= nil and
+        selectedId ~= tonumber(ownerId) and sessionActiveCharacterIds[selectedId] == true
     local preservedForNextScene = false
     if crewTargetWasActive then
         dispatchReducer({ type = "Deactivate" })
@@ -6344,7 +6629,8 @@ Hook.Add("roundEnd", "barowardrobeswitcher.cleanup", function()
     attachmentPanelOpen = false
     advancedPanelOpen = false
     selectedSinglePlayerCharacterKey = nil
-    sessionActiveCharacterId = nil
+    sessionActiveCharacterIds = {}
+    authoritativeServerRevision = 0
     multiplayerOwnerCharacterId = nil
     Helpers.resetOverlay()
     slotResults = {}
@@ -6355,6 +6641,7 @@ Hook.Add("roundEnd", "barowardrobeswitcher.cleanup", function()
     Helpers.clearAllVisualOverrides()
     Helpers.divingRuntimeByCharacterKey = {}
     Helpers.divingTrackedCharacters = {}
+    Helpers.pendingDivingProfilesByCharacterId = {}
     Helpers.nextDivingPollTick = 0
     lastCharacter = nil
     if Helpers.isMultiplayerClient() then

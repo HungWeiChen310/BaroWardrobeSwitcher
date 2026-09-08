@@ -91,12 +91,14 @@ namespace BaroWardrobeSwitcher
             LuaCsLogger.Log($"[Baro Wardrobe Switcher] C# visual override v{VisualOverride.Version} initializing.");
             harmonyInstance = new Harmony("BaroWardrobeSwitcher.VisualOverride");
             VisualOverride.ResetPatchStatus();
-            if (ConfigService != null &&
+            ContentPackage package = null;
+            bool hasPackage = ConfigService != null &&
                 PluginService != null &&
-                PluginService.TryGetPackageForPlugin<WardrobeVisualOverridePlugin>(out ContentPackage package) &&
-                ConfigService.TryGetConfig(package, "PanelKey", out ISettingBase<string> setting))
+                PluginService.TryGetPackageForPlugin<WardrobeVisualOverridePlugin>(out package);
+            if (hasPackage &&
+                ConfigService.TryGetConfig(package, "PanelKey", out ISettingBase<string> panelKey))
             {
-                VisualOverride.SetPanelKeySetting(setting);
+                VisualOverride.SetPanelKeySetting(panelKey);
             }
             else
             {
@@ -107,6 +109,33 @@ namespace BaroWardrobeSwitcher
                 ConfigService.TryGetConfig(logPackage, "DetailedLogging", out ISettingBase<bool> logSetting))
             {
                 WardrobeFileLogger.DetailedLoggingSetting = logSetting;
+            }
+            if (hasPackage &&
+                ConfigService.TryGetConfig(package, "HideHuskVisuals", out ISettingBase<bool> hideHuskVisuals))
+            {
+                VisualOverride.SetHideHuskVisualsSetting(hideHuskVisuals, ConfigService);
+            }
+            else
+            {
+                LuaCsLogger.Log("[Baro Wardrobe Switcher] HideHuskVisuals setting unavailable; using false.");
+            }
+            if (hasPackage &&
+                ConfigService.TryGetConfig(package, "UnequipOnSave", out ISettingBase<bool> unequipOnSave))
+            {
+                VisualOverride.SetUnequipOnSaveSetting(unequipOnSave, ConfigService);
+            }
+            else
+            {
+                LuaCsLogger.Log("[Baro Wardrobe Switcher] UnequipOnSave setting unavailable; using true.");
+            }
+            if (hasPackage &&
+                ConfigService.TryGetConfig(package, "OverrideGeneSplicerAppearance", out ISettingBase<bool> overrideGeneSplicerAppearance))
+            {
+                VisualOverride.SetOverrideGeneSplicerAppearanceSetting(overrideGeneSplicerAppearance, ConfigService);
+            }
+            else
+            {
+                LuaCsLogger.Log("[Baro Wardrobe Switcher] OverrideGeneSplicerAppearance setting unavailable; using false.");
             }
         }
 
@@ -122,6 +151,9 @@ namespace BaroWardrobeSwitcher
         {
             VisualOverride.SetPanelKeySetting(null);
             WardrobeFileLogger.DetailedLoggingSetting = null;
+            VisualOverride.SetHideHuskVisualsSetting(null, null);
+            VisualOverride.SetUnequipOnSaveSetting(null, null);
+            VisualOverride.SetOverrideGeneSplicerAppearanceSetting(null, null);
             VisualOverride.ClearAll();
             harmonyInstance?.UnpatchSelf();
             LuaCsLogger.Log("[Baro Wardrobe Switcher] C# visual override disposed.");
@@ -130,7 +162,7 @@ namespace BaroWardrobeSwitcher
 
     public static partial class WardrobePersistence
     {
-        public const string Version = "0.5.19";
+        public const string Version = "0.5.22";
         private const int PersistenceVersion = 5;
         private const string ModFolderName = "BaroWardrobeSwitcher";
         private const string ClientLookFileName = "ClientLook.json";
@@ -1150,9 +1182,16 @@ namespace BaroWardrobeSwitcher
     public static class VisualOverride
     {
 
-        public const string Version = "0.5.19";
+        public const string Version = "0.5.22";
         private const string DefaultPanelKeyName = "F8";
         private static ISettingBase<string> panelKeySetting;
+        private static ISettingBase<bool> hideHuskVisualsSetting;
+        private static ISettingBase<bool> unequipOnSaveSetting;
+        private static ISettingBase<bool> overrideGeneSplicerAppearanceSetting;
+        private static IConfigService configService;
+        private static bool hideHuskVisualsFallback;
+        private static bool unequipOnSaveFallback = true;
+        private static bool overrideGeneSplicerAppearanceFallback;
 
         public static string GetVersion()
         {
@@ -1204,6 +1243,10 @@ namespace BaroWardrobeSwitcher
             AccessTools.Method(typeof(ItemComponent), "PlaySound", new[] { typeof(ActionType), typeof(Character) });
         private static readonly MethodInfo PlayImpactSoundMethod =
             AccessTools.Method(typeof(Ragdoll), "PlayImpactSound", new[] { typeof(Limb) });
+        private static readonly MethodInfo GetBodyTintMethod =
+            AccessTools.Method(typeof(Affliction), "GetBodyTint", Type.EmptyTypes);
+        private static readonly MethodInfo GetFaceTintMethod =
+            AccessTools.Method(typeof(Affliction), "GetFaceTint", Type.EmptyTypes);
         private static readonly FieldInfo AnimationsToTriggerField =
             AccessTools.Field(typeof(StatusEffect), "animationsToTrigger");
         private static readonly FieldInfo SoundsField =
@@ -1216,6 +1259,10 @@ namespace BaroWardrobeSwitcher
             AccessTools.Field(typeof(StatusEffect), "loopSound");
         private static readonly FieldInfo ItemSoundLoopField =
             AccessTools.Field("Barotrauma.Items.Components.ItemSound:Loop");
+        private static readonly FieldInfo HuskAppendageField =
+            AccessTools.Field(typeof(AfflictionHusk), "huskAppendage");
+        private static readonly FieldInfo HuskSpriteField =
+            AccessTools.Field(typeof(Limb), "<HuskSprite>k__BackingField");
         private static readonly PropertyInfo CharacterRemovedProperty = AccessTools.Property(typeof(Character), "Removed");
         private const float DrawDepthStep = 0.000001f;
         private const int DefaultFallbackDepthPadding = 8;
@@ -1225,6 +1272,30 @@ namespace BaroWardrobeSwitcher
         private const string Xds01EngineAfflictionIdentifier = "XDS01engine";
         private const string Xds01AppendageTexture = "Wf_New_XDS01_Engine_limb.png";
         private const int Xds01ExpectedAppendageLimbCount = 6;
+        private static readonly HashSet<Identifier> HuskAppearanceAfflictionIdentifiers = new HashSet<Identifier>
+        {
+            new Identifier("huskinfection"),
+            new Identifier("husksymbiosis")
+        };
+        private static readonly HashSet<Identifier> TouhouWingAfflictionIdentifiers = new HashSet<Identifier>
+        {
+            new Identifier("Piece_Wings_Spawn"),
+            new Identifier("Cirno_Wings_Spawn"),
+            new Identifier("Sunny_Wings_Spawn"),
+            new Identifier("Luna_Wings_Spawn"),
+            new Identifier("Star_Wings_Spawn"),
+            new Identifier("Flandre_Wings_Spawn"),
+            new Identifier("Remilia_Wings_Spawn"),
+            new Identifier("Lilywhite_Wings_Spawn"),
+            new Identifier("Lilywhite_Black_Wings_Spawn"),
+            new Identifier("Touhou_Dichromatic_Lotus_Butterfly_Wings_Spawn"),
+            new Identifier("Ema_Wings_Spawn"),
+            new Identifier("Normal_Yousei_Wings_Spawn"),
+            new Identifier("Normal_Yokai_Wings_Spawn"),
+            new Identifier("Shinki_Wings_Spawn"),
+            new Identifier("Koakuma_Wings_Spawn"),
+            new Identifier("Nue_Eclipse_Wings_Spawn")
+        };
         private static readonly WearableType[] FashionHideableAttachmentTypes =
         {
             WearableType.Hair,
@@ -1267,6 +1338,8 @@ namespace BaroWardrobeSwitcher
             PatchStates["StatusEffect.PlaySound"] = new PatchState(required: false);
             PatchStates["ItemComponent.PlaySound"] = new PatchState(required: false);
             PatchStates["Ragdoll.PlayImpactSound"] = new PatchState(required: false);
+            PatchStates["Affliction.GetBodyTint"] = new PatchState(required: false);
+            PatchStates["Affliction.GetFaceTint"] = new PatchState(required: false);
         }
 
         public static void InstallPatches(Harmony harmony)
@@ -1324,6 +1397,18 @@ namespace BaroWardrobeSwitcher
                 prefix: AccessTools.Method(typeof(RagdollPlayImpactSoundPatch), "Prefix"),
                 finalizer: AccessTools.Method(typeof(RagdollPlayImpactSoundPatch), "Finalizer"),
                 required: false);
+            PatchTarget(
+                harmony,
+                "Affliction.GetBodyTint",
+                GetBodyTintMethod,
+                postfix: AccessTools.Method(typeof(AfflictionBodyTintPatch), "Postfix"),
+                required: false);
+            PatchTarget(
+                harmony,
+                "Affliction.GetFaceTint",
+                GetFaceTintMethod,
+                postfix: AccessTools.Method(typeof(AfflictionFaceTintPatch), "Postfix"),
+                required: false);
             drawWearable = Bind<Action<Limb, WearableSprite, float, SpriteBatch, Color, float, SpriteEffects>>(DrawWearableMethod, "Limb.DrawWearable");
             loadTemporaryAnimation = Bind<Func<AnimController, StatusEffect.AnimLoadInfo, bool, bool>>(TryLoadTemporaryAnimationMethod, "AnimController.TryLoadTemporaryAnimation");
             playStatusSound = Bind<Action<StatusEffect, Entity, Hull, Vector2>>(PlaySoundMethod, "StatusEffect.PlaySound");
@@ -1376,6 +1461,13 @@ namespace BaroWardrobeSwitcher
                 case "footstep-sound":
                     return PatchApplied("Ragdoll.PlayImpactSound") &&
                            PlayImpactSoundMethod != null;
+                case "huskvisual":
+                case "husk-visual":
+                    return PatchApplied("Limb.Draw") &&
+                           PatchApplied("Affliction.GetBodyTint") &&
+                           PatchApplied("Affliction.GetFaceTint") &&
+                           HuskAppendageField != null &&
+                           HuskSpriteField != null;
                 default:
                     return false;
             }
@@ -1397,7 +1489,8 @@ namespace BaroWardrobeSwitcher
                                   ",animation=" + HasCapability("animation") +
                                   ",statusSound=" + HasCapability("statusSound") +
                                   ",itemSound=" + HasCapability("itemSound") +
-                                  ",footstepSound=" + HasCapability("footstepSound") + ")";
+                                  ",footstepSound=" + HasCapability("footstepSound") +
+                                  ",huskVisual=" + HasCapability("huskVisual") + ")";
 
             if (missingRequired.Count == 0)
             {
@@ -1487,6 +1580,7 @@ namespace BaroWardrobeSwitcher
                    ", empty=" + (session?.EmptyLook ?? false) +
                    ", forceHideAttachments=0x" + (session?.ForceHideAttachmentMask ?? 0).ToString("X2") +
                    ", forceShowAttachments=0x" + (session?.ForceShowAttachmentMask ?? 0).ToString("X2") +
+                   ", hideHuskVisuals=" + GetHideHuskVisuals() +
                    ", sprites=" + spriteCount +
                    ", animations=" + animationCount +
                    ", fashionFootsteps=" + (session?.UseFashionFootstepSounds ?? false) +
@@ -1566,12 +1660,145 @@ namespace BaroWardrobeSwitcher
             panelKeySetting = setting;
         }
 
+        internal static void SetHideHuskVisualsSetting(
+            ISettingBase<bool> setting,
+            IConfigService service)
+        {
+            if (hideHuskVisualsSetting != null)
+            {
+                hideHuskVisualsSetting.OnValueChanged -= OnHideHuskVisualsChanged;
+            }
+            hideHuskVisualsSetting = setting;
+            configService = service;
+            hideHuskVisualsFallback = setting?.Value ?? false;
+            if (hideHuskVisualsSetting != null)
+            {
+                hideHuskVisualsSetting.OnValueChanged += OnHideHuskVisualsChanged;
+            }
+            ForceUpdateCharacterVisuals();
+        }
+
         public static string GetPanelKeyName()
         {
             string value = panelKeySetting?.Value;
             return !string.IsNullOrWhiteSpace(value) &&
                 Enum.TryParse(value.Trim(), ignoreCase: true, out Microsoft.Xna.Framework.Input.Keys key) && Enum.IsDefined(key)
                 ? key.ToString() : DefaultPanelKeyName;
+        }
+
+        public static bool GetHideHuskVisuals()
+        {
+            return hideHuskVisualsSetting?.Value ?? hideHuskVisualsFallback;
+        }
+
+        public static bool SetHideHuskVisuals(bool enabled)
+        {
+            if (enabled && !HasCapability("huskVisual")) { return false; }
+            if (hideHuskVisualsSetting != null)
+            {
+                if (!hideHuskVisualsSetting.TrySetValue(enabled)) { return false; }
+                if (!SaveBooleanSetting(hideHuskVisualsSetting))
+                {
+                    LuaCsLogger.Log("[Baro Wardrobe Switcher] Failed to persist HideHuskVisuals.");
+                    return false;
+                }
+            }
+            hideHuskVisualsFallback = enabled;
+            ForceUpdateCharacterVisuals();
+            return true;
+        }
+
+        internal static void SetUnequipOnSaveSetting(
+            ISettingBase<bool> setting,
+            IConfigService service)
+        {
+            unequipOnSaveSetting = setting;
+            configService = service;
+            unequipOnSaveFallback = setting?.Value ?? true;
+        }
+
+        public static bool GetUnequipOnSave()
+        {
+            return unequipOnSaveSetting?.Value ?? unequipOnSaveFallback;
+        }
+
+        public static bool SetUnequipOnSave(bool enabled)
+        {
+            if (unequipOnSaveSetting != null)
+            {
+                if (!unequipOnSaveSetting.TrySetValue(enabled)) { return false; }
+                if (!SaveBooleanSetting(unequipOnSaveSetting))
+                {
+                    LuaCsLogger.Log("[Baro Wardrobe Switcher] Failed to persist UnequipOnSave.");
+                    return false;
+                }
+            }
+            unequipOnSaveFallback = enabled;
+            return true;
+        }
+
+        internal static void SetOverrideGeneSplicerAppearanceSetting(
+            ISettingBase<bool> setting,
+            IConfigService service)
+        {
+            overrideGeneSplicerAppearanceSetting = setting;
+            configService = service;
+            overrideGeneSplicerAppearanceFallback = setting?.Value ?? false;
+        }
+
+        public static bool GetOverrideGeneSplicerAppearance()
+        {
+            return overrideGeneSplicerAppearanceSetting?.Value ?? overrideGeneSplicerAppearanceFallback;
+        }
+
+        public static bool SetOverrideGeneSplicerAppearance(bool enabled)
+        {
+            if (overrideGeneSplicerAppearanceSetting != null)
+            {
+                if (!overrideGeneSplicerAppearanceSetting.TrySetValue(enabled)) { return false; }
+                if (!SaveBooleanSetting(overrideGeneSplicerAppearanceSetting))
+                {
+                    LuaCsLogger.Log("[Baro Wardrobe Switcher] Failed to persist OverrideGeneSplicerAppearance.");
+                    return false;
+                }
+            }
+            overrideGeneSplicerAppearanceFallback = enabled;
+            return true;
+        }
+
+        private static bool SaveBooleanSetting(ISettingBase<bool> setting)
+        {
+            if (configService == null || setting == null) { return true; }
+            try
+            {
+                MethodInfo saveMethod = AccessTools.Method(
+                    configService.GetType(),
+                    "SaveConfigValue",
+                    new[] { typeof(ISettingBase) });
+                object result = saveMethod?.Invoke(configService, new object[] { setting });
+                PropertyInfo isFailed = result == null
+                    ? null
+                    : AccessTools.Property(result.GetType(), "IsFailed");
+                return result != null && !(isFailed?.GetValue(result) is bool failed && failed);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static void OnHideHuskVisualsChanged(ISettingBase setting)
+        {
+            hideHuskVisualsFallback = hideHuskVisualsSetting?.Value ?? false;
+            ForceUpdateCharacterVisuals();
+        }
+
+        private static void ForceUpdateCharacterVisuals()
+        {
+            foreach (Character character in Character.CharacterList)
+            {
+                try { character?.CharacterHealth?.ForceUpdateVisuals(); } catch { }
+            }
         }
 
         public static void ClearCharacter(Character character, bool diving = false)
@@ -2417,6 +2644,100 @@ namespace BaroWardrobeSwitcher
                 Path.GetFileName(spritePath),
                 Xds01AppendageTexture,
                 StringComparison.OrdinalIgnoreCase);
+        }
+
+        internal static bool ShouldSuppressAfflictionAppendage(Limb limb)
+        {
+            if (limb?.character?.CharacterHealth == null || HuskAppendageField == null)
+            {
+                return false;
+            }
+            bool hideHuskAppearance = GetHideHuskVisuals();
+            bool hideTouhouWings =
+                ActiveRenderSessions.TryGetValue(limb.character, out RenderSession session) &&
+                session.IsActive &&
+                session.IsValid;
+            if (!hideHuskAppearance && !hideTouhouWings) { return false; }
+
+            foreach (Affliction affliction in limb.character.CharacterHealth.GetAllAfflictions())
+            {
+                if (!(affliction is AfflictionHusk)) { continue; }
+                bool suppressAppendage =
+                    (hideHuskAppearance && IsHuskAppearanceAffliction(affliction)) ||
+                    (hideTouhouWings && TouhouWingAfflictionIdentifiers.Contains(affliction.Identifier));
+                if (!suppressAppendage ||
+                    !(HuskAppendageField.GetValue(affliction) is IEnumerable appendages))
+                {
+                    continue;
+                }
+                foreach (object appendage in appendages)
+                {
+                    if (ReferenceEquals(appendage, limb)) { return true; }
+                }
+            }
+            return false;
+        }
+
+        internal static WearableSprite BeginHuskSpriteSuppression(Limb limb)
+        {
+            if (!GetHideHuskVisuals() || limb == null || HuskSpriteField == null ||
+                !HasHuskAppearanceAffliction(limb.character))
+            {
+                return null;
+            }
+            try
+            {
+                WearableSprite huskSprite = HuskSpriteField.GetValue(limb) as WearableSprite;
+                if (huskSprite != null) { HuskSpriteField.SetValue(limb, null); }
+                return huskSprite;
+            }
+            catch (Exception ex)
+            {
+                LogVirtualDrawError("Failed to hide husk sprite: " + ex.GetType().Name + ": " + ex.Message);
+                return null;
+            }
+        }
+
+        internal static Exception EndHuskSpriteSuppression(
+            Limb limb,
+            WearableSprite huskSprite,
+            Exception exception)
+        {
+            if (limb == null || huskSprite == null || HuskSpriteField == null) { return exception; }
+            try
+            {
+                HuskSpriteField.SetValue(limb, huskSprite);
+            }
+            catch (Exception ex)
+            {
+                LogVirtualDrawError("Failed to restore husk sprite: " + ex.GetType().Name + ": " + ex.Message);
+                return exception ?? ex;
+            }
+            return exception;
+        }
+
+        internal static void SuppressHuskTint(Affliction affliction, ref Color result)
+        {
+            if (GetHideHuskVisuals() && IsHuskAppearanceAffliction(affliction))
+            {
+                result = Color.TransparentBlack;
+            }
+        }
+
+        private static bool HasHuskAppearanceAffliction(Character character)
+        {
+            if (character?.CharacterHealth == null) { return false; }
+            foreach (Affliction affliction in character.CharacterHealth.GetAllAfflictions())
+            {
+                if (IsHuskAppearanceAffliction(affliction)) { return true; }
+            }
+            return false;
+        }
+
+        private static bool IsHuskAppearanceAffliction(Affliction affliction)
+        {
+            return affliction is AfflictionHusk &&
+                   HuskAppearanceAfflictionIdentifiers.Contains(affliction.Identifier);
         }
 
         internal static Exception EndLimbDraw(Limb limb, LimbRenderTransaction transaction, Exception exception = null)
@@ -4064,14 +4385,22 @@ namespace BaroWardrobeSwitcher
 
     internal static class LimbDrawPatch
     {
-        private static bool Prefix(Limb __instance, out VisualOverride.LimbRenderTransaction __state)
+        internal struct State
         {
-            __state = null;
-            if (VisualOverride.ShouldSuppressEquipmentAppendage(__instance))
+            public VisualOverride.LimbRenderTransaction FashionTransaction;
+            public WearableSprite HuskSprite;
+        }
+
+        private static bool Prefix(Limb __instance, out State __state)
+        {
+            __state = default;
+            if (VisualOverride.ShouldSuppressAfflictionAppendage(__instance) ||
+                VisualOverride.ShouldSuppressEquipmentAppendage(__instance))
             {
                 return false;
             }
-            __state = VisualOverride.BeginLimbDraw(__instance);
+            __state.HuskSprite = VisualOverride.BeginHuskSpriteSuppression(__instance);
+            __state.FashionTransaction = VisualOverride.BeginLimbDraw(__instance);
             return true;
         }
 
@@ -4081,17 +4410,44 @@ namespace BaroWardrobeSwitcher
             Camera cam,
             Color? overrideColor,
             bool disableDeformations,
-            VisualOverride.LimbRenderTransaction __state)
+            State __state)
         {
-            VisualOverride.DrawMissingFashionSprites(__instance, __state, spriteBatch, overrideColor);
+            VisualOverride.DrawMissingFashionSprites(
+                __instance,
+                __state.FashionTransaction,
+                spriteBatch,
+                overrideColor);
         }
 
         private static Exception Finalizer(
             Limb __instance,
             Exception __exception,
-            VisualOverride.LimbRenderTransaction __state)
+            State __state)
         {
-            return VisualOverride.EndLimbDraw(__instance, __state, __exception);
+            Exception exception = VisualOverride.EndLimbDraw(
+                __instance,
+                __state.FashionTransaction,
+                __exception);
+            return VisualOverride.EndHuskSpriteSuppression(
+                __instance,
+                __state.HuskSprite,
+                exception);
+        }
+    }
+
+    internal static class AfflictionBodyTintPatch
+    {
+        private static void Postfix(Affliction __instance, ref Color __result)
+        {
+            VisualOverride.SuppressHuskTint(__instance, ref __result);
+        }
+    }
+
+    internal static class AfflictionFaceTintPatch
+    {
+        private static void Postfix(Affliction __instance, ref Color __result)
+        {
+            VisualOverride.SuppressHuskTint(__instance, ref __result);
         }
     }
 

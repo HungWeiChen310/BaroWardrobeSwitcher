@@ -1,6 +1,6 @@
 # Compatibility contract
 
-## 0.5.19 release candidate
+## 0.5.22 release candidate
 
 | Input | Pinned value |
 | --- | --- |
@@ -46,16 +46,18 @@ The standalone probe accepts `--version-file <path>`; without it, it reads `vers
 
 | Peers | Behavior |
 | --- | --- |
-| 0.5.19 client and server | Protocol 5, look schema 4, normal and diving appearance synchronization. |
-| 0.5.19 client and older protocol-5 server | Existing normal synchronization; diving stays local because capability `0x10` is absent. |
-| Older protocol-5 client and 0.5.19 server | Existing normal appearance; no diving-state messages are sent to this client. |
+| 0.5.22 client and server | Protocol 5, look schema 4, normal and diving appearance synchronization. |
+| 0.5.22 client and older protocol-5 server | Existing normal synchronization; capability `0x10` servers retain bot diving profiles, while player diving stays local without `0x40`. |
+| Older protocol-5 client and 0.5.22 server | Existing normal appearance and legacy crew-diving profiles; no new diving-appearance messages are sent to this client. |
 | Different protocol versions or v1-only peer | Existing six-message v1 bridge; hello timeout is five seconds. Custom colors and newer preferences cannot synchronize over v1. |
 
-Capability bits are attachment visibility `0x01`, movement source `0x02`, crew targeting `0x04`, footstep source `0x08`, and diving appearance `0x10`. Client hello optionally appends `0x57, 1, capabilities`; absent tails remain valid. Existing normal command/state layouts are unchanged.
+Capability bits are attachment visibility `0x01`, movement source `0x02`, crew targeting `0x04`, footstep source `0x08`, crew diving profiles `0x10`, save-without-unequip `0x20`, and acknowledged diving appearance `0x40`. The merged candidate reserves the existing `0x10` value for the remote main branch's older format. Client hello optionally appends `0x57, 1, capabilities`; absent tails remain valid. Existing normal command/state layouts are unchanged.
 
-The new `diving` and `diving-save` commands use the current operation queue, base revision, ACK, dedupe, and limits. Their mode byte precedes `hasLook` and follows the target ID on the targeted channel. Save carries no client look: the server captures actual equipment/colors without moving items. Settings validate captured state, identifiers, colors, and wearable-slot relationships, with the six-slot / 4 KiB limits.
+The new `diving` and `diving-save` commands use the current operation queue, base revision, ACK, dedupe, and limits. Their mode byte precedes `hasLook` and follows the target ID on the targeted channel. `diving-save` adds an `includeHealthInterface` boolean after the mode, capturing that optional slot only when requested. Save carries no client look: the server captures actual equipment/colors without moving items. Settings validate captured state, identifiers, colors, and wearable-slot relationships, with the six-slot / 4 KiB limits.
 
-`barowardrobeswitcher.v2.diving-state` carries protocol, server epoch, round generation, per-character revision, character ID, operation ID, mode, and optional look. Character ID zero marks a snapshot generation. Clients bound entity waits, reject older generations/revisions, and complete commands only after both state and ACK arrive. Snapshots follow hello and round changes; pressure changes generate no Wardrobe messages. Normal Clear/Forget are independent from diving settings.
+`barowardrobeswitcher.v2.diving-appearance` carries protocol, server epoch, round generation, per-character revision, character ID, operation ID, mode, and optional look. Character ID zero marks a snapshot generation. Clients bound entity waits, reject older generations/revisions, and complete commands only after both state and ACK arrive. Snapshots follow hello and round changes; pressure changes generate no Wardrobe messages. Normal Clear/Forget are independent from diving settings.
+
+The legacy `barowardrobeswitcher.v2.diving-command` / `diving-state` messages keep their original crew-profile layout. New clients negotiate `0x40` and ignore legacy state while using the acknowledged channel; the server sends each client the matching format. Both paths update the same independent host crew profile. Player diving settings remain client-persisted, while crew settings restore from the host by campaign and crew identity.
 
 ## Release gates
 

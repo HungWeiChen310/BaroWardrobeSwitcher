@@ -1,6 +1,6 @@
 # Release test matrix
 
-This checklist is the release gate for v0.5.19 on Barotrauma 1.13.4.0. The version remains a release candidate. Automated results below do not substitute for the in-game, Linux dedicated-server, Workshop, or performance matrix.
+This checklist is the release gate for v0.5.22 on Barotrauma 1.13.4.0. The version remains a release candidate. Automated results below do not substitute for the in-game, Linux dedicated-server, Workshop, or performance matrix.
 
 ## Candidate validation record (2026-09-08)
 
@@ -12,9 +12,11 @@ This checklist is the release gate for v0.5.19 on Barotrauma 1.13.4.0. The versi
 | Native Lua 5.4 CI runner | Not installed locally or in the available WSL distribution; execution remains a CI check. Test phases use separate scopes to avoid accumulating locals across independent scenarios. |
 | Persistence probe | Migrations, atomic failures, normal/diving cache reuse, external updates, transient read recovery, bounded logging, and headless dual-session lifecycle passed. |
 | Renderer contracts | Native masks/cache restoration, ownership, exception finalizers, typed hot-path delegates, and cached footstep candidates passed static checks. |
-| Source package | Versions aligned to 0.5.19; candidate verification passes. `--release` must remain blocked by candidate status. |
+| Source package | Versions aligned to 0.5.22; candidate verification passes. `--release` must remain blocked by candidate status. |
 | Actual CPU / allocations / FPS | Not measured in game. No improvement percentage is claimed. |
 | Full game / multi-process / Workshop matrix | Pending; all scenarios below remain release requirements. |
+
+The merge with remote main preserves host crew persistence, SaveKeep, gene-splicer capture, and husk-appearance settings. Its legacy diving capability/channel are separated from the acknowledged diving codec; version 0.5.22 supersedes the remote package's 0.5.21.
 
 Behavioral tests additionally cover punctuation/Unicode/color dedupe, pre-native equipment bursts, 100 warm pressure switches with zero captures/writes/packets, suit-color-only invalidation, saved-empty versus unsaved custom outfits, missing-prefab retry limits, deferred GUI rebuilding and scroll restoration, authoritative diving capture without item movement, ACK/state ordering, duplicate/stale states, late entities, bot ownership, operation-limit recovery, and timeout recovery without replaying Save.
 
@@ -49,20 +51,20 @@ Expected:
 
 Run single-player, Windows host, and Linux dedicated server with at least two clients.
 
-- v0.5.19 client ↔ v0.5.19 server negotiates protocol 5 and capability `0x10`; both players see diving appearances.
-- v0.5.19 client ↔ older protocol-5 server keeps normal synchronization and local diving effects. Older protocol-5 clients receive no diving-state packets from the new server.
+- v0.5.22 client ↔ v0.5.22 server negotiates protocol 5 and capability `0x40`; both players see diving appearances.
+- v0.5.22 client ↔ older protocol-5 server keeps normal synchronization and local diving effects. Servers with `0x10` retain legacy bot diving profiles. Older protocol-5 clients receive only the legacy crew format, never new diving-appearance packets.
 - A peer with a different protocol version falls back through the six v1 message names; a missing hello response falls back after five seconds. V1 uses prefab base colors.
 - Duplicate operation IDs return the original result without applying twice.
 - Out-of-order state is ignored; clear/forget followed by a late stale apply stays cleared.
 - Join, reconnect, round start/end, death/respawn, character replacement, and campaign/server changes preserve the documented intent.
 - In `Settings -> Mod Gameplay Settings`, change `Wardrobe Panel Key` from `F8` to `F7`, apply the settings, and begin a round. The notice and tutorial show `F7`; `F7` opens and closes the panel while `F8` no longer does. An invalid key name falls back to `F8` in both input and text.
-- Open the wardrobe panel at minimum supported UI scale. The scrollable main page contains Save/Apply/Clear, appearance layers, transfer, Forget, and `Next Page`; movement animation, footstep source, and diagnostics appear only on the scrollable second page, whose Back button returns to the main page without leaving an old overlay active. Next/Back/Close must remain reachable after expanding the guide or diagnostics.
+- Open the wardrobe panel at minimum supported UI scale. The scrollable main page contains Save/Apply/Clear, appearance layers, transfer, Forget, and `Next Page`; movement animation, footstep source, `Unequip on Save: On`, `Hide Husk Appearance: No`, and diagnostics appear only on the scrollable second page, whose Back button returns to the main page without leaving an old overlay active. Toggle save unequipping off, save in single-player and multiplayer, and verify the look is stored while every real item stays worn; turn it back on and verify the existing authoritative removal behavior returns. Restart once and verify the choice persists. Enable husk hiding on a `huskinfection` or `husksymbiosis` character and verify the skin tint, husk overlay, and appendages disappear while gameplay remains active; genetic `AfflictionHusk` visuals must remain visible. With Eastern Abyss (`2941124988`) enabled, applying a saved look hides its wings but not its tails or ears, independently of the husk toggle. Disable husk hiding and verify the actual husk visuals return. Next/Back/Close must remain reachable after expanding the guide or diagnostics.
 - Cycle `Diving mode` through all three values. Custom mode must show `Save Diving Outfit` and the mode control side by side; saving must not unequip, move, or drop any item.
-- On a current multiplayer server, select targets directly from the native dropdown. Save/Apply target the selected friendly living human bot, the selector is disabled while any command is pending, and another client cannot steal normal or diving ownership. On an older server without crew capability, the selector remains self-only.
+- On a current multiplayer server, select targets directly from the native dropdown. Save/Apply target the selected friendly living human bot, the selector is disabled while any command is pending, host-owned normal crew looks remain independently editable, and another client cannot steal an active diving target. On an older server without crew capability, the selector remains self-only.
 - Save/custom-clear/change diving mode for both players and a bot. Repeat ACK-before-state, state-before-ACK, duplicate commands, lost ACK, lost state, late join, reconnect, server restart, and round replacement. Old epochs/generations/revisions must never resurrect a cleared setting. Normal Clear/Forget must not erase diving settings.
 - After 512 operations, finish pending commands and verify an idle transport renews. A timed-out Save/Forget must not be replayed by automatic renewal or manual resynchronization. Rejection and timeout must release every mutation button consistently.
 - Stop/remove a character without a removal hook; within the owned-character sweep no old renderer, pending message, or bot setting may transfer to a reused entity ID.
-- Apply a look to a multiplayer bot, then reconnect and start the next round. The saved look remains available to its owner but is not automatically rebound to the owner's player character or any replacement bot.
+- Apply different looks to two multiplayer bots, switch back to the player and between both bots, reconnect, start the next round, and restart the same campaign. All three appearances remain independent; the AI looks restore from the host/server `ServerCrewLooks.json` and never replace the player's look.
 - Apply a look to the local multiplayer player, then end the round after `Character.Controlled` has cleared. The next round restores the look to the replacement player entity even when the same session key becomes available shortly after `roundStart`; a genuinely different campaign key must not restore it.
 - After the first successful local-player Apply, confirm `ServerLooks.json` and `WardrobeServer.log` exist under `Barotrauma/ModData/BaroWardrobeSwitcher`; the server console must not report `storage_unavailable` or `Path: nil`. Repeat on a P2P host whose `Client.AccountId` is unavailable and confirm the record uses the stable `steam:<SteamID>` fallback.
 - Fully close the P2P or dedicated server, restart it into the lobby, load the same campaign save, and reconnect. The active local-player look restores after the durable campaign key becomes available; loading a different campaign does not restore that look.
@@ -100,6 +102,7 @@ Use a campaign with at least the player and two controllable human NPC crew memb
 - Keep another inventory item with the same prefab but a different color. Applying the saved look must use the exact entity only when entity ID, identifier, and color all match; otherwise it must use the saved colored prefab fallback.
 - Load migrated client/server/profile documents from before color persistence. They must use prefab base colors, not opaque white.
 - Full inventory and partial unequip failure do not duplicate or destroy items.
+- Put any prefab in `HealthInterface`, including an item other than either gene splicer. Save/Apply/Clear/Forget must never capture, unequip, drop, hide, or visually replace that item, even when it also reports another wearable slot.
 - Each appearance layer cycles `Auto -> Hide -> Show`, previews immediately, and survives scene changes, restart, single-player profile transfer, and multiplayer synchronization.
 - With [EuropaWaifu 2](https://steamcommunity.com/sharedfiles/filedetails/?id=2948283083), apply a look whose XML does not hide Hair, then equip `cultistrobes` (Cultist Robes) and `zealotrobes` (Zealot Robes). Hair remains visible in `Auto` and `Show`; `Hide` still hides it. Clear the look and confirm both robes return to their native hair-hiding behavior.
 - With [[R18+]异种♥木卫二](https://steamcommunity.com/sharedfiles/filedetails/?id=3156077899), save and apply `divingsuit`, `abyssdivingsuit`, `combatdivingsuit`, and `respawndivingsuit`. Each `Hide LeftBreast` sprite must affect only the custom `LeftBoobs` limb (ID 17), with no duplicate or misplaced suit piece and no hidden appendage on another `LimbType.None` limb; clearing the look restores native rendering.
@@ -109,6 +112,7 @@ Use a campaign with at least the player and two controllable human NPC crew memb
 - Real equipment keeps stats, protection, oxygen, buffs, inventory, and health-interface behavior.
 - With `Diving suit only`, enter pressure while wearing a `deepdiving` or `deepdivinglarge` item plus ordinary clothing. Only the suit is rendered; leaving pressure restores the prior wardrobe appearance. Repeat with `Custom outfit`, both with and without a saved diving outfit, and verify the no-save case makes no visual change.
 - Change or clear the normal wardrobe look while diving, then leave pressure: the latest normal state must return. Repeat with saved-empty diving outfits, separate custom clear, failed profile writes, and local-only fallback. Cosmetic loops/appendages must not remain active after the session switch.
+- In multiplayer, give two bots different diving modes/custom outfits, then change rounds and reload the same campaign. Confirm the host's `ServerCrewLooks.json` retains both the mode and custom slot/color payload, and every connected client restores the same per-bot result without changing players' local diving profiles.
 - With a visual look active, equip and remove a real diving suit before and after wardrobe synchronization on both the owning client and an observer. Body limbs remain visible and the suit appearance remains stable.
 - Fashion animation and looping/one-shot/silent sound replacement matches v0.4 behavior when optional capabilities are available.
 - On page two, `Footstep Sounds: Follow Equipment` keeps the game's native ground-impact sounds from real equipped wearables. Switching it to `Follow Fashion` uses only matching-limb sounds from the applied fashion descriptors; switching back restores equipment sounds immediately. Verify the local player and selected bots in single-player, multiplayer owner/observer, late join, and reconnect. The option must persist independently per look and must not send a separate sound/network event for each step.

@@ -282,6 +282,10 @@ assertEqual(hello.capabilities, Core.CAPABILITY.AttachmentVisibility)
 assert(Core.CAPABILITY.CrewTargeting == 0x04, "crew targeting capability changed unexpectedly")
 assert(Core.CAPABILITY.FootstepSoundSource == 0x08,
     "footstep sound-source capability changed unexpectedly")
+assert(Core.CAPABILITY.CrewDivingProfiles == 0x10,
+    "crew diving-profile capability changed unexpectedly")
+assert(Core.CAPABILITY.SaveWithoutUnequip == 0x20,
+    "save-without-unequip capability changed unexpectedly")
 local oldHelloBuffer = newBuffer()
 oldHelloBuffer.WriteUInt16(Core.PROTOCOL_VERSION)
 oldHelloBuffer.WriteUInt32(8)
@@ -309,6 +313,20 @@ local decodedCommand = assert(Core.readCommand(commandBuffer))
 assertEqual(decodedCommand.operationId, command.operationId)
 assertEqual(decodedCommand.baseRevision, 3)
 assert(Core.lookEquals(decodedCommand.look, look))
+
+local saveKeepBuffer = newBuffer()
+assert(Core.writeCommand(saveKeepBuffer, {
+    clientSessionId = "session-1",
+    operationId = "session-1:save-keep",
+    baseRevision = 3,
+    kind = Core.COMMAND.SaveKeep,
+    look = look
+}))
+saveKeepBuffer.FinalizeForTransport()
+local saveKeepCommand = assert(Core.readCommand(saveKeepBuffer))
+assertEqual(saveKeepCommand.kind, Core.COMMAND.SaveKeep)
+assert(Core.lookEquals(saveKeepCommand.look, look),
+    "save-without-unequip command lost its look payload")
 
 local targetCommand = {
     clientSessionId = "session-1",
@@ -1437,6 +1455,8 @@ assertEqual(v1Forget.getState().phase, Core.PHASE.Idle)
 assertEqual(v1Forget.getViewModel().hasSavedLook, false)
 
 do
+    assert(Core.CAPABILITY.DivingAppearance ~= Core.CAPABILITY.CrewDivingProfiles)
+    assert(Core.NET.V2_DIVING_STATE ~= Core.NET.V2_DIVING_PROFILE_STATE)
     local keys = {}
     for _, id in ipairs({ "hat-a", "hat_a", "帽子", "帽_子", "帽-子" }) do
         local key = Core.appearanceKey(id, 123)
@@ -1486,13 +1506,14 @@ do
     for _, kind in ipairs({ Core.COMMAND.Diving, Core.COMMAND.DivingSave }) do
         for _, targeted in ipairs({ false, true }) do
             local command = { clientSessionId = "client", operationId = "diving", baseRevision = 2,
-                kind = kind, divingMode = 2, targetCharacterId = targeted and 14 or nil,
+                kind = kind, divingMode = 2, includeHealthInterface = kind == Core.COMMAND.DivingSave, targetCharacterId = targeted and 14 or nil,
                 look = kind == Core.COMMAND.Diving and emptyLook or nil }
             local buffer = newBuffer()
             assert((targeted and Core.writeTargetCommand or Core.writeCommand)(buffer, command))
             buffer.FinalizeForTransport()
             local decoded = assert((targeted and Core.readTargetCommand or Core.readCommand)(buffer))
             assertEqual(decoded.divingMode, 2)
+            assertEqual(decoded.includeHealthInterface, kind == Core.COMMAND.DivingSave)
             assertEqual(decoded.kind, kind)
             assertEqual(decoded.targetCharacterId, command.targetCharacterId)
         end
@@ -1501,6 +1522,21 @@ do
     assert(Core.writeDivingState(newBuffer(), { serverSessionId = "a", generation = 0, revision = 0, characterId = 0, mode = 2 }) == false)
     local oversized = newBuffer(); oversized.LengthBytes = Core.LIMITS.MAX_PAYLOAD_BYTES + 1
     assert(Core.tryReadDivingState(oversized) == nil)
+end
+do
+local divingBuffer = newBuffer()
+assert(Core.writeDivingProfile(divingBuffer, {
+    characterId = 42,
+    mode = 2,
+    captured = true,
+    look = look
+}))
+local divingProfile = assert(Core.tryReadDivingProfile(divingBuffer))
+assertEqual(divingProfile.characterId, 42)
+assertEqual(divingProfile.mode, 2)
+assertEqual(divingProfile.captured, true)
+assert(Core.lookEquals(divingProfile.look, look))
+assert(Core.validateDivingProfile({ characterId = 42, mode = 3, captured = false }) == nil)
 end
 
 print("WardrobeCore tests passed")

@@ -166,10 +166,6 @@ namespace BaroWardrobeSwitcher
                     ownedSprite.HideWearablesOfType = new List<WearableType>();
                     ownedSprite.ObscureOtherWearables = WearableSprite.ObscuringMode.None;
                     ownedSprite.CanBeHiddenByOtherWearables = false;
-                    if (IsHeadVisual(ownedSprite, source.WearableComponent.AllowedSlots))
-                    {
-                        ownedSprite.HideLimb = false;
-                    }
                 }
 
                 descriptor = new FashionSpriteDescriptor(
@@ -208,13 +204,6 @@ namespace BaroWardrobeSwitcher
                 // Cleanup is best effort and must not prevent other descriptors from
                 // releasing their resources.
             }
-        }
-
-        private static bool IsHeadVisual(WearableSprite sprite, IEnumerable<InvSlotType> slots)
-        {
-            return sprite?.Limb == LimbType.Head ||
-                   (slots?.Contains(InvSlotType.Head) ?? false) ||
-                   (slots?.Contains(InvSlotType.Headset) ?? false);
         }
 
         private static Sprite CloneResolvedSprite(Sprite source)

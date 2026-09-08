@@ -9,7 +9,7 @@
   <barowardrobeswitcher.panel.main_page>Main</barowardrobeswitcher.panel.main_page>
   <barowardrobeswitcher.panel.tools_page>Options &amp; Diagnostics</barowardrobeswitcher.panel.tools_page>
   <barowardrobeswitcher.panel.target_character>Wardrobe target</barowardrobeswitcher.panel.target_character>
-  <barowardrobeswitcher.panel.multiplayer_shared_look>Multiplayer uses one saved look per player; this selects who the actions affect.</barowardrobeswitcher.panel.multiplayer_shared_look>
+  <barowardrobeswitcher.panel.multiplayer_shared_look>Each crew member has an independent saved look.</barowardrobeswitcher.panel.multiplayer_shared_look>
   <barowardrobeswitcher.panel.saved_look>Saved look</barowardrobeswitcher.panel.saved_look>
   <barowardrobeswitcher.panel.look>Look</barowardrobeswitcher.panel.look>
   <barowardrobeswitcher.panel.active>active</barowardrobeswitcher.panel.active>
@@ -40,6 +40,12 @@
   <barowardrobeswitcher.button.animation_equipment>Movement: Equipped Gear</barowardrobeswitcher.button.animation_equipment>
   <barowardrobeswitcher.button.footstep_fashion>Footstep Sounds: Follow Fashion</barowardrobeswitcher.button.footstep_fashion>
   <barowardrobeswitcher.button.footstep_equipment>Footstep Sounds: Follow Equipment</barowardrobeswitcher.button.footstep_equipment>
+  <barowardrobeswitcher.button.hide_husk_yes>Hide Husk Appearance: Yes</barowardrobeswitcher.button.hide_husk_yes>
+  <barowardrobeswitcher.button.hide_husk_no>Hide Husk Appearance: No</barowardrobeswitcher.button.hide_husk_no>
+  <barowardrobeswitcher.button.unequip_on_save_yes>Unequip on Save: On</barowardrobeswitcher.button.unequip_on_save_yes>
+  <barowardrobeswitcher.button.unequip_on_save_no>Unequip on Save: Off</barowardrobeswitcher.button.unequip_on_save_no>
+  <barowardrobeswitcher.button.override_gene_splicer_yes>Override Gene Splicer Appearance: Yes</barowardrobeswitcher.button.override_gene_splicer_yes>
+  <barowardrobeswitcher.button.override_gene_splicer_no>Override Gene Splicer Appearance: No</barowardrobeswitcher.button.override_gene_splicer_no>
   <barowardrobeswitcher.button.hide_standard_hair>Hide Standard Hair</barowardrobeswitcher.button.hide_standard_hair>
   <barowardrobeswitcher.button.all_auto>All Auto</barowardrobeswitcher.button.all_auto>
   <barowardrobeswitcher.button.back>Back</barowardrobeswitcher.button.back>
@@ -75,7 +81,9 @@
   <barowardrobeswitcher.status.empty>Empty</barowardrobeswitcher.status.empty>
   <barowardrobeswitcher.status.already_handled>Already handled</barowardrobeswitcher.status.already_handled>
   <barowardrobeswitcher.status.server_removal_requested>Saved; server removal requested</barowardrobeswitcher.status.server_removal_requested>
+  <barowardrobeswitcher.status.server_keep_requested>Saved; server keep requested</barowardrobeswitcher.status.server_keep_requested>
   <barowardrobeswitcher.status.saved_removed>Saved and removed</barowardrobeswitcher.status.saved_removed>
+  <barowardrobeswitcher.status.saved_kept_equipped>Saved; kept equipped</barowardrobeswitcher.status.saved_kept_equipped>
   <barowardrobeswitcher.status.synced_server>Synced from server</barowardrobeswitcher.status.synced_server>
   <barowardrobeswitcher.status.saved_applied_sync>Saved look applied from multiplayer sync.</barowardrobeswitcher.status.saved_applied_sync>
   <barowardrobeswitcher.status.auto_applied>Saved look auto-applied.</barowardrobeswitcher.status.auto_applied>

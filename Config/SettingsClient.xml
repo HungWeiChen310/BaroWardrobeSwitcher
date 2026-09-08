@@ -3,5 +3,8 @@
   <Settings>
     <Setting Name="PanelKey" Type="string" Value="F8" />
     <Setting Name="DetailedLogging" Type="bool" Value="false" />
+    <Setting Name="HideHuskVisuals" Type="bool" Value="false" ShowInMenus="false" />
+    <Setting Name="UnequipOnSave" Type="bool" Value="true" ShowInMenus="false" />
+    <Setting Name="OverrideGeneSplicerAppearance" Type="bool" Value="false" ShowInMenus="false" />
   </Settings>
 </Configuration>
